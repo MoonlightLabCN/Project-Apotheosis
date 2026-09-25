@@ -17,6 +17,10 @@ param(
     [string]$IcuRoot = 'C:\icu-arm-uwp',
     [ValidateSet('Official', 'Fallback')]
     [string]$XamlMode = 'Fallback',
+    # Apotheosis (M4): package an A/B engine tree + its driver without touching the baseline
+    # (defaults: <root>\build-clang-gpu and <root>\port, see Harness.vcxproj).
+    [string]$EngineBuildDir = '',
+    [string]$DriverDir = '',
     [switch]$Clean
 )
 
@@ -51,6 +55,8 @@ $commonArgs = @(
     "/p:ApotheosisVcpkgRoot=$VcpkgRoot",
     "/p:ApotheosisIcuRoot=$IcuRoot"
 )
+if ($EngineBuildDir) { $commonArgs += "/p:ApotheosisEngineBuildDir=$EngineBuildDir" }
+if ($DriverDir) { $commonArgs += "/p:ApotheosisDriverDir=$DriverDir" }
 Write-Host "=== Harness: XAML=$XamlMode, SDK=$SdkVersion, MSVC=$VCToolsVersion, Platform=ARM (ARM32) ===" -ForegroundColor Cyan
 
 if ($Clean) {
@@ -79,6 +85,10 @@ if ($XamlMode -eq 'Official') {
         '/p:ApotheosisXamlCodegen=true',
         '/p:IntDir=Harness\ARM\XamlCodegen\'
     )
+    # BuildCompile also links, so this pass needs the same engine/driver trees as the v143 pass;
+    # otherwise it falls back to <root>\build-clang-gpu and fails with LNK1181 WebCore.lib.
+    if ($EngineBuildDir) { $xamlArgs += "/p:ApotheosisEngineBuildDir=$EngineBuildDir" }
+    if ($DriverDir) { $xamlArgs += "/p:ApotheosisDriverDir=$DriverDir" }
     Write-Host "=== [1/2] Official XAML codegen: VS2017 + SDK $XamlSdkVersion ===" -ForegroundColor Cyan
     & $msbuild2017 @xamlArgs /t:Clean /v:minimal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

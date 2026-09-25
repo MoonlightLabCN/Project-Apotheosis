@@ -6,7 +6,7 @@ $P = 'E:\Apotheosis\port'
 
 # --- 1. 编全部 port .cpp(串行,compile-driver 用固定临时文件)---
 $srcs = @(
-  'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PublicSuffixStorePort','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle',
+  'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PortNetworkStorageSession','PortWebSocket','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle',
   'webcore-driver-stubs','stubs-crypto','stubs-pasteboard','stubs-network','stubs-ax','stubs-other','stubs-loader'
 )
 foreach ($s in $srcs) {

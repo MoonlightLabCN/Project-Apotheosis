@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $P = 'E:\Apotheosis\port'
 
 $srcs = @(
-  'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PortNetworkStorageSession','PublicSuffixStorePort','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle',
+  'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PortNetworkStorageSession','PortWebSocket','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle',
   'webcore-driver-stubs','stubs-crypto','stubs-pasteboard','stubs-network','stubs-ax','stubs-other','stubs-loader'
 )
 foreach ($s in $srcs) {
