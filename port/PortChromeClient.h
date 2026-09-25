@@ -78,7 +78,21 @@ public:
     void focusedElementChanged(WebCore::Element*, WebCore::LocalFrame*, WebCore::FocusOptions, WebCore::BroadcastFocusedElement) final { }
     void focusedFrameChanged(WebCore::Frame*) final { }
 
-    RefPtr<WebCore::Page> createWindow(WebCore::LocalFrame&, const String&, const WebCore::WindowFeatures&, const WebCore::NavigationAction&) final { return nullptr; }
+    // window.open()。0.2.0:不再是彻底的无操作 —— 把目标 URL 交给壳,壳新建一个标签并切过去。
+    //
+    // 仍然返回 nullptr,这是刻意的:本 port 的标签模型是「一个热 Page + 若干快照」,不是
+    // 「每个标签一个常驻 Page」。要让 window.open() 返回一个可用的 WindowProxy,就必须同时
+    // 存在第二个正在跑的 Page —— 那是另一个量级的改动(两套 FrameView / 合成层 / 事件路由,
+    // 还要在 32 位地址空间里塞下第二份页面内存)。返回一个指向已销毁 Page 的指针来"看起来
+    // 像实现了"是绝对不行的,那是 UAF。
+    //
+    // 后果(必须记录为 compatibility limitation,不是 bug):
+    //   · window.open() 的返回值是 null —— 页面若立刻 `w.document.write(...)` 会抛异常。
+    //   · 新标签没有 opener,行为等价于 rel="noopener"。跨标签 postMessage / window.opener
+    //     回调(某些 OAuth 弹窗登录靠它回传结果)因此不工作。
+    //   · cookie / storage profile 是进程级共享的,所以"登录后回到原页面刷新即生效"这条
+    //     最常见的 OAuth 退路仍然成立。
+    RefPtr<WebCore::Page> createWindow(WebCore::LocalFrame&, const String&, const WebCore::WindowFeatures&, const WebCore::NavigationAction&) final;
     void show() final { }
 
     bool canRunModal() const final { return false; }
@@ -101,7 +115,13 @@ public:
     void rootFrameAdded(const WebCore::LocalFrame&) final { }
     void rootFrameRemoved(const WebCore::LocalFrame&) final { }
 
-    void runJavaScriptAlert(WebCore::LocalFrame&, const String&) final { }
+    // alert() 走异步 UI bridge(shell 弹提示,JS 不等)——见 .cpp 顶部说明。
+    void runJavaScriptAlert(WebCore::LocalFrame&, const String&) final;
+    // ⚠ confirm()/prompt() 仍是"永远取消"。WebCore 这两个钩子按契约必须**同步返回**用户的答案,
+    //   而本 port 的引擎线程绝不能同步等 UI 线程。唯一正解是在引擎线程上跑嵌套 run loop 等 UI
+    //   回填(GTK/WPE port 的做法),那会让 WebCore 在任意 JS 调用点被重入(定时器、网络回调、
+    //   甚至新导航都可能在嵌套循环里跑起来),没有真机验证不敢上。0.1.9 明确标记为架构阻塞项,
+    //   不做一个"看起来实现了"的版本。
     bool runJavaScriptConfirm(WebCore::LocalFrame&, const String&) final { return false; }
     bool runJavaScriptPrompt(WebCore::LocalFrame&, const String&, const String&, String&) final { return false; }
 

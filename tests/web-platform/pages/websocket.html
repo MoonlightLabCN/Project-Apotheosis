@@ -1,0 +1,209 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — WebSocket</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>WebSocket</h1>
+<div class="sub">connect, text echo, binary, ping/pong, close handshake,
+server-initiated close, reconnect, cookies on the handshake, and a socket opened
+from inside an iframe. wss:// needs a local CA and is reported separately.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<h2>Teardown check (manual)</h2>
+<div>
+  <button id="leave">Open a socket, then navigate away</button>
+  <span class="note">The page must not hang or crash. Come back and reload.</span>
+</div>
+<div>iframe socket: <iframe id="frame" src="/pages/ws-frame.html"></iframe></div>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+var WSURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+
+if (!window.WebSocket) {
+  T.record('window.WebSocket exists', false, 'the constructor is missing entirely');
+} else {
+  T.record('window.WebSocket exists', true, typeof window.WebSocket);
+  // A cookie the handshake must carry. Set before connecting, obviously.
+  document.cookie = 'ws_session=abc123; Path=/';
+  connect();
+}
+
+function connect() {
+  T.begin();
+  var ws, opened = false, textOk = false, binOk = false, closedCleanly = false;
+  try {
+    ws = new WebSocket(WSURL);
+  } catch (e) {
+    T.record('new WebSocket() does not throw', false, (e.name || '') + ' ' + (e.message || e));
+    return T.end();
+  }
+  T.record('new WebSocket() does not throw', true, 'readyState=' + ws.readyState + ' url=' + WSURL);
+
+  ws.binaryType = 'arraybuffer';
+
+  var settled = false;
+  var watchdog = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    T.record('socket opens', false, 'no open/error within 10 s (readyState=' + ws.readyState + ')');
+    // The remaining checks depend on a live socket; say so rather than fail them
+    // individually and make it look like eight separate bugs.
+    T.record('text echo', null, 'socket never opened');
+    T.record('binary echo', null, 'socket never opened');
+    T.record('cookies ride on the handshake', null, 'socket never opened');
+    T.record('server-initiated close is observed', null, 'socket never opened');
+    try { ws.close(); } catch (e) {}
+    T.end();
+  }, 10000);
+
+  ws.onerror = function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    T.record('socket opens', false, 'onerror fired (readyState=' + ws.readyState + ')');
+    T.record('text echo', null, 'socket errored');
+    T.record('binary echo', null, 'socket errored');
+    T.record('cookies ride on the handshake', null, 'socket errored');
+    T.record('server-initiated close is observed', null, 'socket errored');
+    T.end();
+  };
+
+  ws.onopen = function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    opened = true;
+    T.record('socket opens', true, 'readyState=' + ws.readyState);
+    ws.send('hello');
+  };
+
+  var step = 0;
+  ws.onmessage = function (e) {
+    if (typeof e.data === 'string') {
+      if (step === 0) {
+        textOk = (e.data === 'echo:hello');
+        T.record('text echo', textOk, 'got ' + JSON.stringify(e.data));
+        step = 1;
+        // Binary: send bytes, expect them back reversed.
+        try {
+          var buf = new Uint8Array([1, 2, 3, 4, 5]);
+          ws.send(buf.buffer);
+        } catch (err) {
+          T.record('binary echo', false, 'send(ArrayBuffer) threw: ' + err);
+          step = 2;
+          checkHandshakeCookie(ws);
+        }
+        return;
+      }
+      if (step === 3) {
+        // Response to "!cookie": what the server saw on the Upgrade request.
+        T.record('cookies ride on the handshake (as seen over the socket)',
+          e.data.indexOf('ws_session=abc123') >= 0, e.data.slice(0, 80));
+        step = 4;
+        askServerToClose(ws);
+        return;
+      }
+      return;
+    }
+    // Binary frame.
+    var view = new Uint8Array(e.data);
+    binOk = view.length === 5 && view[0] === 5 && view[4] === 1;
+    T.record('binary echo', binOk, 'got [' + Array.prototype.join.call(view, ',') + '] (expected 5,4,3,2,1)');
+    step = 3;
+    checkHandshakeCookie(ws);
+  };
+
+  ws.onclose = function (e) {
+    closedCleanly = e.wasClean === true || e.code === 1000 || e.code === 1005;
+    if (step >= 4) {
+      T.record('server-initiated close is observed',
+        true, 'code=' + e.code + ' clean=' + e.wasClean + ' reason=' + JSON.stringify(e.reason || ''));
+      reconnect();
+    }
+  };
+
+  function checkHandshakeCookie(sock) {
+    try { sock.send('!cookie'); } catch (e) {
+      T.record('cookies ride on the handshake (as seen over the socket)', false, 'send threw: ' + e);
+      askServerToClose(sock);
+    }
+  }
+
+  function askServerToClose(sock) {
+    // Independent of the socket: ask the HTTP side what the last handshake carried.
+    // A failure here vs. over the socket tells "cookies were never sent" apart from
+    // "the echo path is broken".
+    T.getJSON('/api/ws-last', function (status, obj) {
+      T.record('server saw the cookie on the Upgrade request',
+        status === 200 && obj && (obj.cookie || '').indexOf('ws_session=abc123') >= 0,
+        obj ? ('handshakes=' + obj.count + ' Cookie: ' + (obj.cookie || '(none)')) : ('status ' + status));
+      try { sock.send('!close'); } catch (e) {}
+      setTimeout(function () {
+        if (sock.readyState !== 3) {
+          T.record('server-initiated close is observed', false,
+            'still in readyState ' + sock.readyState + ' 3 s after the server closed');
+          reconnect();
+        }
+      }, 3000);
+    });
+  }
+}
+
+function reconnect() {
+  var ws2;
+  try { ws2 = new WebSocket(WSURL); } catch (e) {
+    T.record('reconnect after close works', false, '' + e);
+    return finish();
+  }
+  var done = T.once(function (ok, note) {
+    T.record('reconnect after close works', ok, note);
+    try { ws2.close(); } catch (e) {}
+    finish();
+  });
+  var t = setTimeout(function () { done(false, 'second socket did not open within 8 s'); }, 8000);
+  ws2.onopen = function () { clearTimeout(t); done(true, 'second socket opened'); };
+  ws2.onerror = function () { clearTimeout(t); done(false, 'second socket errored'); };
+}
+
+function finish() {
+  // wss:// is a separate matter: it needs a certificate the device trusts, and
+  // this server speaks plain HTTP. Report it rather than pretend.
+  T.record('wss:// (TLS) works', null,
+    'NOT RUN — this fixture serves plain HTTP. wss needs a locally trusted cert; ' +
+    'the engine reuses the same CA blob as https, so this is expected to follow https.');
+  T.end();
+}
+
+// iframe-opened socket: the child reports back.
+T.begin();
+var frameAnswered = false;
+window.addEventListener('message', function (e) {
+  var obj = null;
+  try { obj = JSON.parse(e.data); } catch (err) { return; }
+  if (obj.tag !== 'ws-frame' || frameAnswered) return;
+  frameAnswered = true;
+  T.record('a WebSocket opened from inside an iframe works', obj.ok === true,
+    obj.detail || '');
+  T.end();
+});
+setTimeout(function () {
+  if (frameAnswered) return;
+  frameAnswered = true;
+  T.record('a WebSocket opened from inside an iframe works', null,
+    'the frame never reported (does the iframe suite pass?)');
+  T.end();
+}, 12000);
+
+document.getElementById('leave').onclick = function () {
+  try {
+    var w = new WebSocket(WSURL);
+    w.onopen = function () { location.href = '/api/redirect/done'; };
+    setTimeout(function () { location.href = '/api/redirect/done'; }, 1500);
+  } catch (e) { location.href = '/api/redirect/done'; }
+};
+</script>

@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File upload</title>
+<style>
+  body { font:15px/1.45 -apple-system,"Segoe UI",sans-serif; margin:0; padding:12px; background:#101418; color:#e8eef4; }
+  #summary { font-size:22px; font-weight:700; padding:12px; border-radius:8px; text-align:center; margin:10px 0; background:#26313a; }
+  #summary.pass { background:#0b5c2a; } #summary.fail { background:#7a1723; }
+  input, button { font-size:16px; padding:8px; margin:6px 0; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:6px; padding:10px 16px; }
+  pre { background:#1a2229; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-all; font-size:12px; }
+  .step { background:#1a2229; padding:10px; border-radius:6px; margin-bottom:8px; }
+  a { color:#7fc5ff; }
+</style>
+
+<h1 style="font-size:18px">&lt;input type=file&gt; &rarr; multipart POST</h1>
+<div id="summary">pick a file, then Upload</div>
+
+<div class="step">
+  <b>1.</b> Tap below. A system file picker must appear. Cancelling it must not crash
+  the browser — come back and try again.
+  <div><input id="f" type="file"></div>
+  <div><label><input id="multi" type="checkbox"> allow multiple</label></div>
+</div>
+
+<div class="step">
+  <b>2.</b> Selected by the page (this is <code>input.files</code>, i.e. what the
+  engine actually handed the DOM):
+  <pre id="chosen">(nothing yet)</pre>
+</div>
+
+<div class="step">
+  <b>3.</b> <button id="go">Upload</button>
+  &mdash; posts multipart/form-data to <code>/api/upload</code>.
+  <pre id="out">(not sent)</pre>
+</div>
+
+<p><a href="/">&lsaquo; back to the dashboard</a></p>
+
+<script>
+var f = document.getElementById('f');
+var chosen = document.getElementById('chosen');
+var out = document.getElementById('out');
+var summary = document.getElementById('summary');
+
+document.getElementById('multi').onchange = function () {
+  if (this.checked) f.setAttribute('multiple', 'multiple');
+  else f.removeAttribute('multiple');
+};
+
+f.onchange = function () {
+  var list = f.files;
+  if (!list || !list.length) { chosen.textContent = '(nothing yet)'; return; }
+  var lines = [];
+  for (var i = 0; i < list.length; i++) {
+    lines.push(list[i].name + '   ' + list[i].size + ' bytes   ' + (list[i].type || '(no type)'));
+  }
+  chosen.textContent = lines.join('\n');
+};
+
+document.getElementById('go').onclick = function () {
+  var list = f.files;
+  if (!list || !list.length) {
+    summary.textContent = 'pick a file first';
+    summary.className = 'fail';
+    return;
+  }
+  var fd;
+  try {
+    fd = new FormData();
+    for (var i = 0; i < list.length; i++) fd.append('upload', list[i], list[i].name);
+    fd.append('note', 'apotheosis-0.1.9');
+  } catch (e) {
+    summary.textContent = 'FAIL: FormData unavailable (' + e + ')';
+    summary.className = 'fail';
+    return;
+  }
+
+  var x = new XMLHttpRequest();
+  x.open('POST', '/api/upload', true);
+  x.onreadystatechange = function () {
+    if (x.readyState !== 4) return;
+    out.textContent = 'status ' + x.status + '\n' + x.responseText;
+    var ok = false, why = '';
+    try {
+      var j = JSON.parse(x.responseText);
+      // The server reports filename, MIME and byte count, so a truncated or
+      // renamed upload shows up here instead of silently "working".
+      ok = !!(j.ok && j.files && j.files.length === list.length && j.files[0].bytes > 0
+              && j.files[0].filename === list[0].name);
+      if (!ok) why = ' (name/size/count mismatch)';
+    } catch (e) { why = ' (bad JSON)'; }
+    summary.textContent = ok ? 'PASS — server received the file' : 'FAIL' + why;
+    summary.className = ok ? 'pass' : 'fail';
+  };
+  x.send(fd);
+};
+</script>

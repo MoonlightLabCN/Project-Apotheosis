@@ -1,13 +1,22 @@
-# Builds the ARM32 UWP harness. VS2017 performs official C++/CX XAML codegen;
-# VS18 then compiles and links those generated sources with the v143 WebKit libraries.
+# Builds the ARM32 UWP harness (appx).
+#
+# XAML: 默认 'Fallback' —— 系统更新打挂了 C++/CX XamlCompiler(生成 XamlTypeInfo 时空引用
+# WMC9999,所有装着的 SDK + VS2017/VS18 两套 MSBuild 全崩,连空白页都崩),整个 markup
+# compiler 已被绕开:gen-xaml-codebehind.ps1 生成运行期 XamlReader::Load 的 code-behind。
+# 'Official' 保留只为将来 XamlCompiler 修好后能回去,当前环境下必然失败,别当默认。
+# 详见 CLAUDE.md『手搓 XAML 工具链』。
+#
+# 工具链: 不接受"PATH 里谁新用谁"。resolve-arm32-toolchain.ps1 主动验证 ARM32 能力并把选中的
+# 版本钉进 /p:VCToolsVersion,防止 VS 更新塞进来的 14.51(永久删了 32 位 ARM)被静默选中。
 param(
     [string]$SdkVersion = '10.0.22621.0',
     [string]$XamlSdkVersion = '10.0.17763.0',
-    [string]$VCToolsVersion = '14.44.35207',
+    # 空 = 由 resolve-arm32-toolchain.ps1 自己挑(优先 14.44.35207);显式传值则钉死该版本。
+    [string]$VCToolsVersion = '',
     [string]$VcpkgRoot = 'C:\vcpkg',
     [string]$IcuRoot = 'C:\icu-arm-uwp',
     [ValidateSet('Official', 'Fallback')]
-    [string]$XamlMode = 'Official',
+    [string]$XamlMode = 'Fallback',
     [switch]$Clean
 )
 
@@ -18,20 +27,19 @@ $log = Join-Path $root 'harness-build.log'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe was not found: $vswhere" }
-$vs = & $vswhere -latest -products '*' -version '[17.0,19.0)' -requires Microsoft.Component.MSBuild -property installationPath
-if (-not $vs) { throw 'Visual Studio 2022 or newer with MSBuild was not found.' }
+
+$resolverArgs = @{ SdkVersion = $SdkVersion }
+if ($VCToolsVersion) { $resolverArgs['Preferred'] = $VCToolsVersion }
+$tc = & (Join-Path $PSScriptRoot 'resolve-arm32-toolchain.ps1') @resolverArgs
+if ($VCToolsVersion -and $tc.MSVCVersion -ne $VCToolsVersion) {
+    throw "Requested MSVC $VCToolsVersion cannot target ARM32 (or is not installed); refusing to silently build with $($tc.MSVCVersion)."
+}
+$VCToolsVersion = $tc.MSVCVersion
+
+$vs = $tc.VSInstall
 $msbuild = Join-Path $vs 'MSBuild\Current\Bin\amd64\MSBuild.exe'
 if (-not (Test-Path -LiteralPath $msbuild)) { throw "MSBuild.exe was not found: $msbuild" }
-$armCompiler = Join-Path $vs "VC\Tools\MSVC\$VCToolsVersion\bin\Hostx64\arm\cl.exe"
-if (-not (Test-Path -LiteralPath $armCompiler)) { throw "MSVC $VCToolsVersion ARM compiler was not found: $armCompiler" }
-
-$sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
-$required = @(
-    (Join-Path $sdkRoot "Include\$SdkVersion\um\Windows.h"),
-    (Join-Path $sdkRoot "Lib\$SdkVersion\um\arm\WindowsApp.lib")
-)
-$missing = $required | Where-Object { -not (Test-Path -LiteralPath $_) }
-if ($missing) { throw "SDK $SdkVersion is incomplete for ARM UWP:`n$($missing -join "`n")" }
+$sdkRoot = $tc.SdkRoot
 
 $generator = Join-Path $PSScriptRoot 'gen-xaml-codebehind.ps1'
 $commonArgs = @(
@@ -43,7 +51,7 @@ $commonArgs = @(
     "/p:ApotheosisVcpkgRoot=$VcpkgRoot",
     "/p:ApotheosisIcuRoot=$IcuRoot"
 )
-Write-Host "=== Harness: XAML=$XamlMode, SDK=$SdkVersion, MSVC=$VCToolsVersion ===" -ForegroundColor Cyan
+Write-Host "=== Harness: XAML=$XamlMode, SDK=$SdkVersion, MSVC=$VCToolsVersion, Platform=ARM (ARM32) ===" -ForegroundColor Cyan
 
 if ($Clean) {
     Write-Host '=== [clean] v143 outputs ===' -ForegroundColor Cyan

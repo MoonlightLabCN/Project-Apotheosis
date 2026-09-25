@@ -1,0 +1,1 @@
+default-src 'none'; script-src 'self' 'nonce-apo123' 'sha256-h2l5sfuMJqpdWrn5cj/FKleaZbQ55xjhrhME15BJJ28='; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'

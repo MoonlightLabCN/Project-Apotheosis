@@ -2,46 +2,20 @@
  * stubs-crypto.cpp — platform WebCrypto stubs for the Win10Mobile (ARM32 thumbv7 UWP)
  * WebCore render DLL.
  *
- * No WebCrypto backend (openssl/gcrypt/cocoa) is compiled for this port, so the
- * CryptoKey and CryptoAlgorithm platform* entry points, CryptoAlgorithmRegistry::
- * platformRegisterAlgorithms, PAL::CryptoDigest and defaultWebCryptoMasterKey are
- * provided here. Signatures are copied verbatim from the WebCore / PAL headers so the
- * mangled names match what WebCore.lib expects.
+ * 0.2.0 起 WebCore 侧的 WebCrypto 后端是上游 crypto/openssl/*.cpp(经 PlatformWinUWP.cmake
+ * 的 include(platform/OpenSSL.cmake) 编进 WebCore.lib),本文件只剩 PAL::CryptoDigest ——
+ * 那是 PAL 的符号,PAL 这个 port 没配 crypto 后端,所以仍由这里提供(用 OpenSSL EVP 算真 SHA)。
+ * 文件下半部分原本那一整段 WebCore 假实现已删除,见文件末尾的说明。
  *
  * Policy:
- *   - Actual crypto operations (sign/verify/encrypt/decrypt/derive/wrap/import/export
- *     /generatePair) are never reachable from the pure layout+paint render path, so they
- *     RELEASE_ASSERT_NOT_REACHED() and then return a default value to keep the compiler happy.
  *   - PAL::CryptoDigest (create/addBytes/computeHash/dtor) may be exercised by non-WebCrypto
  *     hashing paths, so it gets a runnable no-op/zero implementation instead of an assert:
  *     computeHash() returns a fixed-length all-zero digest sized by the requested algorithm.
- *   - defaultWebCryptoMasterKey() returns std::nullopt (no key material on this port).
- *   - platformRegisterAlgorithms() is a no-op (registry stays empty; SubtleCrypto unavailable).
- *
- * See port/undef-crypto.txt for the full symbol list this file covers.
+ *   - defaultWebCryptoMasterKey() / platformRegisterAlgorithms() / 各 platform* 现在都由
+ *     上游 OpenSSL 后端提供,不再在这里出现。
  */
 
 #include "config.h"
-
-#include "CryptoAlgorithmAESCBC.h"
-#include "CryptoAlgorithmAESCFB.h"
-#include "CryptoAlgorithmAESCTR.h"
-#include "CryptoAlgorithmAESGCM.h"
-#include "CryptoAlgorithmAESKW.h"
-#include "CryptoAlgorithmECDH.h"
-#include "CryptoAlgorithmECDSA.h"
-#include "CryptoAlgorithmHKDF.h"
-#include "CryptoAlgorithmHMAC.h"
-#include "CryptoAlgorithmPBKDF2.h"
-#include "CryptoAlgorithmRSASSA_PKCS1_v1_5.h"
-#include "CryptoAlgorithmRSA_OAEP.h"
-#include "CryptoAlgorithmRegistry.h"
-#include "CryptoKeyEC.h"
-#include "CryptoKeyRSA.h"
-#include "CryptoKeyRSAComponents.h"
-#include "ExceptionOr.h"
-#include "JsonWebKey.h"
-#include "SerializedCryptoKeyWrap.h"
 
 #include <pal/crypto/CryptoDigest.h>
 
@@ -109,302 +83,17 @@ Vector<uint8_t> CryptoDigest::computeHash()
 } // namespace PAL
 
 // =====================================================================================
-// WebCore WebCrypto backend stubs — not reachable from the render path
+// WebCore WebCrypto backend — 0.2.0 起由上游 OpenSSL 后端提供,本文件不再出假实现。
+//
+// 0.1.9 及更早,这里有一整段 `namespace WebCore { ... }`:CryptoAlgorithmRegistry::
+// platformRegisterAlgorithms() 是空函数(注册表恒空 → crypto.subtle 的每个算法都
+// NotSupportedError),CryptoKeyEC/CryptoKeyRSA/CryptoAlgorithm* 的 platform* 全是
+// RELEASE_ASSERT_NOT_REACHED()。
+//
+// 0.2.0 在 PlatformWinUWP.cmake 里 include(platform/OpenSSL.cmake),把上游那 18 个
+// crypto/openssl/*.cpp 编进 WebCore.lib,以上符号全部由上游真实现提供 —— 这段假实现
+// 必须整体删掉,否则与 WebCore.lib 里的定义 LNK2005 重复。
+//
+// 仍然留在本文件里的是 PAL::CryptoDigest(见上方):它属于 PAL,不在 OpenSSL.cmake 的
+// 覆盖范围内,而 PAL 这个 port 没有配 crypto 后端。
 // =====================================================================================
-
-namespace WebCore {
-
-// --- defaultWebCryptoMasterKey: no key material on this port ---
-
-std::optional<Vector<uint8_t>> defaultWebCryptoMasterKey()
-{
-    return std::nullopt;
-}
-
-// --- CryptoAlgorithmRegistry: no-op (registry stays empty) ---
-
-void CryptoAlgorithmRegistry::platformRegisterAlgorithms()
-{
-}
-
-// --- CryptoKeyEC platform operations ---
-
-bool CryptoKeyEC::platformSupportedCurve(NamedCurve)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return false;
-}
-
-std::optional<CryptoKeyPair> CryptoKeyEC::platformGeneratePair(CryptoAlgorithmIdentifier, NamedCurve, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return std::nullopt;
-}
-
-RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportRaw(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportJWKPublic(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportJWKPrivate(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, Vector<uint8_t>&&, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportSpki(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportPkcs8(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-Vector<uint8_t> CryptoKeyEC::platformExportRaw() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return { };
-}
-
-bool CryptoKeyEC::platformAddFieldElements(JsonWebKey&) const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return false;
-}
-
-Vector<uint8_t> CryptoKeyEC::platformExportSpki() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return { };
-}
-
-Vector<uint8_t> CryptoKeyEC::platformExportPkcs8() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return { };
-}
-
-size_t CryptoKeyEC::keySizeInBits() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return 0;
-}
-
-// --- CryptoKeyRSA: key class, create/import/export/generate ---
-
-RefPtr<CryptoKeyRSA> CryptoKeyRSA::create(CryptoAlgorithmIdentifier, CryptoAlgorithmIdentifier, bool, const CryptoKeyRSAComponents&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-bool CryptoKeyRSA::isRestrictedToHash(CryptoAlgorithmIdentifier&) const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return false;
-}
-
-size_t CryptoKeyRSA::keySizeInBits() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return 0;
-}
-
-void CryptoKeyRSA::generatePair(CryptoAlgorithmIdentifier, CryptoAlgorithmIdentifier, bool, unsigned, const Vector<uint8_t>&, bool, CryptoKeyUsageBitmap, KeyPairCallback&&, VoidCallback&& failureCallback, ScriptExecutionContext*)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    failureCallback();
-}
-
-RefPtr<CryptoKeyRSA> CryptoKeyRSA::importSpki(CryptoAlgorithmIdentifier, std::optional<CryptoAlgorithmIdentifier>, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-RefPtr<CryptoKeyRSA> CryptoKeyRSA::importPkcs8(CryptoAlgorithmIdentifier, std::optional<CryptoAlgorithmIdentifier>, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoKeyRSA::exportSpki() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoKeyRSA::exportPkcs8() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-std::unique_ptr<CryptoKeyRSAComponents> CryptoKeyRSA::exportData() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
-}
-
-// --- CryptoAlgorithmAESCBC ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCBC::platformEncrypt(const CryptoAlgorithmAesCbcCfbParams&, const CryptoKeyAES&, const Vector<uint8_t>&, Padding)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCBC::platformDecrypt(const CryptoAlgorithmAesCbcCfbParams&, const CryptoKeyAES&, const Vector<uint8_t>&, Padding)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmAESCFB ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCFB::platformEncrypt(const CryptoAlgorithmAesCbcCfbParams&, const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCFB::platformDecrypt(const CryptoAlgorithmAesCbcCfbParams&, const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmAESCTR ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCTR::platformEncrypt(const CryptoAlgorithmAesCtrParams&, const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESCTR::platformDecrypt(const CryptoAlgorithmAesCtrParams&, const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmAESGCM ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESGCM::platformEncrypt(const CryptoAlgorithmAesGcmParams&, const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESGCM::platformDecrypt(const CryptoAlgorithmAesGcmParams&, const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmAESKW ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESKW::platformWrapKey(const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmAESKW::platformUnwrapKey(const CryptoKeyAES&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmECDH ---
-
-std::optional<Vector<uint8_t>> CryptoAlgorithmECDH::platformDeriveBits(const CryptoKeyEC&, const CryptoKeyEC&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return std::nullopt;
-}
-
-// --- CryptoAlgorithmECDSA ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmECDSA::platformSign(const CryptoAlgorithmEcdsaParams&, const CryptoKeyEC&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<bool> CryptoAlgorithmECDSA::platformVerify(const CryptoAlgorithmEcdsaParams&, const CryptoKeyEC&, const Vector<uint8_t>&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmHKDF ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmHKDF::platformDeriveBits(const CryptoAlgorithmHkdfParams&, const CryptoKeyRaw&, size_t)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmHMAC ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmHMAC::platformSign(const CryptoKeyHMAC&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<bool> CryptoAlgorithmHMAC::platformVerify(const CryptoKeyHMAC&, const Vector<uint8_t>&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmPBKDF2 ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmPBKDF2::platformDeriveBits(const CryptoAlgorithmPbkdf2Params&, const CryptoKeyRaw&, size_t)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmRSASSA_PKCS1_v1_5 ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmRSASSA_PKCS1_v1_5::platformSign(const CryptoKeyRSA&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<bool> CryptoAlgorithmRSASSA_PKCS1_v1_5::platformVerify(const CryptoKeyRSA&, const Vector<uint8_t>&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-// --- CryptoAlgorithmRSA_OAEP ---
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmRSA_OAEP::platformEncrypt(const CryptoAlgorithmRsaOaepParams&, const CryptoKeyRSA&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmRSA_OAEP::platformDecrypt(const CryptoAlgorithmRsaOaepParams&, const CryptoKeyRSA&, const Vector<uint8_t>&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-    return Exception { ExceptionCode::OperationError };
-}
-
-} // namespace WebCore

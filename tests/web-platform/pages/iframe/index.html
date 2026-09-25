@@ -1,0 +1,254 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — iframe</title>
+<link rel="stylesheet" href="/pages/common.css">
+<script>
+// Installed BEFORE any <iframe> is parsed, on purpose. A child that loads from
+// cache can post back before the parser reaches a script at the bottom of the
+// body, and then the message is simply lost — which looks exactly like "the frame
+// never ran". Buffer everything from the very first moment.
+window.__msgs = [];
+window.addEventListener('message', function (e) {
+  var obj = null;
+  try { obj = JSON.parse(e.data); } catch (err) { return; }
+  obj._origin = e.origin;
+  window.__msgs.push(obj);
+});
+</script>
+
+<h1>iframe / subframe</h1>
+<div class="sub">Frame creation, script, SOP, postMessage, navigation, removal,
+sandbox, cookies, CSP. Everything runs in this page.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<h2>Frames under test</h2>
+<div id="frames">
+  <div>same-origin child: <iframe id="f_same" src="/pages/iframe/child.html?frame=same"></iframe></div>
+  <div>cross-origin child: <iframe id="f_cross"></iframe></div>
+  <div>nested (2 levels): <iframe id="f_nested" src="/pages/iframe/nested-outer.html" style="height:130px"></iframe></div>
+  <div>sandbox (no flags): <iframe id="f_sbox" sandbox src="/pages/iframe/child.html?frame=sboxnone"></iframe></div>
+  <div>sandbox allow-scripts: <iframe id="f_sbox_s" sandbox="allow-scripts" src="/pages/iframe/child.html?frame=sboxscript"></iframe></div>
+  <div>sandbox allow-scripts allow-same-origin: <iframe id="f_sbox_so" sandbox="allow-scripts allow-same-origin" src="/pages/iframe/child.html?frame=sboxsame"></iframe></div>
+  <div>X-Frame-Options: DENY: <iframe id="f_xfo" src="/api/frame/xfo-deny"></iframe></div>
+  <div>CSP frame-ancestors 'none': <iframe id="f_fa" src="/api/frame/ancestors-none"></iframe></div>
+  <div>to be removed: <iframe id="f_gone" src="/pages/iframe/child.html?frame=gone"></iframe></div>
+</div>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+var messages = window.__msgs;
+
+// Frames are told apart by the ?frame= tag they were loaded with, not by their
+// contentWindow: a sandboxed frame's window is not comparable from here.
+function byTag(tag) {
+  for (var i = messages.length - 1; i >= 0; i--)
+    if (messages[i].frame === tag) return messages[i];
+  return null;
+}
+
+// The cross-origin frame is wired up in script because its origin depends on
+// where the alternate listener is.
+var alt = T.altOrigin();
+document.getElementById('f_cross').src = alt + '/pages/iframe/child.html?frame=cross';
+
+// One settle pass. Everything under test here is "did the frame load and run",
+// which is inherently asynchronous; a single deadline keeps the report readable
+// instead of scattering twelve independent timers.
+T.begin();
+setTimeout(check, 2500);
+
+function check() {
+  // ---- 1. creation + script + DOM ------------------------------------------
+  var same = document.getElementById('f_same');
+  var sameDoc = null;
+  try { sameDoc = same.contentDocument; } catch (e) { sameDoc = null; }
+
+  T.record('same-origin iframe creates a document',
+    !!(sameDoc && sameDoc.body),
+    sameDoc ? ('body: ' + (sameDoc.body ? 'yes' : 'no')) : 'contentDocument unreadable');
+
+  T.record('child script runs and mutates its own DOM',
+    !!(sameDoc && sameDoc.body && sameDoc.body.textContent.indexOf('CHILD OK') >= 0),
+    sameDoc && sameDoc.body ? sameDoc.body.textContent.slice(0, 60) : '(no document)');
+
+  var sameMsg = byTag('same');
+  T.record('child -> parent postMessage arrives', !!sameMsg,
+    sameMsg ? sameMsg.href : (messages.length + ' messages, none tagged frame=same'));
+
+  T.record('parent can reach into a same-origin child (SOP allows)',
+    !!(sameDoc && sameDoc.getElementById('who')),
+    'document.getElementById through contentDocument');
+
+  // ---- 2. cross-origin -----------------------------------------------------
+  var cross = document.getElementById('f_cross');
+  var crossMsg = byTag('cross');
+  if (alt === location.origin) {
+    T.record('cross-origin iframe loads and posts back', null, 'no alternate origin configured');
+    T.record('cross-origin DOM access is blocked', null, 'no alternate origin configured');
+  } else {
+    T.record('cross-origin iframe loads and posts back', !!crossMsg,
+      crossMsg ? ('from ' + crossMsg._origin) : ('expected a message from ' + alt));
+
+    var blocked = false, detail = '';
+    try {
+      var d = cross.contentDocument;
+      blocked = !d;                    // spec says null for cross-origin
+      detail = d ? 'contentDocument was readable (SOP HOLE)' : 'contentDocument === null';
+    } catch (e) {
+      blocked = true;                  // throwing is also acceptable
+      detail = 'threw: ' + e.name;
+    }
+    T.record('cross-origin DOM access is blocked', blocked, detail);
+  }
+
+  // ---- 3. nested -----------------------------------------------------------
+  var nestedMsg = null;
+  for (var i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].depth === 2) { nestedMsg = messages[i]; break; }
+  }
+  T.record('nested iframe (2 levels) loads and reports through its parent',
+    !!nestedMsg, nestedMsg ? nestedMsg.href : 'no depth-2 message');
+
+  // ---- 4. sandbox ----------------------------------------------------------
+  // `sandbox` with no flags: scripts are disabled, so the child cannot post.
+  var sboxMsg = byTag('sboxnone');
+  T.record('sandbox (no flags) blocks script in the child', !sboxMsg,
+    sboxMsg ? 'the child posted anyway — scripts are NOT blocked' : 'silent, as required');
+
+  // allow-scripts without allow-same-origin: script runs, origin is opaque.
+  //
+  // If the frame was never even fetched, this is not the engine failing to run
+  // script — it is the embedder refusing to load an opaque-origin subframe at
+  // all. Those look identical from here, so ask the server which happened.
+  // (Claude's in-app browser does exactly this, which is why the check exists.)
+  var sboxS = byTag('sboxscript');
+  if (!sboxS) {
+    T.begin();
+    T.getJSON('/api/served?q=frame%3Dsboxscript', function (status, obj) {
+      var fetched = obj && obj.count > 0;
+      T.record('sandbox="allow-scripts" runs script in the child',
+        fetched ? false : null,
+        fetched ? 'the document was fetched but never posted — script did not run'
+                : 'the frame was never fetched: this browser refuses to load an ' +
+                  'opaque-origin subframe by src. Not an engine result. The srcdoc ' +
+                  'variant below covers the same ground.');
+      T.end();
+    });
+  } else {
+    T.record('sandbox="allow-scripts" runs script in the child', true,
+      'posted, event origin ' + sboxS._origin);
+  }
+  if (sboxS) {
+    T.record('sandbox without allow-same-origin gives an opaque origin',
+      sboxS._origin === 'null' || sboxS.origin === 'null',
+      'event origin=' + sboxS._origin + ' document origin=' + sboxS.origin + ' (want "null")');
+    T.record('opaque-origin child cannot read the parent', sboxS.parentReadable === false,
+      'parentReadable=' + sboxS.parentReadable);
+    T.record('opaque-origin child has no storage access', sboxS.storageUsable === false,
+      'storageUsable=' + sboxS.storageUsable);
+  } else {
+    // Same ground via srcdoc, which does not need a subframe network load. Keeps
+    // the opaque-origin rules covered even where src-based sandboxing cannot run.
+    T.begin();
+    var srcdocAnswered = false;
+    window.addEventListener('message', function (e) {
+      if (srcdocAnswered || String(e.data).indexOf('SRCDOC|') !== 0) return;
+      srcdocAnswered = true;
+      var parts = String(e.data).split('|');   // SRCDOC|origin|parentReadable|storageUsable
+      T.record('sandbox without allow-same-origin gives an opaque origin (srcdoc)',
+        e.origin === 'null' && parts[1] === 'null',
+        'event origin=' + e.origin + ' document origin=' + parts[1]);
+      T.record('opaque-origin child cannot read the parent (srcdoc)', parts[2] === 'false',
+        'parentReadable=' + parts[2]);
+      T.record('opaque-origin child has no storage access (srcdoc)', parts[3] === 'false',
+        'storageUsable=' + parts[3]);
+      T.end();
+    });
+    var sd = document.createElement('iframe');
+    sd.setAttribute('sandbox', 'allow-scripts');
+    sd.style.cssText = 'width:100%;height:40px';
+    sd.srcdoc =
+      '<script>(function(){' +
+      'var o;try{o=String(document.location.origin);}catch(e){o="ERR";}' +
+      'var p;try{p=String(!!window.parent.location.href);}catch(e){p="false";}' +
+      'var s;try{window.localStorage.getItem("x");s="true";}catch(e){s="false";}' +
+      'parent.postMessage("SRCDOC|"+o+"|"+p+"|"+s,"*");})();<' + '/script>';
+    document.getElementById('frames').appendChild(sd);
+    setTimeout(function () {
+      if (srcdocAnswered) return;
+      srcdocAnswered = true;
+      T.record('sandbox without allow-same-origin gives an opaque origin (srcdoc)', false,
+        'the srcdoc frame never reported either — srcdoc itself may be unsupported');
+      T.record('opaque-origin child cannot read the parent (srcdoc)', null, 'no srcdoc report');
+      T.record('opaque-origin child has no storage access (srcdoc)', null, 'no srcdoc report');
+      T.end();
+    }, 2500);
+  }
+
+  // allow-scripts + allow-same-origin: back to a normal same-origin child.
+  var sboxSO = byTag('sboxsame');
+  T.record('sandbox="allow-scripts allow-same-origin" restores the real origin',
+    !!sboxSO && sboxSO._origin === location.origin,
+    sboxSO ? ('event origin=' + sboxSO._origin) : 'the child never posted');
+
+  // ---- 5. X-Frame-Options / frame-ancestors --------------------------------
+  function framedBodyText(id) {
+    try {
+      var d = document.getElementById(id).contentDocument;
+      return d && d.body ? d.body.textContent : '';
+    } catch (e) { return '(unreadable)'; }
+  }
+  var xfoText = framedBodyText('f_xfo');
+  T.record('X-Frame-Options: DENY keeps the document out of the frame',
+    xfoText.indexOf('XFO DENY BODY') < 0, 'frame body: ' + (xfoText || '(empty)').slice(0, 50));
+
+  var faText = framedBodyText('f_fa');
+  T.record("CSP frame-ancestors 'none' keeps the document out of the frame",
+    faText.indexOf('FRAME-ANCESTORS BODY') < 0, 'frame body: ' + (faText || '(empty)').slice(0, 50));
+
+  // ---- 6. cookies ----------------------------------------------------------
+  // The child's own subresource request must carry the profile's cookies. Set one
+  // here, then fetch the echo endpoint the way a child frame would.
+  document.cookie = 'iframe_shared=yes; Path=/';
+  T.begin();
+  T.getJSON('/api/frame/echo', function (status, obj) {
+    T.record('subframe request shares the profile cookie jar',
+      status === 200 && obj && (obj.cookie || '').indexOf('iframe_shared=yes') >= 0,
+      obj ? ('Cookie: ' + (obj.cookie || '(none)')) : ('status ' + status));
+    T.end();
+  });
+
+  // ---- 7. frame navigation + removal ---------------------------------------
+  try { same.contentWindow.postMessage('navigate', '*'); } catch (e) {}
+
+  var gone = document.getElementById('f_gone');
+  var goneRanFirst = !!byTag('gone');
+  var removalThrew = '';
+  try {
+    gone.parentNode.removeChild(gone);
+  } catch (e) {
+    removalThrew = e.name + ': ' + e.message;
+  }
+  T.record('removing a live iframe does not throw', removalThrew === '',
+    removalThrew || ('frame.remove() completed (the frame had ' +
+      (goneRanFirst ? 'already run' : 'not reported yet') + ')'));
+
+  setTimeout(function () {
+    var navigated = null;
+    for (var k = messages.length - 1; k >= 0; k--) {
+      if (messages[k].frame === 'same' && messages[k].navigated === true) { navigated = messages[k]; break; }
+    }
+    T.record('iframe self-navigation (location.href) reloads the child',
+      !!navigated, navigated ? navigated.href : 'no post-navigation message');
+
+    // If removal had detached the frame badly, the page would already be gone.
+    T.record('page still alive after frame removal + navigation', true,
+      'reached the end of the suite');
+    T.end();
+  }, 1500);
+}
+</script>

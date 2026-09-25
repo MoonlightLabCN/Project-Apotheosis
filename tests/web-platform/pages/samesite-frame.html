@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>samesite frame</title>
+<body style="font:13px sans-serif;margin:0;padding:6px;background:#fff;color:#111">
+<div id="out">asking the server what it saw…</div>
+<script>
+// Loaded cross-site in a frame. Its own subresource request is a cross-site
+// subframe request, so SameSite=Strict cookies must not be attached to it.
+(function () {
+  var x = new XMLHttpRequest();
+  x.open('GET', '/api/cookie/echo', true);
+  x.onreadystatechange = function () {
+    if (x.readyState !== 4) return;
+    var cookie = '';
+    try { cookie = (JSON.parse(x.responseText) || {}).cookie || ''; } catch (e) {}
+    document.getElementById('out').textContent = 'server saw: ' + (cookie || '(no cookies)');
+    try {
+      window.parent.postMessage(JSON.stringify({
+        tag: 'child', href: location.href, serverCookie: cookie
+      }), '*');
+    } catch (e) {}
+  };
+  x.send(null);
+})();
+</script>
+</body>

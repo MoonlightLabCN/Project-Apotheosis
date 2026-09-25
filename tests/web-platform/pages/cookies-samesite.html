@@ -1,0 +1,177 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — Cookie SameSite</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>Cookie SameSite</h1>
+<div class="sub">Strict / Lax / None+Secure / unspecified, over same-site fetch,
+cross-site fetch, cross-site subframe, POST, and top-level navigation.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<h2>Top-level navigation (manual — a navigation cannot be judged from the page it leaves)</h2>
+<div>
+  <a class="card" href="/api/cookie/echo">same-site GET navigation &rsaquo; expect strict, lax and none</a>
+  <a class="card" id="crossnav" href="#">cross-site GET navigation &rsaquo; expect lax and none, NOT strict</a>
+</div>
+
+<h2>Cross-site frame</h2>
+<div>other origin: <iframe id="frame"></iframe></div>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+var alt = T.altOrigin();
+var crossSite = T.altIsCrossSite();
+document.getElementById('crossnav').href = alt + '/api/cookie/echo';
+
+// Cookie names, one per policy. Set over HTTP so the parser under test is the one
+// that matters (document.cookie takes a different path into the same jar).
+var COOKIES = [
+  { name: 'ss_strict', attrs: 'samesite=Strict' },
+  { name: 'ss_lax', attrs: 'samesite=Lax' },
+  { name: 'ss_none', attrs: 'samesite=None&secure=1' },
+  { name: 'ss_unspec', attrs: '' }
+];
+
+function setAll(cb) {
+  var left = COOKIES.length;
+  COOKIES.forEach(function (c) {
+    T.get('/api/cookie/set?name=' + c.name + '&value=1&maxage=600' + (c.attrs ? '&' + c.attrs : ''),
+      function () { if (--left === 0) cb(); });
+  });
+}
+
+function has(cookieHeader, name) {
+  return (cookieHeader || '').indexOf(name + '=1') >= 0;
+}
+
+T.begin();
+setAll(function () {
+  // ---- 0. did the jar keep them at all? -----------------------------------
+  T.getJSON('/api/cookie/echo', function (status, obj) {
+    var header = obj ? (obj.cookie || '') : '';
+
+    T.record('SameSite=Strict cookie is stored and sent same-site',
+      has(header, 'ss_strict'), 'Cookie: ' + header);
+    T.record('SameSite=Lax cookie is stored and sent same-site',
+      has(header, 'ss_lax'), header ? 'present' : '(no cookies at all)');
+    T.record('cookie with no SameSite attribute is stored and sent same-site',
+      has(header, 'ss_unspec'), header ? 'present' : '(no cookies at all)');
+
+    // `SameSite=None` without `Secure` must be REJECTED (RFC 6265bis). This one was
+    // set with Secure over plain HTTP; browsers also require a secure context for
+    // Secure cookies, so it may legitimately be absent here. Report, do not fail.
+    T.record('SameSite=None; Secure over plain HTTP',
+      has(header, 'ss_none') ? true : null,
+      has(header, 'ss_none')
+        ? 'accepted and sent (some engines allow Secure on localhost)'
+        : 'not sent over http:// — expected, Secure cookies need a secure context');
+
+    // ---- 1. the rejection rule ------------------------------------------
+    // Explicit SameSite=None WITHOUT Secure is invalid and must not be stored.
+    T.get('/api/cookie/set?name=ss_none_insecure&value=1&maxage=600&samesite=None', function () {
+      T.getJSON('/api/cookie/echo', function (s2, o2) {
+        var h2 = o2 ? (o2.cookie || '') : '';
+        T.record('SameSite=None without Secure is rejected',
+          !has(h2, 'ss_none_insecure'),
+          has(h2, 'ss_none_insecure') ? 'it was stored anyway (RFC 6265bis says reject)' : 'not stored');
+        crossSiteChecks();
+      });
+    });
+  });
+});
+
+function crossSiteChecks() {
+  if (!crossSite) {
+    T.record('cross-site fetch omits Strict', null,
+      'the alternate origin (' + alt + ') is the same SITE as this page — a second ' +
+      'port is cross-origin but not cross-site. Reach the two listeners under two ' +
+      'different hostnames and pass ?alt=<host:port>.');
+    T.record('cross-site fetch omits Lax', null, 'same reason');
+    T.record('cross-site subframe request omits Strict', null, 'same reason');
+    T.record('cross-site POST omits Lax', null, 'same reason');
+    return frameCheck();
+  }
+
+  // Cross-site subresource GET: Strict and Lax must both be omitted; only None
+  // (and, in this engine, unspecified) may be sent.
+  //
+  // Every handler below goes through T.once: a failed XHR fires BOTH
+  // readystatechange and error, and a check recorded twice makes the tally lie
+  // (and, worse, runs the next stage twice).
+  credentialed('GET', null, T.once(function (obj, status) {
+    var header = obj ? (obj.cookie || '') : '';
+    if (!obj) {
+      T.record('cross-site fetch omits Strict', null, 'cross-origin XHR did not return JSON (status ' + status + ')');
+      T.record('cross-site fetch omits Lax', null, 'cross-origin XHR did not return JSON');
+    } else {
+      T.record('cross-site fetch omits Strict', !has(header, 'ss_strict'), 'Cookie: ' + (header || '(none)'));
+      T.record('cross-site fetch omits Lax', !has(header, 'ss_lax'), 'Cookie: ' + (header || '(none)'));
+    }
+    crossSitePost();
+  }));
+}
+
+// One credentialed cross-site XHR to the alternate origin's cookie echo.
+function credentialed(method, body, cb) {
+  var x = new XMLHttpRequest();
+  var done = T.once(function () {
+    var obj = null;
+    try { obj = JSON.parse(x.responseText); } catch (e) {}
+    cb(obj, x.status);
+  });
+  try { x.open(method, alt + '/api/cookie/echo', true); } catch (e) { return cb(null, 0); }
+  x.withCredentials = true;
+  x.onreadystatechange = function () { if (x.readyState === 4) done(); };
+  x.onerror = done;
+  x.ontimeout = done;
+  x.timeout = 10000;
+  try { x.send(body); } catch (e) { cb(null, 0); }
+}
+
+var postDone = false;
+function crossSitePost() {
+  if (postDone) return;
+  postDone = true;
+  // A cross-site POST is the CSRF shape Lax exists to stop.
+  credentialed('POST', 'x=1', T.once(function (obj, status) {
+    if (!obj) {
+      T.record('cross-site POST omits Lax', null, 'cross-origin POST did not return JSON (status ' + status + ')');
+    } else {
+      var header = obj.cookie || '';
+      T.record('cross-site POST omits Lax', !has(header, 'ss_lax'), 'Cookie: ' + (header || '(none)'));
+    }
+    frameCheck();
+  }));
+}
+
+var frameDone = false;
+function frameCheck() {
+  if (frameDone) return;
+  frameDone = true;
+  if (!crossSite) return T.end();
+  var answered = false;
+  window.addEventListener('message', function (e) {
+    var obj = null;
+    try { obj = JSON.parse(e.data); } catch (err) { return; }
+    if (obj.tag !== 'child' || answered) return;
+    answered = true;
+    // The frame's own document request is a cross-site subframe load: Strict must
+    // not ride on it. The child reports the Cookie header the server saw.
+    T.record('cross-site subframe request omits Strict',
+      (obj.serverCookie || '').indexOf('ss_strict=1') < 0,
+      'server saw: ' + (obj.serverCookie || '(none)'));
+    T.end();
+  });
+  document.getElementById('frame').src = alt + '/pages/samesite-frame.html';
+  setTimeout(function () {
+    if (answered) return;
+    answered = true;
+    T.record('cross-site subframe request omits Strict', null, 'the frame never answered');
+    T.end();
+  }, 5000);
+}
+</script>

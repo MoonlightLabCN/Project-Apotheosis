@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ws in a frame</title>
+<body style="font:13px sans-serif;margin:0;padding:6px;background:#fff;color:#111">
+<div id="out">connecting…</div>
+<script>
+// A socket opened from a subframe. Exercises the path where the WebSocketChannel's
+// Document is a child frame's, which is where a port that only wires the socket
+// provider onto the main frame falls over.
+(function () {
+  function report(ok, detail) {
+    document.getElementById('out').textContent = (ok ? 'FRAME WS OK: ' : 'FRAME WS FAIL: ') + detail;
+    try { window.parent.postMessage(JSON.stringify({ tag: 'ws-frame', ok: ok, detail: detail }), '*'); } catch (e) {}
+  }
+  var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  var ws;
+  try { ws = new WebSocket(url); } catch (e) { return report(false, 'constructor threw: ' + e); }
+  var done = false;
+  var t = setTimeout(function () { if (!done) { done = true; report(false, 'no open within 8 s'); } }, 8000);
+  ws.onopen = function () { ws.send('from-frame'); };
+  ws.onmessage = function (e) {
+    if (done) return;
+    done = true;
+    clearTimeout(t);
+    report(e.data === 'echo:from-frame', 'echo=' + JSON.stringify(e.data));
+    try { ws.close(); } catch (err) {}
+  };
+  ws.onerror = function () { if (!done) { done = true; clearTimeout(t); report(false, 'onerror'); } };
+})();
+</script>
+</body>

@@ -43,8 +43,11 @@
 #include "WebCoreDriver.h"
 
 #include <cstdint>
+#include <cctype>        // std::tolower(下载响应头大小写无关匹配 Set-Cookie)
 #include <cstring>
 #include <cstdio>
+#include <string>
+#include <utility>
 #include <vector>
 #include <curl/curl.h>   // 下载用独立 curl_easy 句柄(WebCoreDownload)
 
@@ -80,15 +83,22 @@
 #include <WebCore/WebCoreJITOperations.h>// WebCore::populateJITOperations (no-op w/ C_LOOP)
 #include <WebCore/EmptyClients.h>        // pageConfigurationWithEmptyClients
 #include <WebCore/PageConfiguration.h>   // WebCore::PageConfiguration
+#include "PortSQLiteAppContainer.h"      // 0.2.0: App Container 里的 SQLite 系统调用补丁
+#include "PortStorage.h"                 // 0.2.0: storage / IDB / socket provider
+#include <WebCore/DatabaseProvider.h>        // 完整类型(Ref<DatabaseProvider> 析构需要)
+#include <WebCore/SocketProvider.h>          // 完整类型(Ref<SocketProvider> 析构需要)
+#include <WebCore/StorageNamespaceProvider.h> // 完整类型(Ref<StorageNamespaceProvider> 析构需要)
 #include <WebCore/BackForwardCache.h>    // Apotheosis: 关后退页面缓存防 OOM
 #include <WebCore/MemoryCache.h>         // Apotheosis: 资源缓存上限
 #include <WebCore/MemoryRelease.h>       // Apotheosis: WebCore::releaseMemory(内存压力时一把清)
 #include <wtf/MemoryPressureHandler.h>   // Apotheosis: WTF::Critical / Synchronous
 #include <WebCore/CookieJar.h>           // WebCore::CookieJar(cookie 持久化)
-#include <WebCore/NetworkStorageSession.h>   // deleteAllCookies(WebCoreClearCookies)
+#include <WebCore/NetworkStorageSession.h>   // deleteAllCookies(WebCoreClearCookies)+ 下载共享 cookie
+#include <WebCore/SameSiteInfo.h>            // 下载路径取 cookie 头需要 SameSiteInfo
 #include <WebCore/StorageSessionProvider.h>  // 完整类型(Ref<StorageSessionProvider> 析构需要)
 #include "PortNetworkStorageSession.h"   // WebCorePort::makeStorageSessionProvider / ensureDefaultPortStorageSession
 #include "PortChromeClient.h"            // WebCorePort::PortChromeClient(开合成,捕获根图层)
+#include "PortUIBridge.h"                // 0.1.9:异步 engine→shell UI 请求队列(文件选择/alert)
 #include <WebCore/Page.h>                // WebCore::Page
 #include <WebCore/Settings.h>            // Page::settings()
 #include <WebCore/LocalFrame.h>          // WebCore::LocalFrame
@@ -231,6 +241,10 @@ bool ensureWebCoreInitialized()
         WTF::initializeMainThread();             // pins this thread as the WebKit main thread + RunLoop::main
         WebCore::initializeCommonAtomStrings();  // interns "auto", "all", content types, etc.
         installPortPlatformStrategies();         // PlatformStrategies (loader strategy) — required before any load
+        // Apotheosis 0.2.0: 必须在**任何**数据库被打开之前。这个 ARM32 App Container 构建的
+        // SQLite win32 VFS 里 CreateFileW 那一项是空函数指针(打开真实文件必崩,2026-07-03 真机
+        // dump 的根因),这里用 SQLite 公开的 xSetSystemCall 把它补上。详见 PortSQLiteAppContainer.h。
+        WebCorePort::installSQLiteAppContainerSyscalls();
         // Apotheosis: 预开进程级 cookie jar(持久 SQLite;路径由 harness 在引擎线程更早的 SetupRuntimeEnv
         // 里经 WebCoreSetCookieJarPath 显式注入,见 PortNetworkStorageSession.cpp)+ 设接受策略
         // OnlyFromMainDocumentDomain(各端口惯例,挡第三方子资源 Set-Cookie)。打不开由 CookieJarDB::open()
@@ -295,6 +309,27 @@ extern "C" void WebCorePortBumpLoad(int kind)
     }
 }
 
+// ---- [CSP] 诊断 ------------------------------------------------------------
+// 0.1.9 删掉了 CachedResourceLoader 里那个无条件的 CSP 跳过。真因(主帧 SandboxFlags::all()
+// → opaque origin → CSP 的 host source 全部匹配不上)已经在三条建页路径修掉,但设备上没有
+// 控制台,万一还有站点被 CSP 拦掉就会表现成"又白屏了"而查不出原因。这里留一个极小的旁路:
+// 只记条数 + 前几个被拦的 URL(截断),并入 WebCoreGetDiag 的 csp= 字段。
+// 不打完整日志、不记 header —— 这是诊断,不是审计。
+static int g_cspBlocked = 0;
+static char g_cspFirst[512] = "";
+extern "C" void WebCorePortRecordCSPBlock(const char* url, int type)
+{
+    ++g_cspBlocked;
+    if (!url)
+        return;
+    size_t used = std::strlen(g_cspFirst);
+    if (used + 8 >= sizeof g_cspFirst)
+        return;   // 只留前几条,够定位是哪一类资源被拦即可
+    const char* slash = std::strrchr(url, '/');
+    const char* name = (slash && slash[1]) ? slash + 1 : url;
+    std::snprintf(g_cspFirst + used, sizeof g_cspFirst - used, "%.48s(t%d) ", name, type);
+}
+
 // ---- 网页链接命中表(点击交互的基础)----------------------------------------
 // 渲染后提取页面上所有 <a href> 的视口矩形(=位图坐标,因 scroll=0)+ 绝对 URL,存表返回给 UI。
 // UI 在点击时自行判断点中哪个矩形 → 导航。无需常驻 WebCore 会话、点击时不调引擎,安全。
@@ -353,6 +388,65 @@ static void extractLinks(WebCore::Document* document, int renderH)
 static size_t webcoreDownloadWrite(void* ptr, size_t size, size_t nmemb, void* stream)
 {
     return std::fwrite(ptr, size, nmemb, static_cast<FILE*>(stream));
+}
+
+// ---- 下载共享浏览器 profile(0.1.9)----------------------------------------
+// WebCoreDownload 用的是独立 curl handle,0.1.9 之前它既不带 cookie 也不带引擎的 UA
+// —— 也就是"另一个没登录的浏览器":从需要登录的站点点下载,拿回来的是登录页 HTML。
+// 现在它和页面加载共用同一个 NetworkStorageSession(cookie 唯一真相源)和同一个 UA。
+
+// 引擎当前 UA。和 LoadingFrameLoaderClient::userAgent() 同一套开关,避免下载与页面
+// 在服务端被识别成两个不同客户端(有的站点会因此拒绝或返回不同内容)。
+static const char* currentUserAgent()
+{
+    if (g_apoCustomUA[0])
+        return g_apoCustomUA;
+    if (g_apoUaMobile)
+        return "Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1";
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0";
+}
+
+// 下载过程中收到的 Set-Cookie,连同"收到它时的有效 URL"一起缓存,传输结束后再统一写回
+// 共享 jar(而不是在 curl 的 header 回调里就动引擎状态)。回调运行在 curl_easy_perform
+// 内部,也就是仍在引擎线程上(perform 是同步的),但保持"回调只收集、主流程才改状态"这条
+// 界线能让以后改成异步下载时不用重来一遍。
+struct DownloadCookieSink {
+    CURL* handle { nullptr };
+    std::vector<std::pair<std::string, std::string>> setCookies;   // (effective URL, Set-Cookie 值)
+};
+
+static size_t webcoreDownloadHeader(char* buffer, size_t size, size_t nitems, void* userdata)
+{
+    const size_t total = size * nitems;
+    auto* sink = static_cast<DownloadCookieSink*>(userdata);
+    if (!sink || !buffer)
+        return total;
+
+    static const char kSetCookie[] = "set-cookie:";
+    const size_t kLen = sizeof kSetCookie - 1;
+    if (total <= kLen)
+        return total;
+    for (size_t i = 0; i < kLen; ++i) {
+        if (std::tolower(static_cast<unsigned char>(buffer[i])) != kSetCookie[i])
+            return total;
+    }
+
+    // 去掉头名与前导空格,以及行尾 CRLF。
+    size_t begin = kLen;
+    while (begin < total && (buffer[begin] == ' ' || buffer[begin] == '\t'))
+        ++begin;
+    size_t end = total;
+    while (end > begin && (buffer[end - 1] == '\r' || buffer[end - 1] == '\n'))
+        --end;
+    if (end <= begin)
+        return total;
+
+    // 跟随重定向时每一跳都可能发 Set-Cookie,所以要记"当时"的 URL,不能事后统一用最终 URL。
+    const char* effective = nullptr;
+    if (sink->handle)
+        curl_easy_getinfo(sink->handle, CURLINFO_EFFECTIVE_URL, &effective);
+    sink->setCookies.emplace_back(effective ? effective : "", std::string(buffer + begin, end - begin));
+    return total;
 }
 
 // ============================================================================
@@ -718,11 +812,12 @@ static void writeDiag(WebCore::Document& document, WebCore::LocalFrameView& view
     std::snprintf(g_lastTitle, sizeof g_lastTitle, "%s", titleStr.data());
     std::snprintf(g_lastUrl, sizeof g_lastUrl, "%s", urlStr.data());
     int mainLen = std::snprintf(g_lastDiag, sizeof g_lastDiag,
-        "url=%s title=%s contents=%dx%d body=%d nonwhite=%d/%d loads=S%d/R%d/C%d/F%d pending=%d js=%d/%d scripts=%u rootKids=%d bodyKids=%d spa=[%.220s] lasterr=[%.150s]",
+        "url=%s title=%s contents=%dx%d body=%d nonwhite=%d/%d loads=S%d/R%d/C%d/F%d pending=%d js=%d/%d scripts=%u rootKids=%d bodyKids=%d csp=%d[%.120s] spa=[%.220s] lasterr=[%.150s]",
         urlStr.data(), titleStr.data(), cs.width(), cs.height(),
         document.body() ? 1 : 0, nonWhite, w * h,
         g_loadStarted, g_loadResponse, g_loadComplete, g_loadFail, pendingResources,
-        jsEnabled, canExec, scriptCount, rootKids, bodyKids, g_spaProbe, g_lastNetError);
+        jsEnabled, canExec, scriptCount, rootKids, bodyKids,
+        g_cspBlocked, g_cspFirst, g_spaProbe, g_lastNetError);
     // 已请求资源清单(诊断 SPA 模块图):每项 文件名(s状态)。status: 0未知 1加载中 2成功 3加载失败 4解码失败。
     // 若 pigai.shop 的 5 个 chunk(react-core/semi-ui/...)根本不在表里 = import 没去拉(模块图没解析);
     // 在表里但 s3 = 拉了但失败(网络/CORS)。
@@ -793,6 +888,18 @@ static void probeSpaModule(WebCore::Page& page, WebCore::LocalFrame& frame)
         evalJS(*lf, "window.__spaProbe||'no-probe'", g_spaProbe, sizeof g_spaProbe);
 }
 
+// Apotheosis 0.2.0:把 Web Platform 的三个 provider 装到 PageConfiguration 上。
+// pageConfigurationWithEmptyClients 给的默认值分别是 nullptr / nullptr / EmptySocketProvider,
+// 那正是 0.1.9 之前 localStorage 恒空、indexedDB.open() 拿不到连接、new WebSocket() 拿到 null
+// channel 的原因 —— WebCore 里对应的实现一直都编在库里,只是 Page 上没有入口。
+// 三条页面创建路径(常驻会话 / 本地 HTML 渲染 / 一次性 URL 渲染)共用这一处,免得漏掉一条。
+static void applyPortProviders(WebCore::PageConfiguration& pageConfiguration)
+{
+    pageConfiguration.storageNamespaceProvider = WebCorePort::makeStorageNamespaceProvider();
+    pageConfiguration.databaseProvider = WebCorePort::makeDatabaseProvider();
+    pageConfiguration.socketProvider = WebCorePort::makeSocketProvider();
+}
+
 // 销毁当前会话。顺序关乎 use-after-free(晚到的 didFinishLoad / curl 完成回调可能在销毁中触发):
 //  (b) 先把完成回调置空 → 晚到回调变 no-op;
 //  (c) 再 stopAllLoaders 取消在途子资源(可能同步回调 dispatchDidFailProvisionalLoad,此时已 no-op);
@@ -804,6 +911,10 @@ static void teardownSession()
     using namespace WebCore;
     if (!g_session)
         return;
+    // (a0) 0.1.9:先作废还没答复的 UI 请求(文件选择等)。换代 + 取消 FileChooser,
+    //      这样 shell 那边正开着的 picker 即使之后回话也认得出是过期的而被丢弃。
+    WebCorePort::clearPendingUIRequests();
+    WebCorePort::bumpSessionGeneration();
     if (g_session->client)
         g_session->client->setLoadCompletionHandler({});       // (b)
     if (g_session->mainFrame)
@@ -835,6 +946,8 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     // cookie 持久化:DOM(document.cookie)路换成真 jar(默认是 EmptyStorageSessionProvider→nullptr→cookie 被丢)。
     // HTTP(Cookie/Set-Cookie 头)路由 LoadingFrameLoaderClient::createNetworkingContext 提供,二者共用同一 jar。
     pageConfiguration.cookieJar = WebCore::CookieJar::create(WebCorePort::makeStorageSessionProvider());
+
+    applyPortProviders(pageConfiguration);
 
     // GPU 合成:仅当 GPU(GL 上下文 + TextureMapper)已初始化才用真 ChromeClient(PortChromeClient,
     // 它在 attachRootGraphicsLayer 捕获根 GraphicsLayer)+ 下面开合成。GPU 未起时保持
@@ -1073,6 +1186,37 @@ void WebCoreFlushCookiesToDisk()
     WebCorePort::flushCookiesToDisk();
 }
 
+// Apotheosis 0.2.0:浏览器 profile 根目录(LocalState\profile)。localStorage 落到
+// <profile>\storage,IndexedDB 落到 <profile>\indexeddb。必须在第一次建 Page 之前调;
+// 不调 = 两者都退化为进程内非持久(仍可用,关掉应用就没了)。
+void WebCoreSetProfilePath(const char* path)
+{
+    if (!ensureWebCoreInitialized()) return;
+    WebCorePort::setPortProfilePath(path ? String::fromUTF8(path) : String());
+}
+
+// localStorage 落盘。StorageAreaImpl 平时攒批异步刷,UWP 挂起前不刷就会丢最后一批写入。
+// harness 在 Suspending 里和 WebCoreFlushCookiesToDisk 一起调。
+void WebCoreFlushStorage()
+{
+    if (!ensureWebCoreInitialized()) return;
+    WebCorePort::flushLocalStorage();
+}
+
+// 存储子系统的实际状态(是否真持久化 / 实际路径 / SQLite 还缺哪些系统调用)。
+// 真机没有控制台,"IndexedDB 到底有没有落盘"只能靠这一行看。
+int WebCoreGetStorageDiag(char* buf, int len)
+{
+    if (!buf || len <= 0) return 0;
+    if (!ensureWebCoreInitialized()) { buf[0] = 0; return 0; }
+    auto utf8 = WebCorePort::portStorageStatusLine().utf8();
+    int n = utf8.data() ? static_cast<int>(utf8.length()) : 0;
+    if (n > len - 1) n = len - 1;
+    if (n > 0) std::memcpy(buf, utf8.data(), static_cast<size_t>(n));
+    buf[n] = 0;
+    return n;
+}
+
 // Inject the CA-certificate bundle as an in-memory PEM blob (CURLOPT_CAINFO_BLOB).
 // App Container blocks OpenSSL's file-based CA loading (SSL_CTX_load_verify_locations
 // fails even on a readable file in the app's own LocalState → curl 77), so the
@@ -1191,8 +1335,34 @@ int WebCoreDownload(const char* url, const char* outPath)
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, webcoreDownloadWrite);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 120L);
-    curl_easy_setopt(h, CURLOPT_USERAGENT,
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15");
+    curl_easy_setopt(h, CURLOPT_USERAGENT, currentUserAgent());
+
+    // ---- 共享浏览器 profile 的 cookie ----------------------------------
+    // 请求头:从共享 jar 取本 URL 该带的 cookie(和页面加载完全同一份)。
+    // 传输中:curl 自己的 cookie 引擎打开(COOKIEFILE=""),这样它跟随的每一跳
+    //         之间能自洽地带上刚拿到的 cookie;
+    // 结束后:把收到的 Set-Cookie 写回共享 jar,下载拿到的登录态对页面也可见。
+    DownloadCookieSink sink;
+    sink.handle = h;
+    WTF::CString cookieHeaderUtf8;
+    WTF::URL downloadURL { WTF::String::fromUTF8(url) };
+    if (WebCore::NetworkStorageSession* session = WebCorePortDefaultStorageSession()) {
+        auto includeSecure = downloadURL.protocolIs("https"_s)
+            ? WebCore::IncludeSecureCookies::Yes : WebCore::IncludeSecureCookies::No;
+        // firstParty = 下载 URL 自身:下载是用户发起的顶层获取,不是第三方子资源。
+        auto cookies = session->cookieRequestHeaderFieldValue(downloadURL,
+            WebCore::SameSiteInfo { }, downloadURL, std::nullopt, std::nullopt, includeSecure,
+            WebCore::ApplyTrackingPrevention::Yes, WebCore::ShouldRelaxThirdPartyCookieBlocking::No,
+            WebCore::IsKnownCrossSiteTracker::No).first;
+        if (!cookies.isEmpty()) {
+            cookieHeaderUtf8 = cookies.utf8();
+            curl_easy_setopt(h, CURLOPT_COOKIE, cookieHeaderUtf8.data());
+        }
+    }
+    curl_easy_setopt(h, CURLOPT_COOKIEFILE, "");
+    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, webcoreDownloadHeader);
+    curl_easy_setopt(h, CURLOPT_HEADERDATA, &sink);
+
     if (!g_caBytes.empty()) {
         curl_blob blob;
         blob.data = g_caBytes.data();
@@ -1205,6 +1375,18 @@ int WebCoreDownload(const char* url, const char* outPath)
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(h);
     std::fclose(fp);
+
+    // Set-Cookie 写回共享 jar。CookieJarDB::canAcceptCookie 仍会做域校验(现在有真 PSL 了),
+    // 所以某一跳的 URL 记岔了最多是这条 cookie 被拒,不会写进错误的域。
+    if (WebCore::NetworkStorageSession* session = WebCorePortDefaultStorageSession()) {
+        for (const auto& entry : sink.setCookies) {
+            WTF::URL hopURL { WTF::String::fromUTF8(entry.first.c_str()) };
+            if (!hopURL.isValid())
+                hopURL = downloadURL;
+            session->setCookiesFromHTTPResponse(hopURL, hopURL,
+                WTF::String::fromUTF8(entry.second.c_str()));
+        }
+    }
     if (rc != CURLE_OK) {
         std::remove(partPath.c_str());
         return -100 - static_cast<int>(rc);
@@ -1237,6 +1419,15 @@ int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA)
     // Page whose localMainFrame() is already present.
     auto pageConfiguration = pageConfigurationWithEmptyClients(
         std::nullopt, PAL::SessionID::defaultSessionID());
+    {
+        // 同 buildSession/WebCoreLoadUrl:清掉默认的 SandboxFlags::all()。这条路径是本地
+        // HTML 字符串渲染,同样不该跑在 opaque origin 下(否则 <meta> CSP 会全盘拒绝,
+        // 而这正是 tests/web-platform 的 CSP 用例要验的东西)。
+        auto& params = std::get<PageConfiguration::LocalMainFrameCreationParameters>(
+            pageConfiguration.mainFrameCreationParameters);
+        params.effectiveSandboxFlags = { };
+    }
+    applyPortProviders(pageConfiguration);
 
     // ---- 3. Page ----
     Ref<Page> page = Page::create(WTF::move(pageConfiguration));
@@ -1373,6 +1564,7 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
 
     g_lastNetError[0] = '\0';   // clear any stale diagnostic from a prior call
     g_loadStarted = g_loadResponse = g_loadComplete = g_loadFail = 0;   // 重置子资源计数
+    g_cspBlocked = 0; g_cspFirst[0] = '\0';   // [CSP] 每次导航重新计数,否则诊断串页
 
     // process init (JSC/MainThread/AtomStrings) + installPortPlatformStrategies()
     ensureWebCoreInitialized();
@@ -1410,6 +1602,12 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
     {
         auto& params = std::get<PageConfiguration::LocalMainFrameCreationParameters>(
             pageConfiguration.mainFrameCreationParameters);
+        // ★ 同 buildSession:pageConfigurationWithEmptyClients 给主帧默认设 SandboxFlags::all(),
+        //   其中 SandboxOrigin 让文档 SecurityOrigin 变 opaque。除了压死 JS,它还会让 CSP 的
+        //   ContentSecurityPolicySource::schemeMatches() 回落到空的 selfProtocol(),于是每条
+        //   host source 都匹配不上 → 整份 CSP 退化成"什么都不许",子资源全被拦(0.1.9 之前
+        //   CachedResourceLoader 里那个 CSP 跳过就是为它加的)。顶层浏览页本就不该有 sandbox。
+        params.effectiveSandboxFlags = { };
         params.clientCreator =
             CompletionHandler<UniqueRef<LocalFrameLoaderClient>(LocalFrame&, FrameLoader&)> {
             [onLoadDone](LocalFrame&, FrameLoader& frameLoader) mutable
@@ -1421,6 +1619,7 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
                 return client;
             } };
     }
+    applyPortProviders(pageConfiguration);
 
     // ---- Page ----
     Ref<Page> page = Page::create(WTF::move(pageConfiguration));
@@ -1547,6 +1746,7 @@ int WebCoreSessionLoad(const char* url, int w, int h, uint8_t* outRGBA)
     g_spaProbe[0] = '\0';
     g_lastPendingResources = 0;
     g_loadStarted = g_loadResponse = g_loadComplete = g_loadFail = 0;
+    g_cspBlocked = 0; g_cspFirst[0] = '\0';   // [CSP] 每次导航重新计数,否则诊断串页
     g_session.emplace();
     g_session->w = w;
     g_session->h = h;
@@ -1729,6 +1929,38 @@ int WebCoreSyncLinks()
     doc->updateLayoutIgnorePendingStylesheets();
     extractLinks(doc.get(), g_session->h);
     return kOK;
+}
+
+// ---- 异步 UI 请求队列(0.1.9,见 PortUIBridge.h)------------------------------
+// 引擎侧只负责"攒请求 / 收答案",真 UI 全在 shell。这两个入口本身不碰 Page,
+// 所以没有会话时调也安全(返回 0 / 静默丢弃)。
+int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len)
+{
+    int kind = 0;
+    uint64_t id = 0;
+    std::string text;
+    if (!WebCorePort::takeNextUIRequest(kind, id, text))
+        return 0;
+    if (outId)
+        *outId = id;
+    if (payload && len > 0)
+        std::snprintf(payload, static_cast<size_t>(len), "%s", text.c_str());
+    return kind;
+}
+
+void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count)
+{
+    std::vector<std::string> paths;
+    if (pathsUtf8 && count > 0) {
+        const char* p = pathsUtf8;
+        for (int i = 0; i < count; ++i) {
+            std::string one(p);          // 每条以 NUL 结尾,连续存放
+            p += one.size() + 1;
+            if (!one.empty())
+                paths.push_back(std::move(one));
+        }
+    }
+    WebCorePort::completeFileChooser(id, paths);
 }
 
 // 页内查找:标记并高亮全部匹配 + 选中(从当前选区起)第一个,滚动到它,重绘。返回匹配数(>=0)或负错误码。

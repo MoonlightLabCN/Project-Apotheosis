@@ -70,10 +70,28 @@ WebCore::NetworkStorageSession& defaultPortStorageSession()
     return *session.get();
 }
 
+// Apotheosis 0.1.9:浏览器 profile 的唯一网络会话,给引擎内部按 C ABI 取。
+// WebCore 的 curl bridge(ResourceHandle.cpp 的 WK_WINUWP 段)优先走请求自带的
+// NetworkingContext;拿不到时落到这里,而不是"没有会话就不管 cookie"——后者正是
+// 0.1.9 之前 HTTP 路一条 cookie 都不发的形态。留成 extern "C" 是为了和既有的
+// WebCorePortBumpLoad / WebCorePortRecordNetError 一致:WebCore 只声明,不依赖 port 头。
+extern "C" WebCore::NetworkStorageSession* WebCorePortDefaultStorageSession()
+{
+    if (!isMainThread())
+        return nullptr;   // 会话是引擎线程独占的;别在别的线程上惰性建它
+    return &defaultPortStorageSession();
+}
+
 // ============================================================================
 // cookie 的 JSON Lines 持久化(绕开真实文件 SQLite —— 2026-07-03 真机验证会崩,见 .h 顶部注释)。
 // jar 本身固定 ":memory:"(已验证稳定);这里手撸一份极简旁路持久化:每行一个 cookie 的 flat JSON
-// 对象,只含 name/value/domain/path/expires/httpOnly/secure 七个已知字段,不引入 JSON 解析库
+// 对象,只含 name/value/domain/path/expires/httpOnly/secure/sameSite 八个已知字段,不引入 JSON 解析库
+//
+// SameSite(0.2.0 已补齐):0.1.9 时这里没有 sameSite 字段,原因不在本层——上游 curl port 三处
+//   全缺:CookieUtil::parseCookieAttributes() 不解析该属性、CookieJarDB 表没有该列、
+//   NetworkStorageSessionCurl::cookiesForSession() 收到 SameSiteInfo 后直接丢弃。0.2.0 把这三处
+//   都补了(均 WK_WINUWP 守卫),jar 里现在真的存得下 SameSite,快照才跟着加字段。
+//   兼容:读回时若某行没有 "sameSite" 键(0.1.9 及更早写的快照),按 Unspecified 处理。
 // (对齐本仓库一贯的"极简取值"风格,见 harness CheckForUpdate 的 pick() 字符串搜索)。逐行存储的
 // 好处:单行损坏不影响其它行(截断写入/掉电也只丢最后一条),整体重写也廉价(cookie 数量级顶多
 // 几百条,单文件几十 KB)。会话 cookie(无过期时间)不持久,语义等同浏览器"关闭即丢"。
@@ -148,6 +166,10 @@ static void writeCookieLine(std::string& out, const Cookie& c)
     out += c.httpOnly ? "true" : "false";
     out += ",\"secure\":";
     out += c.secure ? "true" : "false";
+    // 0.2.0:SameSite。数值即 Cookie::SameSitePolicy(None=0/Lax=1/Strict=2/Unspecified=3)。
+    // 0.1.9 及更早写的快照没有这个字段,读回时按 Unspecified 处理(见 loadCookies…)。
+    out += ",\"sameSite\":";
+    out += std::to_string(static_cast<int>(c.sameSite));
     out += "}\n";
 }
 
@@ -256,6 +278,15 @@ static void loadCookiesFromDiskIfConfigured()
             c.expires = static_cast<double>(expires);
         c.httpOnly = jsonFieldBool(line, "httpOnly");
         c.secure = jsonFieldBool(line, "secure");
+        // 0.2.0:旧快照(0.1.9 及更早)没有 sameSite 字段 → jsonFieldInt 返回 0,而 0 是 None,
+        // 那是"显式 SameSite=None",会连带触发 "None 必须 Secure" 的拒收规则,把整份旧 cookie
+        // 全部丢掉。所以必须先判字段在不在:不在就是 Unspecified(旧库本来也不知道)。
+        if (line.find("\"sameSite\":") != std::string::npos) {
+            long long raw = jsonFieldInt(line, "sameSite");
+            c.sameSite = (raw >= 0 && raw <= static_cast<long long>(Cookie::SameSitePolicy::Unspecified))
+                ? static_cast<Cookie::SameSitePolicy>(raw) : Cookie::SameSitePolicy::Unspecified;
+        } else
+            c.sameSite = Cookie::SameSitePolicy::Unspecified;
         c.session = false;
         jar.setCookie(c);
         ++loaded;

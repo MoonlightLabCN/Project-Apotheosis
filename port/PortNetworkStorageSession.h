@@ -39,3 +39,8 @@ WTF::Ref<WebCore::StorageSessionProvider> makeStorageSessionProvider();         
 WTF::Ref<WebCore::FrameNetworkingContext> makeFrameNetworkingContext(WebCore::LocalFrame*);  // 给 createNetworkingContext(HTTP 路)
 
 } // namespace WebCorePort
+
+// 0.1.9:浏览器 profile 的唯一网络会话,给引擎内部按 C ABI 取(WebCore 的 curl bridge 只声明
+// 这一个符号,不 include 本头;驱动的下载路径也走它)。仅在引擎线程有效,别的线程返回 nullptr。
+// 实现在 PortNetworkStorageSession.cpp。
+extern "C" WebCore::NetworkStorageSession* WebCorePortDefaultStorageSession();

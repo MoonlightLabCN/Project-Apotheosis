@@ -12,7 +12,7 @@ $cmd = $cmd -replace '/Fo\S+',''
 $cmd = $cmd -replace '/Fd\S+',''
 $cmd = $cmd -replace '-c\s+--\s+\S+UnifiedSource\S+',''
 # 追加 WebKitLegacy include 目录(PortPlatformStrategies 需 WebResourceLoadScheduler.h),再编译(只编不链)
-$cmd = "$cmd -IE:\Apotheosis\WebKit\Source\WebKitLegacy\WebCoreSupport -IE:\Apotheosis\WebKit\Source\WebKitLegacy /Fo`"$Obj`" -c -- `"$Src`""
+$cmd = "$cmd -IE:\Apotheosis\WebKit\Source\WebKitLegacy\WebCoreSupport -IE:\Apotheosis\WebKit\Source\WebKitLegacy\Storage -IE:\Apotheosis\WebKit\Source\WebKitLegacy /Fo`"$Obj`" -c -- `"$Src`""
 
 # 写进临时 .bat 当文件跑,绕开 cmd 8191 命令行长度上限
 $bat = "E:\Apotheosis\port\_driver_compile.bat"

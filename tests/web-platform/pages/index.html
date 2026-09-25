@@ -1,0 +1,234 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 web-compat</title>
+<style>
+  body { font: 15px/1.45 -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 12px; background: #101418; color: #e8eef4; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #8fa3b5; font-size: 13px; margin-bottom: 12px; }
+  #summary { font-size: 26px; font-weight: 700; padding: 12px; border-radius: 8px; text-align: center; margin-bottom: 12px; background: #26313a; }
+  #summary.pass { background: #0b5c2a; }
+  #summary.fail { background: #7a1723; }
+  .grp { margin: 14px 0 6px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: #8fa3b5; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 7px 9px; border-radius: 6px; background: #1a2229; margin-bottom: 4px; display: flex; gap: 8px; align-items: baseline; }
+  .tag { flex: 0 0 auto; font-weight: 700; font-size: 12px; padding: 1px 6px; border-radius: 4px; }
+  .PASS { background: #0b5c2a; color: #b8f0c8; }
+  .FAIL { background: #7a1723; color: #ffc9cf; }
+  .SKIP { background: #4a4118; color: #ffe8a3; }
+  .name { flex: 1 1 auto; }
+  .note { color: #8fa3b5; font-size: 12px; word-break: break-all; }
+  a.card { display: block; padding: 10px; background: #1a2229; border-radius: 6px; margin-bottom: 4px; color: #7fc5ff; text-decoration: none; }
+</style>
+
+<h1>Apotheosis &mdash; web compatibility (0.2.0 suite)</h1>
+<div class="sub">Everything below runs in this page. No console needed.</div>
+<div id="summary">running…</div>
+
+<div class="grp">0.2.0 &mdash; Web Platform baseline</div>
+<a class="card" href="/pages/platform.html"><b>Web Platform baseline overview</b> &mdash; iframe, storage, IDB, WebSocket, crypto &rsaquo;</a>
+
+<div class="grp">Automatic</div>
+<ul id="results"></ul>
+
+<div class="grp">Manual (open, then come back)</div>
+<a class="card" href="/pages/csp-enforced.html">CSP enforcement (header policy) &rsaquo;</a>
+<a class="card" href="/pages/csp-meta.html">CSP enforcement (&lt;meta&gt; policy) &rsaquo;</a>
+<a class="card" href="/pages/upload.html">File upload (&lt;input type=file&gt;) &rsaquo;</a>
+<a class="card" href="/pages/history.html">History: hash / pushState / replaceState / back &rsaquo;</a>
+<a class="card" href="/pages/dialogs.html">JS dialogs: alert / confirm / prompt &rsaquo;</a>
+<a class="card" href="/api/redirect/302">Top-level 302 &mdash; address bar must show /api/redirect/done &rsaquo;</a>
+<a class="card" href="/api/redirect/chain?n=3">Top-level 3-hop redirect chain &rsaquo;</a>
+<a class="card" href="/pages/cookie-persist.html">Cookie persistence across restart &rsaquo;</a>
+
+<script>
+// Deliberately ES5-ish and Promise-free where it is easy: the point is to test the
+// browser, and a test harness that needs async/await to even start would hide a
+// failure in the engine behind a syntax error.
+var results = document.getElementById('results');
+var pass = 0, fail = 0;
+
+function record(name, ok, note) {
+  var li = document.createElement('li');
+  var tag = document.createElement('span');
+  tag.className = 'tag ' + (ok === null ? 'SKIP' : (ok ? 'PASS' : 'FAIL'));
+  tag.textContent = ok === null ? 'SKIP' : (ok ? 'PASS' : 'FAIL');
+  var nm = document.createElement('span');
+  nm.className = 'name';
+  nm.textContent = name;
+  if (note) {
+    var n = document.createElement('div');
+    n.className = 'note';
+    n.textContent = note;
+    nm.appendChild(n);
+  }
+  li.appendChild(tag);
+  li.appendChild(nm);
+  results.appendChild(li);
+  if (ok === true) pass++;
+  else if (ok === false) fail++;
+  var s = document.getElementById('summary');
+  s.textContent = fail ? (fail + ' FAILED, ' + pass + ' passed') : (pass + ' PASSED');
+  s.className = fail ? 'fail' : 'pass';
+}
+
+function get(url, cb) {
+  // A failed request can signal through readystatechange AND onerror; call back at
+  // most once, or a single test records itself twice and the tally lies.
+  var done = false;
+  function finish(status, text, x) { if (done) return; done = true; cb(status, text, x); }
+  var x = new XMLHttpRequest();
+  x.open('GET', url, true);
+  x.onreadystatechange = function () {
+    if (x.readyState !== 4) return;
+    finish(x.status, x.responseText, x);
+  };
+  x.onerror = function () { finish(0, '', x); };
+  try { x.send(); } catch (e) { finish(0, '', x); }
+}
+
+function jsonOf(text) { try { return JSON.parse(text); } catch (e) { return null; } }
+
+// Tests run one after another so a failure cannot be blamed on interleaving.
+var queue = [];
+function step(fn) { queue.push(fn); }
+function next() { var fn = queue.shift(); if (fn) fn(); }
+
+// ---- cookies ------------------------------------------------------------
+
+step(function () {
+  document.cookie = 'domcookie=alpha; path=/';
+  var seen = document.cookie.indexOf('domcookie=alpha') >= 0;
+  record('document.cookie set is readable back from document.cookie', seen, document.cookie);
+  next();
+});
+
+step(function () {
+  // The headline 0.1.9 fix: DOM cookie and HTTP request cookie are one store.
+  get('/api/cookie/echo', function (status, text) {
+    var j = jsonOf(text) || {};
+    var ok = (j.cookie || '').indexOf('domcookie=alpha') >= 0;
+    record('cookie set via document.cookie IS SENT on an HTTP request', ok,
+           'server saw: ' + (j.cookie || '(none)'));
+    next();
+  });
+});
+
+step(function () {
+  get('/api/cookie/set?name=httpcookie&value=beta&maxage=3600', function () {
+    var ok = document.cookie.indexOf('httpcookie=beta') >= 0;
+    record('Set-Cookie from HTTP IS VISIBLE to document.cookie', ok, document.cookie);
+    next();
+  });
+});
+
+step(function () {
+  get('/api/cookie/set?name=secretcookie&value=gamma&httponly=1&maxage=3600', function () {
+    var leaked = document.cookie.indexOf('secretcookie') >= 0;
+    record('HttpOnly cookie is HIDDEN from document.cookie', !leaked, document.cookie);
+    next();
+  });
+});
+
+step(function () {
+  get('/api/cookie/echo', function (status, text) {
+    var j = jsonOf(text) || {};
+    var ok = (j.cookie || '').indexOf('secretcookie=gamma') >= 0;
+    record('HttpOnly cookie IS still sent on HTTP requests', ok,
+           'server saw: ' + (j.cookie || '(none)'));
+    next();
+  });
+});
+
+step(function () {
+  // A page must never be able to scope a cookie to a public suffix. With the old
+  // "nothing is a public suffix" stub this was accepted.
+  document.cookie = 'pslbad=1; domain=.com; path=/';
+  var accepted = document.cookie.indexOf('pslbad') >= 0;
+  record('cookie with Domain=.com is REJECTED (public suffix)', !accepted, document.cookie);
+  next();
+});
+
+step(function () {
+  var host = location.hostname;
+  var isIp = /^[0-9.]+$/.test(host) || host.indexOf(':') >= 0;
+  if (isIp || host.indexOf('.') < 0) {
+    record('cookie Domain= registrable-domain sharing', null,
+           'skipped: server reached by IP/hostname without a public suffix (' + host + ')');
+  } else {
+    document.cookie = 'pslok=1; domain=' + host + '; path=/';
+    record('cookie with Domain=<own host> is accepted', document.cookie.indexOf('pslok=1') >= 0, document.cookie);
+  }
+  next();
+});
+
+// ---- redirects ----------------------------------------------------------
+
+step(function () {
+  get('/api/redirect/302', function (status, text, x) {
+    var landed = text.indexOf('REDIRECT LANDED') >= 0;
+    var finalUrl = x.responseURL || '(responseURL unsupported)';
+    record('XHR follows a 302 to the target', landed && status === 200,
+           'status ' + status + ', responseURL ' + finalUrl);
+    next();
+  });
+});
+
+step(function () {
+  get('/api/redirect/chain?n=3', function (status, text) {
+    record('XHR follows a 3-hop redirect chain', text.indexOf('REDIRECT LANDED') >= 0,
+           'status ' + status);
+    next();
+  });
+});
+
+step(function () {
+  // Cookie set on the 302 itself must survive to the redirect target.
+  get('/api/cookie/set-then-echo', function (status, text) {
+    var j = jsonOf(text) || {};
+    var ok = (j.cookie || '').indexOf('redirect_session=ok') >= 0;
+    record('Set-Cookie ON THE 302 is applied before the next hop', ok,
+           'target saw: ' + (j.cookie || '(none)'));
+    next();
+  });
+});
+
+// ---- network edges ------------------------------------------------------
+
+step(function () {
+  var t0 = new Date().getTime();
+  get('/api/slow?ms=1500', function (status) {
+    var dt = new Date().getTime() - t0;
+    record('slow response (1.5s) completes without being dropped', status === 200,
+           'status ' + status + ' after ' + dt + 'ms');
+    next();
+  });
+});
+
+step(function () {
+  get('/api/abrupt', function (status, text) {
+    // Either outcome is acceptable; what must NOT happen is a hang or a crash.
+    record('connection closed mid-response is handled (no hang)', true,
+           'status ' + status + ', ' + text.length + ' bytes received');
+    next();
+  });
+});
+
+// ---- misc ---------------------------------------------------------------
+
+step(function () {
+  record('localStorage available', (function () {
+    try { localStorage.setItem('k', 'v'); return localStorage.getItem('k') === 'v'; }
+    catch (e) { return false; }
+  })(), '');
+  next();
+});
+
+step(function () {
+  var s = document.getElementById('summary');
+  if (!fail) { s.textContent = 'ALL ' + pass + ' PASSED'; s.className = 'pass'; }
+  else { s.textContent = fail + ' FAILED / ' + pass + ' passed'; s.className = 'fail'; }
+});
+
+next();
+</script>

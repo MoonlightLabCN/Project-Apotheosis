@@ -19,6 +19,7 @@
 #include "FloatSize.h"
 #include "graphics/SystemFontDatabase.h"
 #include "graphics/win/DisplayRefreshMonitorWin.h"
+#include "LegacyWebSocketInspectorInstrumentation.h"
 #include <pal/text/KillRing.h>
 #include <pal/system/Sound.h>
 #include <wtf/Assertions.h>
@@ -106,18 +107,11 @@ std::optional<SharedMemory::Handle> SharedMemory::createHandle(Protection)
 }
 
 // ============================================================================
-// PublicSuffixStore (PublicSuffixStore.h). No libpsl: report nothing is a
-// public suffix and no top-private domain. Safe defaults (false / empty).
+// PublicSuffixStore — MOVED to PublicSuffixStorePort.cpp (0.1.9).
+// The old stub here returned false / empty, which is unsafe in the permissive
+// direction: with "nothing is a public suffix", cookie domain validation accepts
+// Domain=.co.uk. The real Mozilla list is now compiled in; see that file.
 // ============================================================================
-bool PublicSuffixStore::platformIsPublicSuffix(StringView) const
-{
-    return false;
-}
-
-String PublicSuffixStore::platformTopPrivatelyControlledDomain(StringView) const
-{
-    return String();
-}
 
 // ============================================================================
 // SystemFontDatabase (graphics/SystemFontDatabase.h). singleton returns a
@@ -202,6 +196,43 @@ void ImageAdapter::invalidate()
 bool HTMLSelectElement::platformHandleKeydownEvent(KeyboardEvent*)
 {
     return false;
+}
+
+// 0.2.0: WebKitLegacy WebSocketChannel calls these inspector hooks. The real
+// TU (inspector/LegacyWebSocketInspectorInstrumentation.cpp) is not compiled
+// into this port's WebCore (ENABLE_REMOTE_INSPECTOR is off). No inspector
+// frontends exist here, so hasFrontends() is false and the rest are no-ops.
+bool LegacyWebSocketInspectorInstrumentation::hasFrontends()
+{
+    return false;
+}
+
+void LegacyWebSocketInspectorInstrumentation::didCreateWebSocket(Document*, WebSocketChannelIdentifier, const URL&)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::willSendWebSocketHandshakeRequest(Document*, WebSocketChannelIdentifier, const ResourceRequest&)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::didReceiveWebSocketHandshakeResponse(Document*, WebSocketChannelIdentifier, const ResourceResponse&)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::didCloseWebSocket(Document*, WebSocketChannelIdentifier)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::didReceiveWebSocketFrame(Document*, WebSocketChannelIdentifier, const WebSocketFrame&)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::didSendWebSocketFrame(Document*, WebSocketChannelIdentifier, const WebSocketFrame&)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::didReceiveWebSocketFrameError(Document*, WebSocketChannelIdentifier, const String&)
+{
 }
 
 } // namespace WebCore

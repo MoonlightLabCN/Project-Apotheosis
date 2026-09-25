@@ -14,14 +14,27 @@
 #include "LoadingFrameLoaderClient.h"
 
 // Mirror the EmptyClients.cpp include set needed by the FrameLoaderClient bodies.
+#include <WebCore/Document.h>
 #include <WebCore/DocumentLoader.h>
+#include <WebCore/FrameIdentifier.h>              // generateFrameIdentifier()
+#include <WebCore/DocumentPage.h>                 // Frame::page()/localTopDocument() 的 inline 定义
+#include <WebCore/FrameLoader.h>                  // 0.2.0 iframe: frame()/stopAllLoaders
 #include <WebCore/FrameLoaderClient.h>            // FramePolicyFunction, PolicyAction
 #include <WebCore/FrameLoaderTypes.h>             // PolicyAction enum
 #include <WebCore/FrameNetworkingContext.h>
+#include <WebCore/FrameTree.h>                    // 0.2.0 iframe: setSpecifiedName/parent
+#include <WebCore/FrameTreeSyncData.h>            // 0.2.0 iframe: createSubframe 参数
+#include <WebCore/HTMLFrameOwnerElement.h>        // 0.2.0 iframe: sandboxFlags/referrerPolicy
 #include <WebCore/HistoryItem.h>
+#include <WebCore/IntSize.h>
 #include <WebCore/LocalFrame.h>
+#include <WebCore/LocalFrameView.h>
+#include <WebCore/Page.h>
 #include <WebCore/NetworkStorageSession.h>
 #include "PortNetworkStorageSession.h"   // cookie 持久化:真 storageSession
+#include "PortUIBridge.h"                // 0.2.0 target=_blank -> 壳开新标签
+#include <WebCore/NavigationAction.h>
+#include <string>
 #include <WebCore/ResourceError.h>
 #include <WebCore/ResourceRequest.h>
 #include <WebCore/ResourceResponse.h>
@@ -91,10 +104,19 @@ void LoadingFrameLoaderClient::dispatchDecidePolicyForResponse(const ResourceRes
     policyFunction(PolicyAction::Use);
 }
 
-// We have no UI to open new windows in a headless render; ignore the request
-// (but still complete the policy check so the loader is not left hanging).
-void LoadingFrameLoaderClient::dispatchDecidePolicyForNewWindowAction(const NavigationAction&, const ResourceRequest&, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&& policyFunction)
+// <a target="_blank">、<form target="...">,以及任何指向具名新窗口的导航。
+//
+// 0.2.0:不再直接丢弃。把 URL 交给 UI bridge,壳会新建一个标签并加载它。
+// 策略仍然回 Ignore —— 那是"当前这一帧不要导航"的意思,正确:目标是新窗口,不是本帧。
+// (window.open() 走的是另一条路:ChromeClient::createWindow,见 PortChromeClient.cpp。)
+void LoadingFrameLoaderClient::dispatchDecidePolicyForNewWindowAction(const NavigationAction& action, const ResourceRequest& request, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&& policyFunction)
 {
+    const URL& url = request.url().isValid() ? request.url() : action.url();
+    if (url.isValid() && !url.isEmpty() && !url.isAboutBlank()) {
+        auto utf8 = url.string().utf8();
+        if (utf8.data())
+            WebCorePort::enqueueNewWindow(std::string(utf8.data(), utf8.length()));
+    }
     policyFunction(PolicyAction::Ignore);
 }
 
@@ -168,9 +190,68 @@ bool LoadingFrameLoaderClient::isEmptyFrameLoaderClient() const
 // Everything below is the verbatim EmptyFrameLoaderClient no-op behavior.
 // ---------------------------------------------------------------------------
 
-RefPtr<LocalFrame> LoadingFrameLoaderClient::createFrame(const AtomString&, HTMLFrameOwnerElement&)
+// ---------------------------------------------------------------------------
+// iframe / frame(0.2.0)。
+//
+// 归属完全交给 WebCore,不自造一套 ownership:
+//   · LocalFrame      —— Page 的 FrameTree 持有(createSubframe 内部 AddToFrameTree::Yes);
+//                        本函数返回的 RefPtr 只是给调用方 HTMLFrameOwnerElement 用的。
+//   · FrameLoaderClient —— 每个子帧一个,由该帧的 FrameLoader 经 `const UniqueRef` 持有,
+//                        随帧析构。驱动的 g_session->client 只记主帧那一个(主帧的 client 来自
+//                        PageConfiguration.mainFrameCreationParameters.clientCreator,和这里
+//                        是两条独立路径,不会被子帧覆盖)。
+//   · ChromeClient    —— 全 Page 共用 PortChromeClient,子帧不需要自己的。
+//   · 网络 profile     —— cookie jar / CA / UA 都是进程级单例(见 PortNetworkStorageSession +
+//                        ResourceHandle 的 WebCorePortDefaultStorageSession 钩子),子帧因此
+//                        天然与主帧共用同一 profile,不需要、也不允许另开 store。
+//   · sandbox/跨源     —— 只负责把 ownerElement.sandboxFlags() 与父帧 effectiveSandboxFlags 合并
+//                        后交给 WebCore;SOP/CORS/CSP frame-src/X-Frame-Options 一律由 WebCore 判。
+//   · teardown        —— FrameLoader::stopAllLoaders() 本身就递归子帧
+//                        (FrameLoader.cpp:2154 遍历 tree().firstChild()),所以 teardownSession()
+//                        对主帧调一次即可停掉整棵树的在途加载;~Page 再做标准 detach。
+//
+// 结构与 WebFrame::createSubframe()(Source/WebKit/WebProcess/WebPage/WebFrame.cpp:154)一致,
+// 去掉其中 WebProcess↔UIProcess 的 IPC 通告(本 port 是单进程,没有 UIProcess 侧帧树副本)。
+RefPtr<LocalFrame> LoadingFrameLoaderClient::createFrame(const AtomString& name, HTMLFrameOwnerElement& ownerElement)
 {
-    return nullptr;
+    if (!m_frameLoader)
+        return nullptr;
+
+    Ref<LocalFrame> parentFrame = m_frameLoader->frame();
+    RefPtr<Page> page = parentFrame->page();
+    if (!page)
+        return nullptr;
+
+    // sandbox:owner 的 sandbox 属性 ∪ 父帧已生效的 sandbox(子帧不能比父帧权限更大)。
+    auto effectiveSandboxFlags = ownerElement.sandboxFlags();
+    effectiveSandboxFlags.add(parentFrame->effectiveSandboxFlags());
+
+    // referrer policy:owner 上没写就继承顶层文档的。
+    auto effectiveReferrerPolicy = ownerElement.referrerPolicy();
+    if (effectiveReferrerPolicy == ReferrerPolicy::EmptyString) {
+        if (RefPtr localTopDocument = page->localTopDocument())
+            effectiveReferrerPolicy = localTopDocument->referrerPolicy();
+    }
+
+    Ref<LocalFrame> subframe = LocalFrame::createSubframe(*page,
+        [](LocalFrame&, FrameLoader& frameLoader) -> UniqueRef<LocalFrameLoaderClient> {
+            return makeUniqueRefWithoutRefCountedCheck<LoadingFrameLoaderClient>(frameLoader);
+        },
+        WebCore::generateFrameIdentifier(), effectiveSandboxFlags, effectiveReferrerPolicy,
+        ownerElement, WebCore::FrameTreeSyncData::create());
+
+    subframe->tree().setSpecifiedName(name);
+
+    // init() 建初始空文档并首次 commit(→ transitionToCommittedForNewPage,那里给子帧建 view)。
+    subframe->init();
+
+    // init() 会跑脚本(初始空文档的 load 事件、owner 上的 onload 等),脚本可能当场把 iframe
+    // 从 DOM 里摘掉。此时帧已 detach,返回它会让调用方拿到一个不在树上的帧 —— 与
+    // WebLocalFrameLoaderClient::createFrame 同样的两道判空。
+    if (!subframe->page())
+        return nullptr;
+
+    return subframe.ptr();
 }
 
 RefPtr<Widget> LoadingFrameLoaderClient::createPlugin(HTMLPlugInElement&, const URL&, const Vector<AtomString>&, const Vector<AtomString>&, const String&, bool)
@@ -501,8 +582,31 @@ void LoadingFrameLoaderClient::didRestoreFrameHierarchyForCachedFrame()
 
 #endif
 
+// 每次 commit(含 FrameLoader::init() 建初始空文档)都会调到这里,由 client 负责给帧建
+// LocalFrameView —— 这是 WebKit 的契约(见 WebLocalFrameLoaderClient::transitionToCommittedForNewPage,
+// 它调 localFrame->createView(...))。
+//
+// 主帧:保持 0.1.9 之前的行为——什么都不做。主帧的 view 由驱动在 buildSession() 里显式
+//   setView(LocalFrameView::create(...)) + resize(w,h) 建好,尺寸/背景/滚动条都是驱动说了算;
+//   在这里重建会把驱动设好的视口尺寸冲掉。零回归优先。
+// 子帧:必须建,否则子帧永远没有 view → 不布局、不绘制,且 RenderIFrame 拿不到 widget。
+//   尺寸给空:子帧 view 的几何随后由 RenderWidget::updateWidgetGeometry 从 owner 的 renderer
+//   反推设定,这里给什么都会被覆盖。滚动条模式取 owner 的 scrollingMode()(scrolling="no" 生效)。
 void LoadingFrameLoaderClient::transitionToCommittedForNewPage(InitializingIframe)
 {
+    if (!m_frameLoader)
+        return;
+    Ref<LocalFrame> frame = m_frameLoader->frame();
+    if (!frame->tree().parent())
+        return;                       // 主帧:驱动自己管 view
+    if (!frame->page())
+        return;                       // createView() 内部 ASSERT(page())
+
+    auto scrollbarMode = frame->scrollingMode();
+    frame->createView(WebCore::IntSize(), /*backgroundColor*/ std::nullopt, WebCore::IntSize(),
+        /*useFixedLayout*/ false,
+        scrollbarMode, /*horizontalLock*/ scrollbarMode == WebCore::ScrollbarMode::AlwaysOff,
+        scrollbarMode, /*verticalLock*/ scrollbarMode == WebCore::ScrollbarMode::AlwaysOff);
 }
 
 void LoadingFrameLoaderClient::didRestoreFromBackForwardCache()

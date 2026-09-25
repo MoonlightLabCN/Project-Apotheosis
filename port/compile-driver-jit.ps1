@@ -12,7 +12,7 @@ $cmd = $cmd -replace '/Fd\S+',''
 $cmd = $cmd -replace '-c\s+--\s+\S+UnifiedSource\S+',''
 # ★ 关键:头/库路径换到 JIT 构建目录
 $cmd = $cmd -replace 'build-clang-webcore','build-clang-jit'
-$cmd = "$cmd -IE:\Apotheosis\WebKit\Source\WebKitLegacy\WebCoreSupport -IE:\Apotheosis\WebKit\Source\WebKitLegacy /Fo`"$Obj`" -c -- `"$Src`""
+$cmd = "$cmd -IE:\Apotheosis\WebKit\Source\WebKitLegacy\WebCoreSupport -IE:\Apotheosis\WebKit\Source\WebKitLegacy\Storage -IE:\Apotheosis\WebKit\Source\WebKitLegacy /Fo`"$Obj`" -c -- `"$Src`""
 
 $bat = "E:\Apotheosis\port\_driver_compile_jit.bat"
 Set-Content -Path $bat -Value $cmd -Encoding ASCII

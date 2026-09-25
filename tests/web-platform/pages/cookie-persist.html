@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cookie persistence across restart</title>
+<style>
+  body { font:15px/1.45 -apple-system,"Segoe UI",sans-serif; margin:0; padding:12px; background:#101418; color:#e8eef4; }
+  #summary { font-size:22px; font-weight:700; padding:12px; border-radius:8px; text-align:center; margin:10px 0; background:#26313a; }
+  #summary.pass { background:#0b5c2a; } #summary.fail { background:#7a1723; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:6px; padding:10px 14px; font-size:15px; margin:4px 4px 4px 0; }
+  pre { background:#1a2229; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-all; font-size:12px; }
+  .step { background:#1a2229; padding:10px; border-radius:6px; margin-bottom:8px; }
+  a { color:#7fc5ff; }
+</style>
+
+<h1 style="font-size:18px">Cookie persistence across a browser restart</h1>
+<div id="summary">checking…</div>
+
+<div class="step">
+  <b>1.</b> <button id="plant">Plant a 1-year persistent cookie</button>
+  &nbsp;<button id="plantsession">Plant a session cookie</button>
+</div>
+<div class="step">
+  <b>2.</b> Fully close the browser (not just background it — the snapshot is written
+  on suspend), reopen it, and come back to this page.
+</div>
+<div class="step">
+  <b>3.</b> Expected: the persistent cookie is still here, the session cookie is gone.
+  <div style="color:#8fa3b5;font-size:12px">
+    Session cookies are intentionally not persisted — same as any browser's
+    "close and it's forgotten".
+  </div>
+</div>
+
+<div class="step">
+  <b>document.cookie</b><pre id="dom"></pre>
+  <b>Cookie header the server received</b><pre id="srv">(checking…)</pre>
+</div>
+
+<p><a href="/">&lsaquo; back to the dashboard</a></p>
+
+<script>
+function refresh() {
+  document.getElementById('dom').textContent = document.cookie || '(empty)';
+  var persistent = document.cookie.indexOf('apo_persist=') >= 0;
+  var session = document.cookie.indexOf('apo_session=') >= 0;
+  var s = document.getElementById('summary');
+  if (persistent && !session) {
+    s.textContent = 'PASS — persistent kept, session dropped';
+    s.className = 'pass';
+  } else if (persistent && session) {
+    s.textContent = 'both present — plant them, then restart the browser';
+    s.className = '';
+  } else if (!persistent && !session) {
+    s.textContent = 'no cookies yet — press "Plant" above';
+    s.className = '';
+  } else {
+    s.textContent = 'FAIL — persistent cookie did not survive';
+    s.className = 'fail';
+  }
+
+  var x = new XMLHttpRequest();
+  x.open('GET', '/api/cookie/echo', true);
+  x.onreadystatechange = function () {
+    if (x.readyState !== 4) return;
+    try { document.getElementById('srv').textContent = JSON.parse(x.responseText).cookie || '(none)'; }
+    catch (e) { document.getElementById('srv').textContent = 'request failed: ' + x.status; }
+  };
+  x.send();
+}
+
+document.getElementById('plant').onclick = function () {
+  var exp = new Date(new Date().getTime() + 365 * 24 * 3600 * 1000).toUTCString();
+  document.cookie = 'apo_persist=kept; expires=' + exp + '; path=/';
+  refresh();
+};
+document.getElementById('plantsession').onclick = function () {
+  document.cookie = 'apo_session=temp; path=/';
+  refresh();
+};
+refresh();
+</script>

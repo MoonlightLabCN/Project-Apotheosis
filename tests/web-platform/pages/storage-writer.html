@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>storage writer</title>
+<body style="font:13px sans-serif;margin:0;padding:6px;background:#fff;color:#111">
+<div id="out">writing…</div>
+<script>
+// Same-origin frame whose only job is to write to localStorage, so the parent can
+// check that a storage event reaches the OTHER document (per spec the writing
+// document does not get one).
+(function () {
+  var key = 'apo_ls_event_probe';
+  var value = 'v' + Date.now();
+  var err = '';
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (e) {
+    err = e.name || String(e);
+  }
+  document.getElementById('out').textContent = err
+    ? ('write failed: ' + err)
+    : ('wrote ' + key + '=' + value + ' — the parent should have received a storage event');
+})();
+</script>
+</body>

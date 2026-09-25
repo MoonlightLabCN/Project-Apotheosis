@@ -108,6 +108,14 @@ static void SetupRuntimeEnv()
         // 切后台时写出的持久化数据,不经过 SQLite 的真实文件 I/O。
         WebCoreSetCookieJsonPath((localDir + "\\cookies.jsonl").c_str());
 
+        // 0.2.0:profile 根目录。localStorage 落 <profile>\storage,IndexedDB 落 <profile>\indexeddb。
+        // 这两个是真 SQLite 落盘 —— 而 SQLite 打开真实文件在这个构建里原本是必崩的(就是上面那条
+        // cookie 注释说的 2026-07-03 真机 dump)。0.2.0 在引擎侧定位到根因是 SQLite 的 win32 VFS
+        // 里 CreateFileW 那一项被编成了空函数指针,并用 SQLite 自己的 xSetSystemCall 补上了
+        // (port/PortSQLiteAppContainer.*);补不齐时引擎自动退回纯内存态,不会崩。
+        // 实际走了哪条路(持久 or 内存)看 WebCoreGetStorageDiag()。
+        WebCoreSetProfilePath((localDir + "\\profile").c_str());
+
         // CA 根证书:内存 blob 注入(绕 App Container 文件式加载限制)。
         std::string srcCa = installDir + "\\cacert.pem";
         std::vector<uint8_t> caBytes;
@@ -315,6 +323,43 @@ private:
     std::deque<std::function<void()>> m_q;
 };
 
+// ============================================================================
+// 异步 UI 请求泵(0.1.9)—— 引擎 → shell 的单向请求通道,见 port/PortUIBridge.h。
+//
+// 线程规矩(本 port 的硬约束):引擎线程绝不能同步等 UI 线程。所以 WebCore 想要真 UI 的
+// 地方(<input type=file> 的 runOpenPanel、window.alert)不是"调用",而是往引擎侧队列里
+// 塞一条请求;这个函数在**引擎线程**、每个可能跑到页面脚本的 job 末尾把队列排空,
+// 用 RunAsync 交给 UI 线程去弹真 picker。答案再经 WebEngine::post 回引擎线程。
+// 全程没有任何 .get()/WaitHandle/忙等。
+// ============================================================================
+void MainPage::DrainUIRequests(CoreDispatcher^ disp, Platform::Agile<MainPage^> self)
+{
+    for (;;) {
+        unsigned long long id = 0;
+        char payload[2048] = "";
+        int kind = 0;
+        try { kind = WebCoreTakeUIRequest(&id, payload, sizeof payload); } catch (...) { return; }
+        if (kind <= 0)
+            return;
+        auto text = std::make_shared<std::string>(payload);
+        try {
+            disp->RunAsync(CoreDispatcherPriority::Normal,
+                ref new DispatchedHandler([self, kind, id, text]() {
+                    MainPage^ s = self.Get();
+                    if (!s) return;
+                    s->OnEngineUIRequest(kind, id, *text);
+                }));
+        } catch (...) {
+            // dispatcher 断开(窗口没了):文件选择必须回一个"取消",否则页面里的
+            // <input type=file> 会永远停在等待态。
+            if (kind == 1) {
+                try { WebCoreCompleteFileChooser(id, nullptr, 0); } catch (...) {}
+            }
+            return;
+        }
+    }
+}
+
 // App::OnSuspending 的落地点(见 App.xaml.cpp):cookie JSON 落盘转给引擎线程串行执行,写完才
 // Complete deferral——UWP 挂起到进程被冻结/可能被系统直接终止之间只给系统定的几秒钟,这是唯一
 // 有时间保证的落盘时机(Window::VisibilityChanged 触发的是不等结果的 fire-and-forget,曾实测
@@ -323,6 +368,9 @@ void MainPage::FlushCookiesForSuspend(Windows::ApplicationModel::SuspendingDefer
 {
     WebEngine::instance().post([deferral]() {
         try { WebCoreFlushCookiesToDisk(); } catch (...) {}
+        // 0.2.0:localStorage 同理 —— StorageAreaImpl 攒批异步刷,不在这里主动落盘,
+        // 挂起后被冻结/终止就会丢掉最后一批写入。
+        try { WebCoreFlushStorage(); } catch (...) {}
         deferral->Complete();
     });
 }
@@ -716,6 +764,7 @@ void MainPage::NavigateTo(Platform::String^ url, bool pushHistory)
         bool loadOk = false;   // 网络加载是否真成功(区别于错误页渲染成功),决定是否进历史
         bool sessionActive = false;   // 是否建立了引擎常驻会话(决定点击转发/翻页按钮)
         std::wstring title;
+        std::wstring finalUrl;        // 0.1.9:重定向走完后引擎真正提交的 URL(空=沿用请求的)
         try {
             if (isHome) {
                 WebCoreCloseSession();   // 离开网络页:销毁会话,释放 Page + 取消在途加载
@@ -739,6 +788,13 @@ void MainPage::NavigateTo(Platform::String^ url, bool pushHistory)
                     sessionActive = true;
                     title = ToWide(t);
                     if (title.empty()) title = Utf8ToWide(surl);
+                    // 0.1.9:最终 URL。引擎的 WebCoreGetUrl 返回的是 document.url(),也就是
+                    // 走完 301/302 之后真正提交的那个 URL。以前 UI 一直显示"请求的" URL:
+                    // 地址栏、后退栈、历史记录三处全记成重定向前的地址,锁形图标也按错的
+                    // scheme 判 https。这里把它带回 UI 线程。
+                    char fu[1024] = "";
+                    if (WebCoreGetUrl(fu, sizeof fu) > 0 && fu[0])
+                        finalUrl = Utf8ToWide(fu);
                 } else {
                     std::string eh = MakeErrorHtml(surl, err);
                     rc = WebCoreRenderHtml(eh.c_str(), kW, kH, rgba->data());   // 渲染错误页(会话已被引擎清理)
@@ -761,14 +817,18 @@ void MainPage::NavigateTo(Platform::String^ url, bool pushHistory)
             }
         } catch (...) {}
 
+        DrainUIRequests(disp, self);   // 0.1.9:页面加载期间脚本也可能弹 alert / 开文件选择
+
         auto titleCopy = std::make_shared<std::wstring>(title);
+        auto finalUrlCopy = std::make_shared<std::wstring>(finalUrl);
         bool ok = (rc == 0);   // 渲染是否成功(决定是否贴图)
         try {
             disp->RunAsync(CoreDispatcherPriority::Normal,
-                ref new DispatchedHandler([self, rgba, titleCopy, ok, loadOk, sessionActive, links, mySeq]() {
+                ref new DispatchedHandler([self, rgba, titleCopy, finalUrlCopy, ok, loadOk, sessionActive, links, mySeq]() {
                     MainPage^ s = self.Get();
                     if (!s) return;
                     if (s->m_opSeq != mySeq) return;   // 已被更新操作/看门狗取代,丢弃此迟到回调
+                    s->AdoptFinalUrl(*finalUrlCopy);   // 0.1.9:先认定最终 URL,再让下面各处用它
                     if (ok) {
                         s->PresentSoftwareFrame(rgba);
                         s->m_pageLinks = *links;   // 存当前页链接表供点击命中
@@ -785,6 +845,25 @@ void MainPage::NavigateTo(Platform::String^ url, bool pushHistory)
             // RunAsync 抛了(dispatcher 断开/低内存):OnNavDone 不会跑,m_loading 靠 UI 看门狗复位。
         }
     });
+}
+
+// 0.1.9:把引擎报回来的"最终 URL"认定为当前 URL。
+// 重定向(301/302,以及站点自己的 <meta refresh>/JS 跳转)之后,请求的 URL 和真正提交的
+// 文档 URL 不是一回事;之前 UI 只知道前者,于是地址栏、后退栈、历史三处全是错的。
+// 只在真的变了、且新值是个 http(s) URL 时才改,避免把 about:home / 错误页写脏。
+// 后退栈用"替换当前项"而不是压新项:一次重定向是一次导航,不该让用户点两次后退。
+void MainPage::AdoptFinalUrl(const std::wstring& finalUrl)
+{
+    if (finalUrl.empty() || finalUrl == m_currentUrl)
+        return;
+    if (m_currentUrl == L"about:home")
+        return;
+    if (finalUrl.rfind(L"http://", 0) != 0 && finalUrl.rfind(L"https://", 0) != 0)
+        return;
+
+    m_currentUrl = finalUrl;
+    if (m_navIndex >= 0 && m_navIndex < (int)m_navStack.size())
+        m_navStack[m_navIndex] = finalUrl;
 }
 
 void MainPage::OnNavDone(Platform::String^ finalTitle, bool ok, bool loadOk)
@@ -935,6 +1014,10 @@ void MainPage::ForwardClickToEngine(int px, int py)
                 }
             }
         }
+        // 0.1.9:点击最容易触发 <input type=file> / alert —— 在引擎线程把引擎攒下的
+        // UI 请求排空并转给 UI 线程。不阻塞、不等答复。
+        DrainUIRequests(disp, self);
+
         auto titleW = std::make_shared<std::wstring>(title);
         auto navW = std::make_shared<std::wstring>(navUrl);
         int rcCopy = rc;
@@ -1324,6 +1407,7 @@ void MainPage::SendKeyToEngine(int kind, Platform::String^ text)
             int lc = WebCoreGetLinkCount();
             for (int i = 0; i < lc; ++i) { int lx=0,ly=0,lw=0,lh=0; char lu[1200]=""; if (WebCoreGetLink(i,&lx,&ly,&lw,&lh,lu,sizeof lu)) { Harness::PageLink pl; pl.x=lx; pl.y=ly; pl.w=lw; pl.h=lh; pl.url=Utf8ToWide(lu); links->push_back(std::move(pl)); } }
         }
+        DrainUIRequests(disp, self);   // 0.1.9:回车提交表单等同样会跑到脚本
         auto navW = std::make_shared<std::wstring>(navUrl); auto titleW = std::make_shared<std::wstring>(title);
         int rcCopy = rc; int kindCopy = kind;
         try {
@@ -1392,6 +1476,8 @@ void MainPage::OnLiveTick(Platform::Object^, Platform::Object^)
         auto rgba = AcquireEngineBuffer(present);
         int rc = -999; unsigned hash = 0; int pending = 0;
         try { rc = WebCoreLiveTick(rgba->data()); if (rc == 0) { hash = WebCoreGetFrameHash(); pending = WebCoreGetPendingResourceCount(); } } catch (...) { rc = -1000; }
+        // 0.1.9:实时帧也在跑页面脚本(rAF/定时器),alert()/文件选择可能从这里冒出来。
+        DrainUIRequests(disp, self);
         int rcCopy = rc; unsigned hashCopy = hash; int pendingCopy = pending;
         try {
             disp->RunAsync(CoreDispatcherPriority::Low,
@@ -2290,6 +2376,177 @@ void MainPage::ExportDebug()
         TitleText->Text = L8(L"选择保存位置以导出…", L"Pick a location to export…");
     } catch (...) {
         TitleText->Text = L8(L"导出失败", L"Export failed");
+    }
+}
+
+// ============================================================================
+// 异步 UI 请求的 UI 侧(0.1.9)。全在 UI 线程,答案经 WebEngine::post 回引擎线程。
+// ============================================================================
+
+void MainPage::OnEngineUIRequest(int kind, unsigned long long id, const std::string& payload)
+{
+    if (kind == 1)
+        ShowFileChooser(id, payload);
+    else if (kind == 2)
+        ShowScriptAlert(payload);
+    else if (kind == 8)
+        OpenUrlInNewTab(payload);
+}
+
+// window.open() / <a target="_blank">(引擎侧 UI 请求 kind 8)。0.2.0 起不再被无声丢弃。
+//
+// 新建一个标签并切过去。⚠ 新标签**没有 opener**:引擎给不出第二个同时在跑的 Page
+// (本 port 是"一个热 Page + 若干快照"的标签模型),所以 window.open() 的返回值是 null,
+// 跨标签 window.opener / postMessage 不工作 —— 等价于 rel="noopener"。这是记录在案的
+// 兼容性限制,不是漏实现;详见 port/PortChromeClient.h 上 createWindow 的注释。
+// cookie 和 storage 是进程级共享的,所以"在新标签里登录完、回原标签刷新即生效"这条
+// 最常见的 OAuth 退路仍然成立。
+void MainPage::OpenUrlInNewTab(const std::string& url)
+{
+    if (url.empty())
+        return;
+    // 浮层开着时先收掉,否则新标签加载完用户看到的还是旧浮层。
+    HideActionMenu();
+    HideSuggestions();
+    HideTabSwitcher();
+
+    std::wstring wide = Utf8ToWide(url);
+    SaveActiveTab();
+    Tab t; t.currentUrl = wide;
+    m_tabs.push_back(t);
+    m_activeTab = (int)m_tabs.size() - 1;
+    // 与 NewTab() 同样的作废流程:换 op 序号让在途回调失效,清导航栈/缩放/标题。
+    ++m_opSeq;
+    m_interacting = false;
+    if (m_loadWatchdog) m_loadWatchdog->Stop();
+    m_loading = false;
+    m_navStack.clear(); m_navIndex = -1;
+    m_currentUrl.clear(); m_currentTitle.clear();
+    m_pageScale = 1.0f;
+    UpdateTabCount();
+    NavigateTo(ref new String(wide.c_str()), true);
+}
+
+// window.alert()。做成不打断的提示条:WebCore 的 alert 钩子按契约是模态同步的,而本 port
+// 的引擎线程不能同步等 UI,所以 JS 不会在这里暂停。这是**有意的行为偏差**,不是漏实现——
+// 真做成模态要在引擎线程跑嵌套 run loop,没有真机验证不敢上,见 0.1.9 报告。
+void MainPage::ShowScriptAlert(const std::string& message)
+{
+    std::wstring text = Utf8ToWide(message);
+    if (text.size() > 300) text = text.substr(0, 300) + L"…";
+    std::wstring prefix = (g_lang == L"en") ? L"Page says: " : L"页面提示: ";
+    TitleText->Text = ref new String((prefix + text).c_str());
+}
+
+// <input type=file>。
+//
+// 为什么要先复制到 LocalState:引擎(WebCore 的 FormData/Blob 读取)是用普通 Win32 路径读
+// 文件的,而 App Container 只对自己的目录有可靠的路径级访问权;picker 给的是 StorageFile
+// 的代理访问权,不等于引擎那条读路径一定通。复制一份到 LocalState\uploads 是唯一稳的做法,
+// 代价是一次磁盘拷贝(不占内存)。
+void MainPage::ShowFileChooser(unsigned long long id, const std::string& payload)
+{
+    // payload = "<0|1 多选>\t<accept>\t<accept>..."
+    bool multiple = (!payload.empty() && payload[0] == '1');
+    std::vector<std::wstring> accepts;
+    {
+        size_t pos = payload.find('\t');
+        while (pos != std::string::npos) {
+            size_t next = payload.find('\t', pos + 1);
+            std::string token = payload.substr(pos + 1,
+                next == std::string::npos ? std::string::npos : next - pos - 1);
+            if (!token.empty()) accepts.push_back(Utf8ToWide(token));
+            pos = next;
+        }
+    }
+
+    auto answer = [](unsigned long long reqId, std::shared_ptr<std::vector<std::wstring>> paths) {
+        // 把 N 条路径打成 "utf8\0utf8\0..." 一块缓冲交给引擎线程(C ABI 约定)。
+        auto blob = std::make_shared<std::vector<char>>();
+        int count = 0;
+        if (paths) {
+            for (const auto& p : *paths) {
+                std::string u8 = WideToUtf8(p);
+                blob->insert(blob->end(), u8.begin(), u8.end());
+                blob->push_back('\0');
+                ++count;
+            }
+        }
+        blob->push_back('\0');   // 保证非空,c_str 式读取有终止符
+        WebEngine::instance().post([reqId, blob, count]() {
+            try { WebCoreCompleteFileChooser(reqId, blob->data(), count); } catch (...) {}
+        });
+    };
+
+    try {
+        auto picker = ref new Windows::Storage::Pickers::FileOpenPicker();
+        picker->ViewMode = Windows::Storage::Pickers::PickerViewMode::List;
+        picker->SuggestedStartLocation = Windows::Storage::Pickers::PickerLocationId::DocumentsLibrary;
+
+        // FileTypeFilter 不能为空,否则 picker 直接抛。只有 ".ext" 形式能直接用;
+        // MIME(image/png、image/*)这里映射不了,退化成 "*"(全部文件)——比拒绝弹窗好。
+        bool anyExtension = false;
+        for (const auto& a : accepts) {
+            if (!a.empty() && a[0] == L'.') {
+                picker->FileTypeFilter->Append(ref new String(a.c_str()));
+                anyExtension = true;
+            }
+        }
+        if (!anyExtension)
+            picker->FileTypeFilter->Append(ref new String(L"*"));
+
+        std::wstring uploadDir = LocalStateDir() + L"\\uploads";
+        auto uploadDirW = ref new String(uploadDir.c_str());
+
+        // LocalState\uploads:每次导航不清理(下载目录同理),用 GenerateUniqueName 防重名覆盖。
+        auto localFolder = Windows::Storage::ApplicationData::Current->LocalFolder;
+        concurrency::create_task(localFolder->CreateFolderAsync(ref new String(L"uploads"),
+                Windows::Storage::CreationCollisionOption::OpenIfExists))
+            .then([picker, multiple, id, answer](Windows::Storage::StorageFolder^ folder) {
+                if (!folder) { answer(id, nullptr); return; }
+
+                if (multiple) {
+                    concurrency::create_task(picker->PickMultipleFilesAsync())
+                        .then([folder, id, answer](Windows::Foundation::Collections::IVectorView<Windows::Storage::StorageFile^>^ files) {
+                            if (!files || files->Size == 0) { answer(id, nullptr); return; }
+                            auto paths = std::make_shared<std::vector<std::wstring>>();
+                            auto pending = std::make_shared<unsigned>(files->Size);
+                            for (unsigned i = 0; i < files->Size; ++i) {
+                                Windows::Storage::StorageFile^ f = files->GetAt(i);
+                                concurrency::create_task(f->CopyAsync(folder, f->Name,
+                                        Windows::Storage::NameCollisionOption::GenerateUniqueName))
+                                    .then([paths, pending, id, answer](concurrency::task<Windows::Storage::StorageFile^> t) {
+                                        try {
+                                            Windows::Storage::StorageFile^ copy = t.get();
+                                            if (copy) paths->push_back(std::wstring(copy->Path->Data()));
+                                        } catch (...) { }
+                                        // 全部拷贝完(不论成败)才回话,少一条也不能提前回。
+                                        if (--(*pending) == 0)
+                                            answer(id, paths);
+                                    });
+                            }
+                        });
+                    return;
+                }
+
+                concurrency::create_task(picker->PickSingleFileAsync())
+                    .then([folder, id, answer](Windows::Storage::StorageFile^ file) {
+                        if (!file) { answer(id, nullptr); return; }   // 用户取消
+                        concurrency::create_task(file->CopyAsync(folder, file->Name,
+                                Windows::Storage::NameCollisionOption::GenerateUniqueName))
+                            .then([id, answer](concurrency::task<Windows::Storage::StorageFile^> t) {
+                                auto paths = std::make_shared<std::vector<std::wstring>>();
+                                try {
+                                    Windows::Storage::StorageFile^ copy = t.get();
+                                    if (copy) paths->push_back(std::wstring(copy->Path->Data()));
+                                } catch (...) { }
+                                answer(id, paths);
+                            });
+                    });
+            });
+    } catch (...) {
+        // picker 起不来(无 UI/权限/低内存):必须回一个取消,否则页面永远等着。
+        answer(id, nullptr);
     }
 }
 

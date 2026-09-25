@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — window.open / target=_blank</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>window.open / target=_blank</h1>
+<div class="sub">Mostly manual: whether a new tab appeared is a shell fact, not
+something the page can observe — especially here, where by design the page gets
+no handle on it.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<h2>Known limitation (0.2.0)</h2>
+<pre>This port runs ONE live Page plus snapshots of the other tabs. There is no second
+Page for window.open() to return a WindowProxy for, so:
+
+  · window.open() returns null
+  · the new tab has no opener  (equivalent to rel="noopener")
+  · window.opener / cross-tab postMessage do not work
+
+Cookies and storage ARE shared process-wide, so the usual OAuth fallback — log in
+in the new tab, come back, reload — still works. Returning a pointer to a Page
+that does not exist would be a use-after-free, so null is the correct answer here
+rather than a convenient lie.</pre>
+
+<h2>Manual</h2>
+<div>
+  <button id="open">window.open('/api/redirect/done')</button>
+  <button id="openblank">window.open('about:blank') &mdash; must NOT create a tab</button>
+  <a class="card" href="/api/redirect/done" target="_blank">&lt;a target="_blank"&gt; &rsaquo;</a>
+  <a class="card" href="/api/redirect/done" target="_blank" rel="noopener">&lt;a target="_blank" rel="noopener"&gt; &rsaquo;</a>
+  <button id="oauth">OAuth shape: open a "login" page that sets a cookie, then check it here</button>
+</div>
+<pre id="log">Press a button. Expected: a new tab opens and shows "REDIRECT LANDED".
+Then switch back to this tab — this page must still be alive and interactive.</pre>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+var log = document.getElementById('log');
+function say(line) { log.textContent = line + '\n\n' + log.textContent; }
+
+T.record('window.open exists', typeof window.open === 'function', typeof window.open);
+
+document.getElementById('open').onclick = function () {
+  var w = null, threw = '';
+  try { w = window.open('/api/redirect/done'); } catch (e) { threw = '' + e; }
+  say('window.open() returned: ' + (threw ? ('THREW ' + threw) : String(w)) +
+      '  — null is the documented behaviour for this port, not a failure.');
+  T.record('window.open() does not throw', threw === '', threw || 'returned ' + String(w));
+};
+
+document.getElementById('openblank').onclick = function () {
+  var w = null;
+  try { w = window.open('about:blank'); } catch (e) {}
+  say('window.open("about:blank") returned ' + String(w) +
+      ' — the shell should NOT have created a tab for it (there is nothing to load).');
+};
+
+document.getElementById('oauth').onclick = function () {
+  try { window.open('/api/cookie/set?name=oauth_token&value=xyz&maxage=600'); } catch (e) {}
+  say('Opened the "login" page in a new tab. Switch back here and press Check.');
+  var b = document.createElement('button');
+  b.textContent = 'Check: did the cookie reach this tab?';
+  b.onclick = function () {
+    T.getJSON('/api/cookie/echo', function (status, obj) {
+      var got = obj && (obj.cookie || '').indexOf('oauth_token=xyz') >= 0;
+      say('Cookie visible in this tab: ' + (got ? 'YES — the profile is shared' : 'no'));
+      T.record('a cookie set in the new tab is visible in the opener tab', got,
+        obj ? ('Cookie: ' + (obj.cookie || '(none)')) : ('status ' + status));
+    });
+  };
+  log.parentNode.insertBefore(b, log);
+};
+</script>

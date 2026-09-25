@@ -1,0 +1,125 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — Web Platform baseline</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>Web Platform baseline (0.2.0)</h1>
+<div class="sub">One screen: is each subsystem present at all? Then open the
+per-subsystem suites for the real checks. Presence is not the same as working —
+a green line here only means the API exists.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<div class="grp">Full suites</div>
+<a class="card" href="/pages/iframe/index.html">iframe / subframe &rsaquo;</a>
+<a class="card" href="/pages/cookies-samesite.html">Cookie SameSite &rsaquo;</a>
+<a class="card" href="/pages/storage.html">localStorage / sessionStorage &rsaquo;</a>
+<a class="card" href="/pages/indexeddb.html">IndexedDB &rsaquo;</a>
+<a class="card" href="/pages/websocket.html">WebSocket &rsaquo;</a>
+<a class="card" href="/pages/new-window.html">window.open / target=_blank &rsaquo;</a>
+<a class="card" href="/pages/crypto.html">WebCrypto &rsaquo;</a>
+<a class="card" href="/">0.1.9 web-compat suite (cookies, CSP, redirects, upload) &rsaquo;</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+// Presence probes only. Each one is the single cheapest question that tells a
+// wired-up subsystem from an Empty/Dummy provider, which is exactly the 0.1.9 ->
+// 0.2.0 delta.
+
+function probe(name, fn, hint) {
+  var ok = false, note = '';
+  try { var r = fn(); ok = !!r; note = (typeof r === 'string') ? r : ''; }
+  catch (e) { ok = false; note = 'threw ' + (e.name || e); }
+  T.record(name, ok, note || hint || '');
+}
+
+probe('iframe subframes are created', function () {
+  var f = document.createElement('iframe');
+  f.style.cssText = 'position:absolute;left:-9999px;width:10px;height:10px';
+  f.src = 'about:blank';
+  document.body.appendChild(f);
+  var has = !!(f.contentWindow);
+  document.body.removeChild(f);
+  return has ? 'contentWindow present' : false;
+}, 'createFrame() returned nullptr — no subframe was created');
+
+probe('window.localStorage', function () {
+  window.localStorage.setItem('__probe', '1');
+  var v = window.localStorage.getItem('__probe');
+  window.localStorage.removeItem('__probe');
+  return v === '1' ? 'read/write ok' : false;
+}, 'no StorageNamespaceProvider');
+
+probe('window.sessionStorage', function () {
+  window.sessionStorage.setItem('__probe', '1');
+  var v = window.sessionStorage.getItem('__probe');
+  window.sessionStorage.removeItem('__probe');
+  return v === '1' ? 'read/write ok' : false;
+}, 'no StorageNamespaceProvider');
+
+probe('window.indexedDB', function () {
+  return window.indexedDB ? 'present' : false;
+}, 'no DatabaseProvider');
+
+probe('window.WebSocket', function () {
+  return window.WebSocket ? 'constructor present' : false;
+}, 'EmptySocketProvider');
+
+probe('crypto.subtle', function () {
+  return (window.crypto && window.crypto.subtle) ? 'present' : false;
+}, 'empty CryptoAlgorithmRegistry');
+
+probe('window.open', function () {
+  return typeof window.open === 'function' ? 'present (returns null by design here)' : false;
+});
+
+// confirm()/prompt() are informational, never PASS/FAIL: what "correct" means here
+// differs between a reference browser (whatever the user clicked) and this port
+// (always cancel, because a real modal needs a nested run loop on the engine
+// thread — see the 0.2.0 report). Recording the observed value keeps a future
+// change visible without making the suite red on desktop.
+(function () {
+  var c = 'threw', p = 'threw';
+  try { c = String(window.confirm('probe')); } catch (e) {}
+  try { p = String(window.prompt('probe', 'x')); } catch (e) {}
+  T.record('confirm() / prompt() observed return values', null,
+    'confirm -> ' + c + ', prompt -> ' + p +
+    '. On this port both are hard-wired to cancel (false / null): a spec-correct ' +
+    'modal needs a nested run loop on the engine thread. Documented limitation.');
+})();
+
+// A real IndexedDB open, because "the global exists" is exactly the trap this
+// page is meant to avoid falling into.
+if (window.indexedDB) {
+  T.begin();
+  var settled = false;
+  var t = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    T.record('indexedDB.open() actually completes', false, 'no callback within 8 s');
+    T.end();
+  }, 8000);
+  try {
+    var r = indexedDB.open('__apo_probe', 1);
+    r.onsuccess = function () {
+      if (settled) return;
+      settled = true; clearTimeout(t);
+      T.record('indexedDB.open() actually completes', true, 'version ' + r.result.version);
+      try { r.result.close(); } catch (e) {}
+      T.end();
+    };
+    r.onerror = function () {
+      if (settled) return;
+      settled = true; clearTimeout(t);
+      T.record('indexedDB.open() actually completes', false,
+        'error: ' + (r.error && r.error.name || 'unknown'));
+      T.end();
+    };
+  } catch (e) {
+    settled = true; clearTimeout(t);
+    T.record('indexedDB.open() actually completes', false, 'threw ' + e);
+    T.end();
+  }
+}
+</script>

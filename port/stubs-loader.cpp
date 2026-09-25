@@ -1,9 +1,10 @@
-// stubs-loader.cpp — Phase 1b 接入 curl 网络后端后链接残留的 13 个符号。
+// stubs-loader.cpp — Phase 1b 接入 curl 网络后端后链接残留的符号。
 //  - WebResourceLoadScheduler 的 10 个 xxxError 工厂(LoaderStrategy 纯虚,upstream 由嵌入层
 //    实现;本端无嵌入层 → 返回通用 ResourceError)。
 //  - CurlSSLHandle::platformInitialize(跨平台版被 OS(WINDOWS) 守掉,Win 版 CurlSSLHandleWin.cpp
 //    已排除 → 空 no-op;TLS 根证书走打包的 cacert.pem + setCACertPath)。
-//  - CryptoAlgorithmRSA_PSS::platformSign/Verify(WebCrypto 后端未编 → NotSupported)。
+// 0.2.0:CryptoAlgorithmRSA_PSS::platformSign/Verify 已由 crypto/openssl/
+// CryptoAlgorithmRSA_PSSOpenSSL.cpp 提供,不可再在这里出 NotSupported 假实现(会 LNK2005)。
 #include "config.h"
 
 #include "WebResourceLoadScheduler.h"
@@ -11,11 +12,6 @@
 #include "ResourceRequest.h"
 #include "ResourceResponse.h"
 #include "CurlSSLHandle.h"
-#include "CryptoAlgorithmRSA_PSS.h"
-#include "CryptoAlgorithmRsaPssParams.h"
-#include "CryptoKeyRSA.h"
-#include "ExceptionOr.h"
-#include "ExceptionCode.h"
 #include <wtf/Assertions.h>
 
 using namespace WebCore;
@@ -40,15 +36,5 @@ namespace WebCore {
 
 // ---- CurlSSLHandle 平台初始化(Win 版已排除;空 no-op,CA 走 cacert.pem)----
 void CurlSSLHandle::platformInitialize() { }
-
-// ---- WebCrypto RSA-PSS(无后端)----
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmRSA_PSS::platformSign(const CryptoAlgorithmRsaPssParams&, const CryptoKeyRSA&, const Vector<uint8_t>&)
-{
-    return Exception { ExceptionCode::NotSupportedError };
-}
-ExceptionOr<bool> CryptoAlgorithmRSA_PSS::platformVerify(const CryptoAlgorithmRsaPssParams&, const CryptoKeyRSA&, const Vector<uint8_t>&, const Vector<uint8_t>&)
-{
-    return Exception { ExceptionCode::NotSupportedError };
-}
 
 } // namespace WebCore

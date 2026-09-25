@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>storage probe</title>
+<body style="font:13px sans-serif;margin:0;padding:6px;background:#fff;color:#111">
+<div id="out">probing…</div>
+<script>
+// Loaded in a frame from the OTHER origin. Reports what it can see in its own
+// localStorage; the parent asserts that our key is not among it.
+(function () {
+  var m = /[?&]key=([^&]*)/.exec(location.search);
+  var wanted = m ? decodeURIComponent(m[1]) : '';
+  var count = -1, saw = null, err = '';
+  try {
+    count = window.localStorage.length;
+    saw = window.localStorage.getItem(wanted) !== null;
+    // Leave a marker so it is obvious this origin has its own, separate store.
+    window.localStorage.setItem('probe_origin', location.origin);
+  } catch (e) {
+    err = e.name || String(e);
+  }
+  document.getElementById('out').textContent =
+    'origin=' + location.origin + ' keys=' + count + ' foreignKeyVisible=' + saw + (err ? (' err=' + err) : '');
+  try {
+    window.parent.postMessage(JSON.stringify({
+      tag: 'storage-probe', origin: location.origin, count: count, sawForeignKey: saw, error: err
+    }), '*');
+  } catch (e) {}
+})();
+</script>
+</body>

@@ -58,6 +58,24 @@ void WebCoreSetCookieJsonPath(const char* path);
 // a suspended app without notice). Engine-thread call.
 void WebCoreFlushCookiesToDisk();
 
+// ---- 0.2.0 Web Platform baseline: profile storage ----
+// Browser profile root (LocalState\profile). localStorage lands in
+// <profile>\storage, IndexedDB in <profile>\indexeddb. Call before the first
+// page is created; unset = both fall back to process-lifetime-only storage
+// (still functional, just not persisted). UTF-8 filesystem path.
+void WebCoreSetProfilePath(const char* path);
+
+// Flush localStorage to disk. StorageAreaImpl batches writes asynchronously, so
+// a UWP suspend without this loses the last batch. Call alongside
+// WebCoreFlushCookiesToDisk() when backgrounding.
+void WebCoreFlushStorage();
+
+// One line describing what storage actually does right now: persistent or not,
+// the real directories, and any SQLite syscall the App Container build is still
+// missing. The device has no console; this is how "did IndexedDB persist?" is
+// answered. Returns bytes written (excluding NUL).
+int WebCoreGetStorageDiag(char* buf, int len);
+
 // ---- diagnostics / page metadata (written by the render/load paths) ----
 // Each copies a NUL-terminated UTF-8 string into buf (<= len bytes) and returns
 // the number of bytes written (excluding NUL); empty string if nothing recorded.
@@ -110,6 +128,30 @@ int WebCoreEvalJS(const char* script, char* out, int len);  // run JS in the ses
 int WebCoreLiveTick(uint8_t* outRGBA);                // advance + repaint one animation/SPA frame
 int WebCoreGetPendingResourceCount();                 // pending cached resources in the current document
 unsigned WebCoreGetFrameHash();                       // pixel hash of the last frame (idle detection)
+
+// ---- asynchronous engine -> shell UI requests (0.1.9) ----
+// The engine thread must never block on the UI thread, so anything WebCore wants
+// from real UI (today: <input type=file>; window.alert) is queued instead of
+// called. Poll this right after any engine call that could have run page script
+// (load / click / key / live tick), on the engine thread.
+//
+// Returns the request kind, 0 when there is nothing pending:
+//   1 = file chooser. payload = "<multiple 0|1>\t<accept>\t<accept>..." where each
+//       accept is a MIME type or ".ext" exactly as the page wrote it. The shell
+//       MUST eventually answer with WebCoreCompleteFileChooser(id, ...).
+//   2 = alert.        payload = the message. No reply expected.
+//   8 = open in new tab. payload = the URL (window.open() / target=_blank).
+//       No reply expected: the shell owns the tab model. Note the new tab has no
+//       opener — see PortChromeClient.h for why this port cannot hand JS a live
+//       WindowProxy for a second, simultaneously-running Page.
+int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
+
+// Answer a file-chooser request. `pathsUtf8` holds `count` NUL-terminated UTF-8
+// absolute paths back to back; count == 0 means the user cancelled. Safe to call
+// with a stale id (navigated away, session torn down) — it is dropped.
+// The paths must be readable by the engine process: on UWP that means files the
+// app itself owns, so the shell copies picked files into LocalState first.
+void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
 
 // ---- find-in-page ----
 int WebCoreFindString(const char* utf8, int matchCase, int wrap, uint8_t* outRGBA); // mark+highlight all, select first; returns match count (>=0) or neg error

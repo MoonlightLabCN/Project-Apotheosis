@@ -1,0 +1,333 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — WebCrypto</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>WebCrypto (crypto.subtle)</h1>
+<div class="sub">Published test vectors, not self-consistency: a backend that
+encrypts and decrypts with the same wrong algorithm would pass a round-trip and
+fail here. Negative cases matter as much as positive ones.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+function hex(buf) {
+  var v = new Uint8Array(buf), s = '';
+  for (var i = 0; i < v.length; i++) s += (v[i] < 16 ? '0' : '') + v[i].toString(16);
+  return s;
+}
+function bytes(str) {
+  var out = new Uint8Array(str.length);
+  for (var i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0xFF;
+  return out;
+}
+function fromHex(h) {
+  var out = new Uint8Array(h.length / 2);
+  for (var i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+  return out;
+}
+
+if (!window.crypto) {
+  T.record('window.crypto exists', false, 'the global is missing');
+} else if (!window.crypto.subtle) {
+  T.record('crypto.subtle exists', false,
+    'window.crypto is there but subtle is not — the algorithm registry is empty ' +
+    '(this was the 0.1.9 state: platformRegisterAlgorithms() was a no-op)');
+} else {
+  T.record('crypto.subtle exists', true, typeof crypto.subtle);
+  runAll();
+}
+
+function runAll() {
+  digests();
+  hmac();
+  pbkdf2();
+  aesGcm();
+  publicKey();
+}
+
+function step(name, promise, verify) {
+  T.begin();
+  var settled = false;
+  var t = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    T.record(name, false, 'no settlement within 20 s');
+    T.end();
+  }, 20000);
+  try {
+    promise.then(function (result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(t);
+      try { verify(result); } catch (e) { T.record(name, false, 'verifier threw: ' + e); }
+      T.end();
+    }, function (err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(t);
+      T.record(name, false, 'rejected: ' + (err && (err.name || err.message) || err));
+      T.end();
+    });
+  } catch (e) {
+    settled = true;
+    clearTimeout(t);
+    T.record(name, false, 'threw synchronously: ' + e);
+    T.end();
+  }
+}
+
+// A check whose EXPECTED outcome is a rejection.
+function mustReject(name, promise, note) {
+  T.begin();
+  var settled = false;
+  var t = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    T.record(name, false, 'neither resolved nor rejected within 20 s');
+    T.end();
+  }, 20000);
+  try {
+    promise.then(function () {
+      if (settled) return;
+      settled = true; clearTimeout(t);
+      T.record(name, false, 'it RESOLVED — invalid input was accepted' + (note ? (' (' + note + ')') : ''));
+      T.end();
+    }, function (err) {
+      if (settled) return;
+      settled = true; clearTimeout(t);
+      T.record(name, true, 'rejected with ' + (err && err.name || err));
+      T.end();
+    });
+  } catch (e) {
+    settled = true; clearTimeout(t);
+    T.record(name, true, 'threw synchronously: ' + (e.name || e));
+    T.end();
+  }
+}
+
+// ---- SHA (FIPS 180-4 / NIST published vectors for "abc") -------------------
+function digests() {
+  var abc = bytes('abc');
+  var expect = {
+    'SHA-1': 'a9993e364706816aba3e25717850c26c9cd0d89d',
+    'SHA-256': 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    'SHA-384': 'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7',
+    'SHA-512': 'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f'
+  };
+  Object.keys(expect).forEach(function (alg) {
+    step(alg + '("abc") matches the NIST vector',
+      crypto.subtle.digest(alg, abc),
+      function (out) {
+        var got = hex(out);
+        T.record(alg + '("abc") matches the NIST vector', got === expect[alg],
+          got === expect[alg] ? got.slice(0, 24) + '…' : ('got ' + got.slice(0, 32) + '… expected ' + expect[alg].slice(0, 32) + '…'));
+      });
+  });
+}
+
+// ---- HMAC (RFC 4231 test case 2) -------------------------------------------
+// key = "Jefe", data = "what do ya want for nothing?"
+function hmac() {
+  var expected = '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843';
+  step('HMAC-SHA256 matches RFC 4231 case 2',
+    crypto.subtle.importKey('raw', bytes('Jefe'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+      .then(function (key) {
+        return crypto.subtle.sign('HMAC', key, bytes('what do ya want for nothing?'))
+          .then(function (sig) { return { key: key, sig: sig }; });
+      }),
+    function (r) {
+      var got = hex(r.sig);
+      T.record('HMAC-SHA256 matches RFC 4231 case 2', got === expected,
+        got === expected ? got.slice(0, 24) + '…' : ('got ' + got));
+
+      // verify() must accept the right signature and reject a tampered one.
+      T.begin();
+      crypto.subtle.verify('HMAC', r.key, r.sig, bytes('what do ya want for nothing?'))
+        .then(function (ok) {
+          T.record('HMAC verify accepts a valid signature', ok === true, 'verify -> ' + ok);
+          var bad = new Uint8Array(r.sig.slice(0));
+          bad[0] ^= 0xFF;
+          return crypto.subtle.verify('HMAC', r.key, bad, bytes('what do ya want for nothing?'));
+        })
+        .then(function (ok) {
+          T.record('HMAC verify rejects a tampered signature', ok === false, 'verify -> ' + ok);
+          T.end();
+        }, function (e) {
+          T.record('HMAC verify rejects a tampered signature', false, 'threw: ' + e);
+          T.end();
+        });
+
+      // A key imported without 'sign' must not be usable for signing.
+      mustReject('HMAC sign refuses a key without the "sign" usage',
+        crypto.subtle.importKey('raw', bytes('Jefe'), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+          .then(function (k) { return crypto.subtle.sign('HMAC', k, bytes('x')); }));
+    });
+}
+
+// ---- PBKDF2 (RFC 6070 shape, SHA-256 vector) -------------------------------
+// P="password", S="salt", c=1, dkLen=32, PRF=HMAC-SHA256.
+function pbkdf2() {
+  var expected = '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b';
+  step('PBKDF2-HMAC-SHA256 (c=1) matches the published vector',
+    crypto.subtle.importKey('raw', bytes('password'), { name: 'PBKDF2' }, false, ['deriveBits'])
+      .then(function (key) {
+        return crypto.subtle.deriveBits(
+          { name: 'PBKDF2', salt: bytes('salt'), iterations: 1, hash: 'SHA-256' }, key, 256);
+      }),
+    function (bits) {
+      var got = hex(bits);
+      T.record('PBKDF2-HMAC-SHA256 (c=1) matches the published vector', got === expected,
+        got === expected ? got.slice(0, 24) + '…' : ('got ' + got));
+    });
+}
+
+// ---- AES-GCM (NIST GCM test vectors, gcmEncryptExtIV128 Count 0) -----------
+// key = cf063a34d4a9a76c2c86787d3f96db71
+// iv  = 113b9785971864c83b01c787   (96-bit)
+// pt  = (empty), aad = (empty)
+// tag = 72ac8493e3a5228b5d130a69d2510e42   (128-bit; the 96-bit truncation is the
+//                                           first 12 bytes of it)
+function aesGcm() {
+  var rawKey = fromHex('cf063a34d4a9a76c2c86787d3f96db71');
+  var iv = fromHex('113b9785971864c83b01c787');
+  var fullTag = '72ac8493e3a5228b5d130a69d2510e42';
+  var expectedTag = fullTag.slice(0, 24);
+
+  step('AES-128-GCM matches the NIST vector (empty plaintext, 96-bit IV)',
+    crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+      .then(function (key) {
+        return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv, tagLength: 96 }, key, new Uint8Array(0))
+          .then(function (ct96) {
+            return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new Uint8Array(0))
+              .then(function (ct128) { return { key: key, ct: ct96, ct128: ct128 }; });
+          });
+      }),
+    function (r) {
+      var got = hex(r.ct);
+      T.record('AES-128-GCM matches the NIST vector (empty plaintext, 96-bit IV)',
+        got === expectedTag, got === expectedTag ? got : ('got ' + got + ' expected ' + expectedTag));
+      var got128 = hex(r.ct128);
+      T.record('AES-128-GCM default (128-bit) tag matches the NIST vector',
+        got128 === fullTag, got128 === fullTag ? got128 : ('got ' + got128 + ' expected ' + fullTag));
+
+      // Round-trip a real message, then prove a corrupted tag is rejected.
+      var msg = bytes('the quick brown fox');
+      T.begin();
+      crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, r.key, msg)
+        .then(function (ct) {
+          return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, r.key, ct)
+            .then(function (pt) {
+              T.record('AES-GCM decrypt recovers the plaintext',
+                hex(pt) === hex(msg), 'round-trip ' + (hex(pt) === hex(msg) ? 'ok' : 'MISMATCH'));
+              return ct;
+            });
+        })
+        .then(function (ct) {
+          var tampered = new Uint8Array(ct.slice(0));
+          tampered[tampered.length - 1] ^= 0x01;      // flip a tag bit
+          mustReject('AES-GCM decrypt rejects a corrupted authentication tag',
+            crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, r.key, tampered));
+          T.end();
+        }, function (e) {
+          T.record('AES-GCM decrypt recovers the plaintext', false, 'threw: ' + e);
+          T.end();
+        });
+
+      // Parameter validation: a 0-length IV is invalid, and an encrypt-only key
+      // must not decrypt. A backend that "computes anyway" fails these.
+      mustReject('AES-GCM rejects a zero-length IV',
+        crypto.subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(0) }, r.key, msg));
+      mustReject('AES-GCM rejects an invalid tagLength (e.g. 65)',
+        crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv, tagLength: 65 }, r.key, msg));
+      mustReject('AES-GCM decrypt refuses a key without the "decrypt" usage',
+        crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt'])
+          .then(function (k) {
+            return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, k, msg)
+              .then(function (ct) { return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, k, ct); });
+          }));
+      mustReject('importKey rejects a 17-byte AES key',
+        crypto.subtle.importKey('raw', new Uint8Array(17), { name: 'AES-GCM' }, false, ['encrypt']));
+    });
+}
+
+// ---- Public key: generate + sign/verify round-trips ------------------------
+// No published vectors here on purpose — RSA-PSS and ECDSA are randomised, so a
+// fixed vector cannot be reproduced. Generate, sign, verify, then tamper.
+function publicKey() {
+  step('RSA-OAEP generate + encrypt + decrypt round-trips',
+    crypto.subtle.generateKey(
+      { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+      false, ['encrypt', 'decrypt'])
+      .then(function (pair) {
+        var msg = bytes('rsa-oaep round trip');
+        return crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pair.publicKey, msg)
+          .then(function (ct) { return crypto.subtle.decrypt({ name: 'RSA-OAEP' }, pair.privateKey, ct); })
+          .then(function (pt) { return { pt: pt, msg: msg }; });
+      }),
+    function (r) {
+      T.record('RSA-OAEP generate + encrypt + decrypt round-trips',
+        hex(r.pt) === hex(r.msg), hex(r.pt) === hex(r.msg) ? 'ok' : 'plaintext mismatch');
+    });
+
+  step('RSA-PSS sign + verify round-trips',
+    crypto.subtle.generateKey(
+      { name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+      false, ['sign', 'verify'])
+      .then(function (pair) {
+        var msg = bytes('rsa-pss message');
+        return crypto.subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, pair.privateKey, msg)
+          .then(function (sig) {
+            return crypto.subtle.verify({ name: 'RSA-PSS', saltLength: 32 }, pair.publicKey, sig, msg)
+              .then(function (ok) {
+                var bad = new Uint8Array(sig.slice(0)); bad[0] ^= 0xFF;
+                return crypto.subtle.verify({ name: 'RSA-PSS', saltLength: 32 }, pair.publicKey, bad, msg)
+                  .then(function (bogus) { return { ok: ok, bogus: bogus }; });
+              });
+          });
+      }),
+    function (r) {
+      T.record('RSA-PSS sign + verify round-trips', r.ok === true && r.bogus === false,
+        'valid=' + r.ok + ' tampered=' + r.bogus + ' (want true/false)');
+    });
+
+  step('ECDSA P-256 sign + verify round-trips',
+    crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+      .then(function (pair) {
+        var msg = bytes('ecdsa message');
+        return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, msg)
+          .then(function (sig) {
+            return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, msg)
+              .then(function (ok) {
+                var bad = new Uint8Array(sig.slice(0)); bad[0] ^= 0xFF;
+                return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, bad, msg)
+                  .then(function (bogus) { return { ok: ok, bogus: bogus }; });
+              });
+          });
+      }),
+    function (r) {
+      T.record('ECDSA P-256 sign + verify round-trips', r.ok === true && r.bogus === false,
+        'valid=' + r.ok + ' tampered=' + r.bogus + ' (want true/false)');
+    });
+
+  // getRandomValues is not subtle, but it is the other half of "does crypto work".
+  var randomOk = false, detail = '';
+  try {
+    var a = new Uint8Array(32), b = new Uint8Array(32);
+    crypto.getRandomValues(a);
+    crypto.getRandomValues(b);
+    var allZero = true, same = true;
+    for (var i = 0; i < 32; i++) {
+      if (a[i] !== 0) allZero = false;
+      if (a[i] !== b[i]) same = false;
+    }
+    randomOk = !allZero && !same;
+    detail = allZero ? 'returned all zeroes' : (same ? 'two calls returned identical bytes' : hex(a).slice(0, 16) + '…');
+  } catch (e) { detail = 'threw: ' + e; }
+  T.record('crypto.getRandomValues returns varying non-zero bytes', randomOk, detail);
+}
+</script>

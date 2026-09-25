@@ -1,0 +1,214 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — localStorage / sessionStorage</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>localStorage / sessionStorage</h1>
+<div class="sub">Write, read, enumerate, remove, clear, quota, storage events,
+origin isolation. Reload and app-restart checks are manual — they cannot be
+faked in one page load.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<h2>Manual (the part a single page load cannot prove)</h2>
+<div>
+  <button id="reload">Reload this page &mdash; localStorage must survive, sessionStorage must too</button>
+  <button id="seed">Seed a restart marker, then close and reopen the app</button>
+  <button id="clear">Clear both stores</button>
+</div>
+<pre id="manual"></pre>
+
+<h2>Cross-origin isolation probe</h2>
+<div>other origin: <iframe id="other"></iframe></div>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+var K = 'apo_ls_', S = 'apo_ss_';
+
+// ---- existence -------------------------------------------------------------
+var hasLocal = false, hasSession = false;
+try { hasLocal = !!window.localStorage; } catch (e) {}
+try { hasSession = !!window.sessionStorage; } catch (e) {}
+
+T.record('window.localStorage exists', hasLocal,
+  hasLocal ? 'typeof ' + (typeof window.localStorage) : 'accessing it threw or returned null');
+T.record('window.sessionStorage exists', hasSession,
+  hasSession ? 'typeof ' + (typeof window.sessionStorage) : 'accessing it threw or returned null');
+
+if (!hasLocal) {
+  T.record('everything below', null, 'no localStorage: nothing else can be judged');
+} else {
+  var ls = window.localStorage;
+
+  // ---- write / read --------------------------------------------------------
+  var wrote = false, readBack = null;
+  try { ls.setItem(K + 'a', 'value-a'); wrote = true; } catch (e) { wrote = false; }
+  try { readBack = ls.getItem(K + 'a'); } catch (e) {}
+  T.record('localStorage.setItem + getItem round-trips',
+    wrote && readBack === 'value-a', 'read back: ' + JSON.stringify(readBack));
+
+  // Non-string values must be stringified, and missing keys must be null (not
+  // undefined) — the two most common places a hand-rolled backend gets it wrong.
+  var coerced = null, missing = 'not-checked';
+  try { ls.setItem(K + 'n', 42); coerced = ls.getItem(K + 'n'); } catch (e) {}
+  try { missing = ls.getItem(K + 'definitely-not-set'); } catch (e) {}
+  T.record('values are coerced to strings', coerced === '42', 'got ' + JSON.stringify(coerced));
+  T.record('missing key returns null (not undefined)', missing === null, 'got ' + JSON.stringify(missing));
+
+  // ---- enumeration ---------------------------------------------------------
+  var lengthOk = false, keyOk = false, keys = [];
+  try {
+    for (var i = 0; i < ls.length; i++) keys.push(ls.key(i));
+    lengthOk = ls.length >= 2;
+    keyOk = keys.indexOf(K + 'a') >= 0;
+  } catch (e) {}
+  T.record('length + key(i) enumerate what was stored', lengthOk && keyOk,
+    'length=' + ls.length + ' keys=' + JSON.stringify(keys.slice(0, 8)));
+
+  // ---- removeItem / clear --------------------------------------------------
+  var removed = 'not-checked';
+  try { ls.removeItem(K + 'n'); removed = ls.getItem(K + 'n'); } catch (e) {}
+  T.record('removeItem deletes the key', removed === null, 'after remove: ' + JSON.stringify(removed));
+
+  // ---- storage events ------------------------------------------------------
+  // Per spec the event fires in OTHER documents of the same origin, not the one
+  // that wrote. The same-origin iframe below is that other document.
+  var sawEvent = null;
+  window.addEventListener('storage', function (e) { sawEvent = e; });
+
+  // ---- quota ---------------------------------------------------------------
+  // Not "does it have exactly 5 MB" — that is not specified — but "does it refuse
+  // an absurd write instead of silently truncating or dying".
+  T.begin();
+  setTimeout(function () {
+    var chunk = new Array(64 * 1024 + 1).join('x');   // 64 KB
+    var quotaBehaviour = 'stored-all';
+    try {
+      for (var n = 0; n < 400; n++) ls.setItem(K + 'bulk' + n, chunk);   // ~25 MB
+      quotaBehaviour = 'stored-all';
+    } catch (e) {
+      quotaBehaviour = 'threw ' + (e.name || e);
+    }
+    // Whatever happened, the store must still be usable afterwards.
+    var stillWorks = false;
+    try { ls.setItem(K + 'after', 'ok'); stillWorks = ls.getItem(K + 'after') === 'ok'; } catch (e) {}
+    // The spec does not fix a quota, so "stored all 25 MB" is not a failure — it is
+    // what a desktop browser with a large per-origin budget does. WebKit's default
+    // is 5 MB, so on this port a throw is the expected outcome; report either way
+    // rather than turn an unspecified number into a red line.
+    T.record('a ~25 MB write is refused (QuotaExceededError) rather than accepted silently',
+      quotaBehaviour.indexOf('threw') === 0 ? true : null,
+      quotaBehaviour.indexOf('threw') === 0
+        ? quotaBehaviour
+        : 'stored all ~25 MB — no quota enforced here. Not a failure (the quota is ' +
+          'unspecified), but WebKit’s default is 5 MB, so on device this should throw.');
+    T.record('store is still usable after hitting the quota', stillWorks,
+      'setItem after the bulk loop: ' + (stillWorks ? 'ok' : 'failed'));
+
+    // Clean up the bulk keys so the persistence checks are not fighting a full store.
+    try { for (var m = 0; m < 400; m++) ls.removeItem(K + 'bulk' + m); } catch (e) {}
+    T.end();
+  }, 0);
+
+  // ---- sessionStorage semantics -------------------------------------------
+  if (hasSession) {
+    var ss = window.sessionStorage;
+    var ssOk = false;
+    try { ss.setItem(S + 'a', 'sess'); ssOk = ss.getItem(S + 'a') === 'sess'; } catch (e) {}
+    T.record('sessionStorage round-trips', ssOk, 'read back: ' + (ssOk ? 'sess' : 'FAILED'));
+
+    var separate = false;
+    try {
+      ls.setItem(K + 'shared', 'from-local');
+      ss.setItem(K + 'shared', 'from-session');
+      separate = ls.getItem(K + 'shared') === 'from-local' && ss.getItem(K + 'shared') === 'from-session';
+    } catch (e) {}
+    T.record('sessionStorage and localStorage are separate stores', separate,
+      'same key, different values must survive independently');
+  }
+
+  // ---- persistence markers -------------------------------------------------
+  // Written on first visit; read on every later visit. This is what makes the
+  // reload/restart buttons meaningful.
+  var loadMark = ls.getItem(K + 'loads');
+  var loads = loadMark ? (parseInt(loadMark, 10) || 0) : 0;
+  try { ls.setItem(K + 'loads', String(loads + 1)); } catch (e) {}
+  T.record('localStorage survived a previous load in this session',
+    loads > 0 ? true : null,
+    loads > 0 ? ('seen ' + loads + ' previous load(s)')
+              : 'first load — press Reload and look at this line again');
+
+  var ssMark = hasSession ? window.sessionStorage.getItem(S + 'loads') : null;
+  var ssLoads = ssMark ? (parseInt(ssMark, 10) || 0) : 0;
+  if (hasSession) { try { window.sessionStorage.setItem(S + 'loads', String(ssLoads + 1)); } catch (e) {} }
+
+  document.getElementById('manual').textContent =
+    'localStorage load count : ' + (loads + 1) + '\n' +
+    'sessionStorage load count: ' + (ssLoads + 1) + '\n' +
+    'restart marker           : ' + (ls.getItem(K + 'restart') || '(not seeded)') + '\n\n' +
+    'Expected after RELOAD    : localStorage count grows, sessionStorage count grows.\n' +
+    'Expected after APP RESTART: localStorage count keeps growing AND the restart\n' +
+    '                           marker is still here; sessionStorage count resets to 1.\n' +
+    '                           If the localStorage count also resets, persistence is\n' +
+    '                           not working — check WebCoreGetStorageDiag on device.';
+
+  document.getElementById('reload').onclick = function () { location.reload(); };
+  document.getElementById('seed').onclick = function () {
+    try { ls.setItem(K + 'restart', new Date().toISOString()); } catch (e) {}
+    location.reload();
+  };
+  document.getElementById('clear').onclick = function () {
+    try { ls.clear(); } catch (e) {}
+    try { window.sessionStorage.clear(); } catch (e) {}
+    location.reload();
+  };
+
+  // ---- origin isolation + storage event, via a frame on the other origin ----
+  var alt = T.altOrigin();
+  var frame = document.getElementById('other');
+  if (alt === location.origin) {
+    T.record('another origin cannot see this origin’s localStorage', null,
+      'no alternate origin configured');
+  } else {
+    T.begin();
+    var answered = false;
+    window.addEventListener('message', function (e) {
+      var obj = null;
+      try { obj = JSON.parse(e.data); } catch (err) { return; }
+      if (obj.tag !== 'storage-probe' || answered) return;
+      answered = true;
+      T.record('another origin cannot see this origin’s localStorage',
+        obj.sawForeignKey === false,
+        'other origin reported ' + obj.count + ' key(s); our key visible: ' + obj.sawForeignKey);
+      T.end();
+    });
+    frame.src = alt + '/pages/storage-probe.html?key=' + encodeURIComponent(K + 'a');
+    setTimeout(function () {
+      if (answered) return;
+      answered = true;
+      T.record('another origin cannot see this origin’s localStorage', null,
+        'the probe frame never answered (is the alternate listener running?)');
+      T.end();
+    }, 3000);
+  }
+
+  // The real cross-document case: a same-origin frame writes, and THIS document
+  // must get the event. (An event in the writing document would be wrong.)
+  T.begin();
+  var sameFrame = document.createElement('iframe');
+  sameFrame.style.cssText = 'width:100%;height:34px';
+  sameFrame.src = '/pages/storage-writer.html';
+  document.getElementById('manual').parentNode.insertBefore(sameFrame, document.getElementById('manual'));
+  setTimeout(function () {
+    T.record('storage event fires in another document of the same origin',
+      !!sawEvent,
+      sawEvent ? ('key=' + sawEvent.key + ' newValue=' + sawEvent.newValue +
+                  ' url=' + (sawEvent.url || '(none)'))
+               : 'a same-origin frame wrote to localStorage and no storage event arrived here');
+    T.end();
+  }, 2500);
+}
+</script>

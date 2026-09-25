@@ -47,6 +47,20 @@ void WebCoreSetCookieJsonPath(const char* path);
 // UWP 挂起/可能被系统直接终止)时调,引擎线程串行。
 void WebCoreFlushCookiesToDisk();
 
+// ---- 0.2.0 Web Platform baseline:profile 存储 ----
+// 浏览器 profile 根目录(LocalState\profile)。localStorage 落 <profile>\storage,
+// IndexedDB 落 <profile>\indexeddb。须在第一次建页面之前调(SetupRuntimeEnv 里,
+// 和 WebCoreSetCookieJsonPath 一起);不调 = 两者都退化为进程内非持久(能用,关掉就没了)。
+void WebCoreSetProfilePath(const char* path);
+
+// localStorage 落盘。StorageAreaImpl 平时攒批异步刷,UWP 挂起前不刷会丢最后一批写入。
+// 切后台时和 WebCoreFlushCookiesToDisk 一起调。
+void WebCoreFlushStorage();
+
+// 存储子系统实况一行:是否真持久化、实际目录、SQLite 还缺哪些系统调用。
+// 真机没有控制台,"IndexedDB 到底落没落盘"只能靠这行看。返回写入字节数(不含 NUL)。
+int WebCoreGetStorageDiag(char* buf, int len);
+
 // 取回上次 WebCoreLoadUrl 失败时记录的网络错误(curl 错误码 + 描述 + URL)。
 // 写入 buf(最多 len 字节,含 NUL),返回写入字节数(不含 NUL)。无错误则为空串。
 int WebCoreGetLastError(char* buf, int len);
@@ -134,6 +148,26 @@ int WebCoreLiveTick(uint8_t* outBuf);
 int WebCoreGetPendingResourceCount();
 // 最近一帧像素哈希:实时模式比较连续帧,画面静止则停帧省电。
 unsigned WebCoreGetFrameHash();
+
+// ---- 异步 UI 请求(0.1.9)----
+// 引擎线程绝不能同步等 UI 线程,所以 WebCore 要真 UI 的地方(现在:<input type=file>、
+// window.alert)一律排队而不是直接调。任何可能跑到页面脚本的引擎调用之后
+// (加载/点击/按键/实时帧)都在引擎线程上轮询一次这个。
+// 返回请求类型,0=没有:
+//   1 = 文件选择。payload = "<是否多选 0|1>\t<accept>\t<accept>...",accept 是页面原样写的
+//       MIME 或 ".扩展名"。shell **必须**最终用 WebCoreCompleteFileChooser(id,...) 回话。
+//   2 = alert。payload = 消息文本,不需要回话。
+//   8 = 在新标签打开。payload = URL(window.open() / target=_blank)。不需要回话:
+//       标签模型归 shell 管。⚠ 新标签没有 opener(等价 rel="noopener"),原因见
+//       port/PortChromeClient.h ——本 port 是"一个热 Page + 快照"模型,给不出第二个
+//       同时在跑的 Page,也就给不出可用的 WindowProxy。
+int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
+
+// 回复文件选择请求。pathsUtf8 里是 count 个连续的、各自以 NUL 结尾的 UTF-8 绝对路径;
+// count==0 表示用户取消。传过期的 id 也安全(已导航走/会话已销毁)——直接丢弃。
+// ⚠ 路径必须是引擎进程读得到的:UWP 下即 app 自己的目录,所以 shell 要先把选中的文件
+//   复制进 LocalState 再交给引擎。
+void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
 
 // ---- 页内查找 find-in-page ----
 // 标记并高亮全部匹配 + 选中第一个,滚动到它,重绘到 outBuf。matchCase!=0 区分大小写;wrap!=0 回绕。

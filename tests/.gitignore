@@ -1,0 +1,5 @@
+# Host test binaries (rebuilt by run-psl-tests.ps1 in a second; nothing to track).
+psl/psl-test.exe
+psl/*.pdb
+psl/*.ilk
+psl/*.obj

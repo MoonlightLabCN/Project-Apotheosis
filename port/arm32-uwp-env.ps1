@@ -6,20 +6,23 @@
 #       然后正常跑 cmake / ninja
 # ============================================================================
 
-$VS  = 'C:\Program Files\Microsoft Visual Studio\18\Community'
-$T   = "$VS\VC\Tools\MSVC\14.44.35207"          # 含 ARM 后端的 v143 工具集
-$SDK = 'C:\Program Files (x86)\Windows Kits\10'
-$VER = '10.0.22621.0'
+# 工具集/SDK 的选择统一交给 resolve-arm32-toolchain.ps1(0.1.9 起)。它**验证 ARM32 能力**
+# (arm\cl.exe + lib\arm + vadefs.h 不拒 _M_ARM)而不是信版本号,所以 VS 更新塞进 14.51
+# (永久删了 32 位 ARM)也不会被静默选中——那会在几百行日志深处炸 "Support for 32-bit ARM
+# has been permanently removed",看不出是选错了工具集。
+$tc  = & "$PSScriptRoot\resolve-arm32-toolchain.ps1" -Quiet
+$VS  = $tc.VSInstall
+$T   = $tc.MSVCRoot                             # 已验证含 ARM32 后端的 v143 工具集
+$SDK = $tc.SdkRoot
+$VER = $tc.SdkVersion
 $Ruby = 'C:\Ruby33-x64\bin'                                              # offlineasm
 $Perl = 'C:\Program Files\Git\usr\bin'                                   # create_hash_table 等
 $Python = 'C:\Users\Ouyang Quan\AppData\Local\hermes\hermes-agent\venv\Scripts'  # builtins/bytecode 生成
 
-# --- 完整性自检 ---
+# --- 剩余(resolver 不管的)构建依赖自检 ---
 $must = @(
-    "$T\bin\Hostx64\arm\cl.exe",
     "$T\lib\arm\store",
     "$SDK\Include\$VER\ucrt",
-    "$SDK\Lib\$VER\um\arm\WindowsApp.lib",
     "$SDK\bin\$VER\x64\rc.exe",
     "$Ruby\ruby.exe"
 )
@@ -58,7 +61,7 @@ $env:PATH = "$front;$env:PATH;$Perl;$Python"
 # CMake 探测时认架构用
 $env:VSCMD_ARG_TGT_ARCH = 'arm'
 
-Write-Host "==> ARM32 UWP 环境已注入 (cl=$T\bin\Hostx64\arm, SDK=$VER)" -ForegroundColor Green
+Write-Host "==> ARM32 UWP 环境已注入 (MSVC=$($tc.MSVCVersion), cl=$T\bin\Hostx64\arm, SDK=$VER, target=ARM32/Thumb-2 UWP)" -ForegroundColor Green
 Write-Host "    cl 自检: " -NoNewline
 & cl 2>&1 | Select-Object -First 1
 

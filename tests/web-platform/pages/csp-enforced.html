@@ -1,0 +1,118 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSP enforcement (header policy)</title>
+<!--
+  The policy for this page is served as a REAL Content-Security-Policy response
+  header (see csp-enforced.html.csp, applied by server.py):
+
+    default-src 'none';
+    script-src 'self' 'nonce-apo123' 'sha256-h2l5sfuMJqpdWrn5cj/FKleaZbQ55xjhrhME15BJJ28=';
+    style-src  'self' 'unsafe-inline';
+    connect-src 'self';
+    img-src    'self'
+
+  This is the page that matters for 0.1.9: before it, WK_WINUWP skipped CSP
+  entirely, because a sandboxed opaque document origin made every scheme-less host
+  source fail to match and CSP therefore blocked everything. Both halves have to be
+  true now — unsafe things blocked AND ordinary same-origin things allowed. A page
+  where every line says PASS because nothing loaded at all is the old bug wearing a
+  disguise, so the "must load" checks are as important as the "must be blocked" ones.
+-->
+<style>
+  body { font: 15px/1.45 -apple-system, "Segoe UI", sans-serif; margin:0; padding:12px; background:#101418; color:#e8eef4; }
+  #summary { font-size:24px; font-weight:700; padding:12px; border-radius:8px; text-align:center; margin:10px 0; background:#26313a; }
+  #summary.pass { background:#0b5c2a; } #summary.fail { background:#7a1723; }
+  li { list-style:none; padding:7px 9px; border-radius:6px; background:#1a2229; margin-bottom:4px; }
+  .tag { font-weight:700; font-size:12px; padding:1px 6px; border-radius:4px; margin-right:8px; }
+  .PASS { background:#0b5c2a; color:#b8f0c8; } .FAIL { background:#7a1723; color:#ffc9cf; }
+  .note { color:#8fa3b5; font-size:12px; }
+  a { color:#7fc5ff; }
+</style>
+
+<h1 style="font-size:18px">CSP &mdash; header policy</h1>
+<div id="summary">running…</div>
+<ul id="r"></ul>
+<p><a href="/">&lsaquo; back to the dashboard</a></p>
+
+<!-- 1. Inline script with NO nonce: must be blocked by script-src. -->
+<script>window.INLINE_RAN = true;</script>
+
+<!-- 2. Inline script WITH the right nonce: must run. -->
+<script nonce="apo123">window.NONCE_RAN = true;</script>
+
+<!-- 3. Inline script whose sha256 is in the policy: must run.
+     Body must stay byte-identical to "window.HASH_OK = true;" or the hash changes. -->
+<script>window.HASH_OK = true;</script>
+
+<!-- 4. Same-origin external script: allowed by 'self'. -->
+<script src="/api/csp/script.js"></script>
+
+<!-- 5. Cross-origin image: img-src 'self' must block it. -->
+<img id="xorigin" src="http://example.invalid/blocked.png" alt="" style="display:none">
+
+<script nonce="apo123">
+var r = document.getElementById('r'), pass = 0, fail = 0;
+function record(name, ok, note) {
+  var li = document.createElement('li');
+  li.innerHTML = '<span class="tag ' + (ok ? 'PASS' : 'FAIL') + '">' + (ok ? 'PASS' : 'FAIL') + '</span>';
+  li.appendChild(document.createTextNode(name));
+  if (note) { var d = document.createElement('div'); d.className = 'note'; d.textContent = note; li.appendChild(d); }
+  r.appendChild(li);
+  ok ? pass++ : fail++;
+  var s = document.getElementById('summary');
+  s.textContent = fail ? (fail + ' FAILED / ' + pass + ' passed') : ('ALL ' + pass + ' PASSED');
+  s.className = fail ? 'fail' : 'pass';
+}
+
+// --- CSP must BLOCK these ---
+record('inline <script> without a nonce is BLOCKED', window.INLINE_RAN !== true,
+       'window.INLINE_RAN = ' + window.INLINE_RAN);
+
+// --- CSP must ALLOW these (the half that regressed to "block everything") ---
+record('inline <script nonce=apo123> RUNS', window.NONCE_RAN === true,
+       'window.NONCE_RAN = ' + window.NONCE_RAN);
+record("inline <script> matching a sha256 source RUNS", window.HASH_OK === true,
+       'window.HASH_OK = ' + window.HASH_OK);
+record("same-origin external script ('self') RUNS", window.EXTERNAL_OK === true,
+       'window.EXTERNAL_OK = ' + window.EXTERNAL_OK);
+
+// connect-src 'self': same-origin XHR allowed, cross-origin blocked.
+var x = new XMLHttpRequest();
+x.open('GET', '/api/csp/echo-connect', true);
+x.onreadystatechange = function () {
+  if (x.readyState !== 4) return;
+  record("same-origin XHR (connect-src 'self') SUCCEEDS", x.status === 200, 'status ' + x.status);
+
+  // A blocked XHR can signal through readystatechange AND onerror AND a throw;
+  // record whichever arrives first so the tally is not inflated.
+  var reported = false;
+  function reportCrossOrigin(ok, note) {
+    if (reported) return;
+    reported = true;
+    record('cross-origin XHR is BLOCKED by connect-src', ok, note);
+  }
+  var y = new XMLHttpRequest();
+  try {
+    y.open('GET', 'http://example.invalid/blocked.json', true);
+    y.onreadystatechange = function () {
+      if (y.readyState !== 4) return;
+      reportCrossOrigin(y.status === 0, 'status ' + y.status);
+    };
+    y.onerror = function () { reportCrossOrigin(true, 'network error (expected)'); };
+    y.send();
+  } catch (e) {
+    reportCrossOrigin(true, 'threw: ' + e);
+  }
+  // If neither fires (some engines just drop the request), that is still "blocked".
+  setTimeout(function () { reportCrossOrigin(true, 'no response at all (blocked)'); }, 4000);
+};
+x.send();
+
+// img-src 'self': the cross-origin image must never load.
+setTimeout(function () {
+  var img = document.getElementById('xorigin');
+  record('cross-origin <img> is BLOCKED by img-src', !img.complete || img.naturalWidth === 0,
+         'naturalWidth = ' + img.naturalWidth);
+}, 1500);
+</script>

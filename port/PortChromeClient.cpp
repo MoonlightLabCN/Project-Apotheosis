@@ -10,14 +10,20 @@
 #include "config.h"
 #include "PortChromeClient.h"
 
+#include "PortUIBridge.h"
+
 #include <WebCore/ColorChooser.h>
 #include <WebCore/CookieConsentDecisionResult.h>
 #include <WebCore/DataListSuggestionPicker.h>
 #include <WebCore/DateTimeChooser.h>
+#include <WebCore/FileChooser.h>
 #include <WebCore/Icon.h>
+#include <WebCore/NavigationAction.h>
+#include <WebCore/Page.h>
 #include <WebCore/PopupMenu.h>
 #include <WebCore/SearchPopupMenu.h>
 #include <wtf/CompletionHandler.h>
+#include <wtf/text/CString.h>
 
 namespace WebCorePort {
 
@@ -56,8 +62,40 @@ void PortChromeClient::updateTextIndicator(RefPtr<TextIndicator>&&) const
 {
 }
 
-void PortChromeClient::runOpenPanel(LocalFrame&, FileChooser&)
+// <input type=file>. Hands the chooser to the async UI bridge and returns at once
+// — the shell shows a FileOpenPicker on the UI thread and posts the result back
+// onto the engine queue. Blocking here would deadlock: the engine thread must
+// never wait on the UI thread (see PortUIBridge.h).
+void PortChromeClient::runOpenPanel(LocalFrame&, FileChooser& chooser)
 {
+    WebCorePort::enqueueFileChooser(chooser);
+}
+
+// window.alert(). Queued as a shell notification; JS continues immediately rather
+// than blocking, which is a deliberate deviation from the spec's modal semantics:
+// making it truly modal needs a nested run loop on the engine thread, and shipping
+// that untested on device is a worse trade than an alert that does not pause JS.
+// See the 0.1.9 report ("JS dialogs") for the design that would make it modal.
+void PortChromeClient::runJavaScriptAlert(LocalFrame&, const String& message)
+{
+    auto utf8 = message.utf8();
+    WebCorePort::enqueueAlert(utf8.data() ? std::string(utf8.data(), utf8.length()) : std::string());
+}
+
+// window.open()。设计与限制见 PortChromeClient.h 上方的长注释。
+// 这里只做一件事:把请求的 URL 送进 UI bridge,让壳去开标签。
+RefPtr<Page> PortChromeClient::createWindow(LocalFrame&, const String&, const WindowFeatures&, const NavigationAction& action)
+{
+    const URL& url = action.url();
+    // about:blank 之类没有可导航目标的 open() —— 壳开一个空标签毫无意义,直接忽略。
+    // (这类调用通常紧接着 w.document.write(),而那条路本来就走不通,见头文件说明。)
+    if (!url.isValid() || url.isAboutBlank() || url.isEmpty())
+        return nullptr;
+
+    auto utf8 = url.string().utf8();
+    if (utf8.data())
+        WebCorePort::enqueueNewWindow(std::string(utf8.data(), utf8.length()));
+    return nullptr;
 }
 
 void PortChromeClient::showShareSheet(ShareDataWithParsedURL&&, CompletionHandler<void(bool)>&&)

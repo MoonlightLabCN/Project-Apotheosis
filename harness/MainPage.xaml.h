@@ -127,6 +127,15 @@ namespace Harness {
         void NavigateTo(Platform::String^ url, bool pushHistory);
         void UpdateNavButtons();
         void SetLoading(bool loading);
+        void AdoptFinalUrl(const std::wstring& finalUrl);   // 0.1.9: 重定向后的真实文档 URL
+
+        // 0.1.9 异步 UI 请求(引擎 → shell)。见 port/PortUIBridge.h。
+        // DrainUIRequests 在**引擎线程**跑(每个可能执行页面脚本的 job 末尾调一次),其余三个在 UI 线程。
+        static void DrainUIRequests(Windows::UI::Core::CoreDispatcher^ disp, Platform::Agile<MainPage^> self);
+        void OnEngineUIRequest(int kind, unsigned long long id, const std::string& payload);
+        void ShowFileChooser(unsigned long long id, const std::string& payload);   // <input type=file>
+        void ShowScriptAlert(const std::string& message);                          // window.alert()
+        void OpenUrlInNewTab(const std::string& url);                              // window.open() / target=_blank
         void OnNavDone(Platform::String^ finalTitle, bool ok, bool loadOk);
         void OnLoadWatchdog(Platform::Object^ sender, Platform::Object^ e);
         // 网页点击:有会话则把点击转发到引擎(按钮/表单/链接统一走真实事件);无会话(主页)走链接表。

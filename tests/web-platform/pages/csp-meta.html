@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Same idea as csp-enforced.html, but the policy comes from <meta> instead of a
+     response header. Kept as a separate page because the two go through different
+     code in WebCore (header parsing vs. the parser's meta hook), and the 0.1.9
+     bypass sat downstream of both — so both have to be re-verified. -->
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'nonce-metaok'; img-src 'self'">
+<title>CSP enforcement (meta policy)</title>
+<style>
+  body { font:15px/1.45 -apple-system,"Segoe UI",sans-serif; margin:0; padding:12px; background:#101418; color:#e8eef4; }
+  #summary { font-size:24px; font-weight:700; padding:12px; border-radius:8px; text-align:center; margin:10px 0; background:#26313a; }
+  #summary.pass { background:#0b5c2a; } #summary.fail { background:#7a1723; }
+  li { list-style:none; padding:7px 9px; border-radius:6px; background:#1a2229; margin-bottom:4px; }
+  .tag { font-weight:700; font-size:12px; padding:1px 6px; border-radius:4px; margin-right:8px; }
+  .PASS { background:#0b5c2a; color:#b8f0c8; } .FAIL { background:#7a1723; color:#ffc9cf; }
+  .note { color:#8fa3b5; font-size:12px; }
+  a { color:#7fc5ff; }
+</style>
+
+<h1 style="font-size:18px">CSP &mdash; &lt;meta&gt; policy</h1>
+<div id="summary">running…</div>
+<ul id="r"></ul>
+<p><a href="/">&lsaquo; back to the dashboard</a></p>
+
+<script>window.META_INLINE_RAN = true;</script>
+<script nonce="metaok">window.META_NONCE_RAN = true;</script>
+<script src="/api/csp/script.js"></script>
+
+<script nonce="metaok">
+var r = document.getElementById('r'), pass = 0, fail = 0;
+function record(name, ok, note) {
+  var li = document.createElement('li');
+  li.innerHTML = '<span class="tag ' + (ok ? 'PASS' : 'FAIL') + '">' + (ok ? 'PASS' : 'FAIL') + '</span>';
+  li.appendChild(document.createTextNode(name));
+  if (note) { var d = document.createElement('div'); d.className = 'note'; d.textContent = note; li.appendChild(d); }
+  r.appendChild(li);
+  ok ? pass++ : fail++;
+  var s = document.getElementById('summary');
+  s.textContent = fail ? (fail + ' FAILED / ' + pass + ' passed') : ('ALL ' + pass + ' PASSED');
+  s.className = fail ? 'fail' : 'pass';
+}
+record('meta CSP blocks a nonce-less inline script', window.META_INLINE_RAN !== true,
+       'META_INLINE_RAN = ' + window.META_INLINE_RAN);
+record('meta CSP allows the correctly-nonced inline script', window.META_NONCE_RAN === true,
+       'META_NONCE_RAN = ' + window.META_NONCE_RAN);
+record("meta CSP allows a same-origin external script ('self')", window.EXTERNAL_OK === true,
+       'EXTERNAL_OK = ' + window.EXTERNAL_OK);
+</script>

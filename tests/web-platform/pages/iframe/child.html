@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>iframe child</title>
+<body style="font:14px sans-serif;margin:0;padding:8px;background:#fff;color:#111">
+<div id="who">child loading…</div>
+<script>
+// Prove the child really ran: touch its own DOM, then tell the parent everything
+// it can observe about itself. Any of these being wrong points at a different
+// layer — no DOM change means the frame has no view, no message means the frame
+// tree exists but script does not run, wrong origin means sandbox flags leaked.
+document.getElementById('who').textContent = 'CHILD OK ' + location.pathname;
+
+// Which frame am I? Passed in the URL because the parent cannot compare
+// contentWindows for a sandboxed (opaque-origin) frame, and several frames share
+// this same document.
+var FRAME = (/[?&]frame=([^&]*)/.exec(location.search) || [, ''])[1];
+
+function report(extra) {
+  var payload = {
+    tag: 'child',
+    frame: FRAME,
+    href: location.href,
+    origin: (function () { try { return document.location.origin; } catch (e) { return 'ERR'; } })(),
+    hasParent: window.parent !== window,
+    // Reading parent.location.href across origins must throw. We report which of
+    // the two happened; the parent decides whether that was correct.
+    parentReadable: (function () {
+      try { var h = window.parent.location.href; return !!h; } catch (e) { return false; }
+    })(),
+    // A sandboxed frame without allow-same-origin has an opaque origin, so its
+    // localStorage access throws. Same idea: report, do not judge.
+    storageUsable: (function () {
+      try { window.localStorage.getItem('x'); return true; } catch (e) { return false; }
+    })(),
+    domChanged: document.getElementById('who').textContent.indexOf('CHILD OK') === 0
+  };
+  if (extra) for (var k in extra) payload[k] = extra[k];
+  try { window.parent.postMessage(JSON.stringify(payload), '*'); } catch (e) {}
+}
+
+// Answer explicit pings too, so the parent can re-query after a frame navigation.
+window.addEventListener('message', function (e) {
+  if (e.data === 'ping') report({ tag: 'pong' });
+  if (e.data === 'navigate') location.href = location.pathname + '?frame=' + FRAME + '&navigated=1';
+});
+
+report({ navigated: location.search.indexOf('navigated=1') >= 0 });
+</script>
+</body>

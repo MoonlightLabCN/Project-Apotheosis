@@ -1,0 +1,230 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apotheosis 0.2.0 — IndexedDB</title>
+<link rel="stylesheet" href="/pages/common.css">
+
+<h1>IndexedDB smoke</h1>
+<div class="sub">open / versionchange / createObjectStore / add / get / index /
+cursor / delete / transaction / close / reopen / 1 MB value. Deliberately a smoke
+test, not WPT: the goal is "does the basic shape work on ARM32", not coverage.</div>
+<div id="summary">running…</div>
+<ul id="results"></ul>
+
+<h2>Manual</h2>
+<div>
+  <button id="reload">Reload &mdash; the record must still be there</button>
+  <button id="wipe">Delete the database</button>
+</div>
+<pre id="manual"></pre>
+
+<a class="back" href="/">&lsaquo; back to index</a>
+
+<script src="/pages/harness.js"></script>
+<script>
+var DB = 'apo_idb_test', STORE = 'kv';
+
+if (!window.indexedDB) {
+  T.record('window.indexedDB exists', false, 'the global is missing entirely');
+} else {
+  T.record('window.indexedDB exists', true, typeof window.indexedDB);
+  run();
+}
+
+function fail(name, e) {
+  T.record(name, false, e ? ((e.name || '') + ' ' + (e.message || e)) : 'no error object');
+}
+
+function run() {
+  T.begin();
+
+  var upgradeRan = false, storeCreated = false, indexCreated = false;
+  var req;
+  try {
+    req = indexedDB.open(DB, 1);
+  } catch (e) {
+    fail('indexedDB.open() does not throw synchronously', e);
+    return T.end();
+  }
+  T.record('indexedDB.open() returns a request', !!req, req ? ('readyState=' + req.readyState) : '');
+
+  var settled = false;
+  var watchdog = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    T.record('open request settles (success or error)', false,
+      'no success/error/upgradeneeded within 10 s — the request never completed');
+    T.end();
+  }, 10000);
+
+  req.onupgradeneeded = function (e) {
+    upgradeRan = true;
+    var db = e.target.result;
+    try {
+      var store = db.createObjectStore(STORE, { keyPath: 'id' });
+      storeCreated = true;
+      store.createIndex('by_tag', 'tag', { unique: false });
+      indexCreated = true;
+    } catch (err) {
+      fail('createObjectStore / createIndex inside versionchange', err);
+    }
+  };
+
+  req.onerror = function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    fail('indexedDB.open() succeeds', req.error);
+    T.end();
+  };
+
+  req.onsuccess = function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+
+    var db = req.result;
+    T.record('indexedDB.open() succeeds', !!db, db ? ('name=' + db.name + ' version=' + db.version) : '');
+    T.record('versionchange transaction ran on first open',
+      upgradeRan ? true : null,
+      upgradeRan ? 'createObjectStore + createIndex executed'
+                 : 'database already existed — reload after "Delete the database" to exercise it');
+    if (upgradeRan) {
+      T.record('createObjectStore works', storeCreated);
+      T.record('createIndex works', indexCreated);
+    }
+
+    if (!db) return T.end();
+    exercise(db);
+  };
+}
+
+function exercise(db) {
+  var value = { id: 'k1', tag: 'alpha', when: Date.now(), blob: 'x' };
+  var tx, store;
+  try {
+    tx = db.transaction([STORE], 'readwrite');
+    store = tx.objectStore(STORE);
+  } catch (e) {
+    fail('db.transaction(readwrite) works', e);
+    return T.end();
+  }
+  T.record('db.transaction(readwrite) works', true, 'mode=' + tx.mode);
+
+  var putReq = store.put(value);
+  putReq.onerror = function () { fail('objectStore.put() succeeds', putReq.error); };
+  putReq.onsuccess = function () {
+    T.record('objectStore.put() succeeds', true, 'key=' + putReq.result);
+
+    var getReq = store.get('k1');
+    getReq.onerror = function () { fail('objectStore.get() succeeds', getReq.error); };
+    getReq.onsuccess = function () {
+      var got = getReq.result;
+      T.record('objectStore.get() returns the stored record',
+        !!got && got.id === 'k1' && got.tag === 'alpha',
+        got ? JSON.stringify(got).slice(0, 90) : 'undefined');
+
+      // Index lookup + cursor, the two things a hand-rolled backend usually lacks.
+      var idxReq;
+      try {
+        idxReq = store.index('by_tag').get('alpha');
+      } catch (e) {
+        fail('index lookup works', e);
+        return afterIndex();
+      }
+      idxReq.onerror = function () { fail('index lookup works', idxReq.error); afterIndex(); };
+      idxReq.onsuccess = function () {
+        T.record('index lookup works', !!idxReq.result && idxReq.result.id === 'k1',
+          idxReq.result ? 'found via by_tag' : 'index returned undefined');
+        afterIndex();
+      };
+
+      function afterIndex() {
+        var seen = 0;
+        var curReq = store.openCursor();
+        curReq.onerror = function () { fail('cursor iterates the store', curReq.error); finishTx(); };
+        curReq.onsuccess = function () {
+          var cursor = curReq.result;
+          if (cursor) { seen++; cursor.continue(); return; }
+          T.record('cursor iterates the store', seen >= 1, 'saw ' + seen + ' record(s)');
+          finishTx();
+        };
+      }
+    };
+  };
+
+  function finishTx() {
+    tx.oncomplete = function () {
+      T.record('transaction completes', true, 'oncomplete fired');
+      bigValue(db);
+    };
+    tx.onerror = function () { fail('transaction completes', tx.error); T.end(); };
+    tx.onabort = function () { fail('transaction completes', tx.error || { name: 'AbortError' }); T.end(); };
+  }
+}
+
+// 1 MB, per the rule of thumb for a first ARM32 pass: big enough to leave the
+// small-value fast paths, small enough that a failure means "IDB is broken", not
+// "a 32-bit phone ran out of address space".
+function bigValue(db) {
+  var mb = new Array(1024 * 1024 + 1).join('a');
+  var tx = db.transaction([STORE], 'readwrite');
+  var store = tx.objectStore(STORE);
+  var req = store.put({ id: 'big', tag: 'beta', blob: mb });
+  req.onerror = function () { fail('1 MB value round-trips', req.error); T.end(); };
+  req.onsuccess = function () {
+    var back = store.get('big');
+    back.onerror = function () { fail('1 MB value round-trips', back.error); T.end(); };
+    back.onsuccess = function () {
+      var ok = !!back.result && back.result.blob && back.result.blob.length === mb.length;
+      T.record('1 MB value round-trips', ok,
+        back.result ? ('read back ' + back.result.blob.length + ' chars') : 'undefined');
+      deleteAndReopen(db);
+    };
+  };
+}
+
+function deleteAndReopen(db) {
+  var tx = db.transaction([STORE], 'readwrite');
+  var store = tx.objectStore(STORE);
+  var del = store.delete('big');                       // keep the small record for the reload check
+  del.onerror = function () { fail('objectStore.delete() succeeds', del.error); T.end(); };
+  del.onsuccess = function () {
+    T.record('objectStore.delete() succeeds', true, 'removed the 1 MB record');
+    tx.oncomplete = function () {
+      db.close();
+      T.record('db.close() does not throw', true);
+
+      // Reopening within the same page load is the cheapest persistence signal we
+      // can get automatically; surviving an app restart is the manual button.
+      var again = indexedDB.open(DB, 1);
+      again.onerror = function () { fail('reopen finds the earlier record', again.error); T.end(); };
+      again.onsuccess = function () {
+        var db2 = again.result;
+        var g = db2.transaction([STORE], 'readonly').objectStore(STORE).get('k1');
+        g.onerror = function () { fail('reopen finds the earlier record', g.error); db2.close(); T.end(); };
+        g.onsuccess = function () {
+          T.record('reopen finds the earlier record', !!g.result && g.result.id === 'k1',
+            g.result ? 'k1 still present' : 'k1 is gone after close+reopen');
+          document.getElementById('manual').textContent =
+            'Record k1 present now: ' + (g.result ? 'yes' : 'no') + '\n\n' +
+            'Press Reload: k1 must still be there (same app run).\n' +
+            'Close the app completely and reopen this page: k1 must STILL be there.\n' +
+            'If it is not, IndexedDB is running in memory — check WebCoreGetStorageDiag\n' +
+            'on device, which reports whether the SQLite file backend came up.';
+          db2.close();
+          T.end();
+        };
+      };
+    };
+  };
+}
+
+document.getElementById('reload').onclick = function () { location.reload(); };
+document.getElementById('wipe').onclick = function () {
+  try {
+    var r = indexedDB.deleteDatabase(DB);
+    r.onsuccess = r.onerror = r.onblocked = function () { location.reload(); };
+  } catch (e) { location.reload(); }
+};
+</script>

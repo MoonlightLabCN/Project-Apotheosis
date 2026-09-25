@@ -39,6 +39,7 @@ class LoadingFrameLoaderClient : public WebCore::LocalFrameLoaderClient {
 public:
     explicit LoadingFrameLoaderClient(WebCore::FrameLoader& frameLoader)
         : WebCore::LocalFrameLoaderClient(frameLoader)
+        , m_frameLoader(&frameLoader)
     { }
 
     // ---- driver-pollable load state -------------------------------------
@@ -220,6 +221,13 @@ private:
 
     // ---- driver-pollable load state -------------------------------------
     void signalLoadComplete(bool failed);
+
+    // 本 client 所属的 FrameLoader。基类 LocalFrameLoaderClient 把它的 WeakRef<FrameLoader>
+    // 放在 private 且不给 accessor,而 createFrame()/transitionToCommittedForNewPage() 都需要知道
+    // "我是哪一帧"(取 Page、取 effectiveSandboxFlags、判主帧/子帧)。裸指针在这里是安全的:
+    // FrameLoader 以 `const UniqueRef<LocalFrameLoaderClient> m_client` 持有本对象(FrameLoader.h:487),
+    // 即 loader 必然比 client 活得久。
+    WebCore::FrameLoader* m_frameLoader { nullptr };
 
     bool m_loadFinished { false };
     bool m_loadFailed { false };
