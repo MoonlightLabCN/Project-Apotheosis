@@ -5,11 +5,10 @@ WebKit tree used by Project Apotheosis, against the upstream tag.
 
 ## Scope
 
-- Base: `webkitgtk-2.52.4`
-- Base commit: `e4ab5336695fe76b623682915737c3ee88f2e0ed`
-- Patched tree: `05a728a8e0` (branch `winuwp`, 111 commits over the tag)
-- Files changed: 141 under `Source/` (17 new files)
-- Diff: 12802 insertions and 105 deletions
+- Base: `webkitgtk-2.54.0`
+- Base commit: `cef114f523d3bd389936cbc7ec2b13e5436d63a0` (tag), `5220e80b97` (release commit)
+- Files changed: 155 under `Source/` (17 new files)
+- Diff: 13473 insertions and 104 deletions
 
 The patch contains the ARM32 Windows 10 Mobile / UWP adaptations used by the
 `gpu-path1` development line. It is intentionally a source diff rather than a
@@ -203,7 +202,7 @@ share of this patch dropped from 8 656 to 6 142 added lines when v1 was deleted.
 From the root of a WebKit checkout at the base tag:
 
 ```powershell
-git checkout webkitgtk-2.52.4
+git checkout webkitgtk-2.54.0
 git apply --3way path\to\wk-winuwp.patch
 ```
 
@@ -218,7 +217,7 @@ building.
 On a branch carrying the changes on top of the tag:
 
 ```powershell
-git diff --output=wk-winuwp.patch webkitgtk-2.52.4 HEAD -- Source/
+git diff --output=wk-winuwp.patch webkitgtk-2.54.0 HEAD -- Source/
 ```
 
 (`--output=` instead of a shell redirect: PowerShell would rewrite the line
