@@ -41,7 +41,7 @@
 #include <WebCore/ResourceRequest.h>
 #include <WebCore/ResourceResponse.h>
 #include <wtf/CompletionHandler.h>
-#include <wtf/Unexpected.h>
+#include <utility>   // Apotheosis: 2.54 删了 Unexpected.h(Expected 已是 std::expected)
 #include <wtf/text/CString.h>
 
 // Apotheosis: 诊断通道,定义在 WebCoreDriver.cpp。把失败的 ResourceError 细节
@@ -156,6 +156,12 @@ bool LoadingFrameLoaderClient::canShowMIMETypeAsHTML(const String&) const
 }
 
 // Same as Empty: just construct the DocumentLoader.
+// 2.54 起有两个重载;三参版多一个“重定向后请求”(供错误页展示)，本 port 直接委派两参版。
+Ref<DocumentLoader> LoadingFrameLoaderClient::createDocumentLoader(ResourceRequest&& request, SubstituteData&& substituteData, ResourceRequest&&)
+{
+    return createDocumentLoader(WTF::move(request), WTF::move(substituteData));
+}
+
 Ref<DocumentLoader> LoadingFrameLoaderClient::createDocumentLoader(ResourceRequest&& request, SubstituteData&& substituteData)
 {
     return DocumentLoader::create(WTF::move(request), WTF::move(substituteData));
@@ -465,7 +471,7 @@ void LoadingFrameLoaderClient::dispatchDidReachVisuallyNonEmptyState()
 {
 }
 
-LocalFrame* LoadingFrameLoaderClient::dispatchCreatePage(const NavigationAction&, NewFrameOpenerPolicy)
+LocalFrame* LoadingFrameLoaderClient::dispatchCreatePage(const NavigationAction&, NewFrameOpenerPolicy, const String&)
 {
     return nullptr;
 }
@@ -664,7 +670,7 @@ void LoadingFrameLoaderClient::updateGlobalHistoryRedirectLinks()
 {
 }
 
-ShouldGoToHistoryItem LoadingFrameLoaderClient::shouldGoToHistoryItem(HistoryItem&, IsSameDocumentNavigation, ProcessSwapDisposition) const
+ShouldGoToHistoryItem LoadingFrameLoaderClient::shouldGoToHistoryItem(HistoryItem&, IsSameDocumentNavigation) const
 {
     return ShouldGoToHistoryItem::No;
 }
@@ -783,7 +789,17 @@ Ref<FrameNetworkingContext> LoadingFrameLoaderClient::createNetworkingContext()
 void LoadingFrameLoaderClient::sendH2Ping(const URL& url, CompletionHandler<void(Expected<Seconds, ResourceError>&&)>&& completionHandler)
 {
     ASSERT_NOT_REACHED();
-    completionHandler(makeUnexpected(internalError(url)));
+    completionHandler(std::unexpected(internalError(url)));
+}
+
+
+// Apotheosis: 2.54 新纯虚 —— document 内历史遍历。单会话浏览器无 UI 映射,明确 no-op。
+void LoadingFrameLoaderClient::dispatchGoToBackForwardItemAtIndex(int)
+{
+}
+
+void LoadingFrameLoaderClient::dispatchEnqueueHistoryTraversalDelta(int)
+{
 }
 
 } // namespace WebCorePort

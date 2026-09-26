@@ -42,7 +42,7 @@ using namespace WebCore;
 // PortSocketProvider
 // ---------------------------------------------------------------------------------------
 
-RefPtr<ThreadableWebSocketChannel> PortSocketProvider::createWebSocketChannel(Document& document, WebSocketChannelClient& client)
+RefPtr<ThreadableWebSocketChannel> PortSocketProvider::createWebSocketChannel(Document& document, WebSocketChannelClient& client, IsInitiatedByDedicatedWorker)
 {
     return PortWebSocketChannel::create(document, client);
 }

@@ -40,6 +40,9 @@
 #include <wtf/WeakPtr.h>
 
 namespace WebCore {
+// Apotheosis: 2.54 SocketProvider 新纯虚的前置声明(必须在顶层命名空间,否则遠遇 WebCorePort::WebCore)
+class RiceBackend;
+class RiceBackendClient;
 class CurlStreamScheduler;
 class Document;
 class NetworkSendQueue;
@@ -153,12 +156,18 @@ private:
 // The provider the driver hands to PageConfiguration in place of EmptySocketProvider.
 // WebTransport stays unimplemented (it needs HTTP/3, which this port has no transport for);
 // initializeWebTransportSession() rejects, which is what every non-Cocoa port does today.
+// Apotheosis: 2.54 的 SocketProvider 新纯虚需要这两个前置声明(头层本身未展开)。
 class PortSocketProvider final : public WebCore::SocketProvider {
 public:
     static Ref<PortSocketProvider> create() { return adoptRef(*new PortSocketProvider); }
 
 private:
-    RefPtr<WebCore::ThreadableWebSocketChannel> createWebSocketChannel(WebCore::Document&, WebCore::WebSocketChannelClient&) final;
+    RefPtr<WebCore::ThreadableWebSocketChannel> createWebSocketChannel(WebCore::Document&, WebCore::WebSocketChannelClient&, WebCore::IsInitiatedByDedicatedWorker) final;
+#if USE(LIBRICE)
+    // 2.54 新增纯虚:Rice 后端本 port 无此需求,明确回绝。基类该纯虚只在
+    // USE(LIBRICE) 下存在 —— 覆写必须同守卫,否则 final 落在非虚成员上报错。
+    RefPtr<WebCore::RiceBackend> createRiceBackend(WebCore::RiceBackendClient&) final { return nullptr; }
+#endif
     std::pair<RefPtr<WebCore::WebTransportSession>, Ref<WebCore::WebTransportSessionPromise>> initializeWebTransportSession(WebCore::ScriptExecutionContext&, WebCore::WebTransportSessionClient&, const URL&, const WebCore::WebTransportOptions&) final;
 };
 

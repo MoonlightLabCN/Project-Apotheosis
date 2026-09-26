@@ -128,12 +128,10 @@ public:
     void show() final { }
 
     bool canRunModal() const final { return false; }
+    // 2.54 新纯虚:本 port 没有弹窗概念。
+    bool isPopup() const final { return false; }
     void runModal() final { }
 
-    bool toolbarsVisible() const final { return false; }
-    bool statusbarVisible() const final { return false; }
-    bool scrollbarsVisible() const final { return false; }
-    bool menubarVisible() const final { return false; }
 
     void setResizable(bool) final { }
 
@@ -160,8 +158,6 @@ public:
     bool runJavaScriptConfirm(WebCore::LocalFrame&, const String&) final { return false; }
     bool runJavaScriptPrompt(WebCore::LocalFrame&, const String&, const String&, String&) final { return false; }
 
-    bool selectItemWritingDirectionIsNatural() final { return false; }
-    bool selectItemAlignmentFollowsMenuWritingDirection() final { return false; }
     RefPtr<WebCore::PopupMenu> createPopupMenu(WebCore::PopupMenuClient&) const final;
     RefPtr<WebCore::SearchPopupMenu> createSearchPopupMenu(WebCore::PopupMenuClient&) const final;
 
@@ -196,7 +192,6 @@ public:
 
     void exceededDatabaseQuota(WebCore::LocalFrame&, const String&, WebCore::DatabaseDetails) final { }
 
-    void reachedMaxAppCacheSize(int64_t) final { }
 
     RefPtr<WebCore::ColorChooser> createColorChooser(WebCore::ColorChooserClient&, const WebCore::Color&) final;
 
@@ -233,7 +228,6 @@ public:
 
     RefPtr<WebCore::Icon> createIconForFiles(const Vector<String>&) final;
 
-    void requestCookieConsent(CompletionHandler<void(WebCore::CookieConsentDecisionResult)>&&) final;
 
 private:
     // Apotheosis (event-driven present): the single place that raises the flag. Every hook above

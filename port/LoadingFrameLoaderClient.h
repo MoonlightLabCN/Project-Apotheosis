@@ -55,6 +55,10 @@ public:
 
 private:
     Ref<WebCore::DocumentLoader> createDocumentLoader(WebCore::ResourceRequest&&, WebCore::SubstituteData&&) override;
+    Ref<WebCore::DocumentLoader> createDocumentLoader(WebCore::ResourceRequest&&, WebCore::SubstituteData&&, WebCore::ResourceRequest&&) override;
+    // 2.54 新增:document 内历史遍历(pushState/hash) 回调。本 port 单会话无此需求,明确 no-op。
+    void dispatchGoToBackForwardItemAtIndex(int steps) override;
+    void dispatchEnqueueHistoryTraversalDelta(int delta) override;
 
     bool hasWebView() const override;
 
@@ -113,7 +117,7 @@ private:
     void dispatchDidReachLayoutMilestone(OptionSet<WebCore::LayoutMilestone>) override;
     void dispatchDidReachVisuallyNonEmptyState() override;
 
-    WebCore::LocalFrame* dispatchCreatePage(const WebCore::NavigationAction&, WebCore::NewFrameOpenerPolicy) override;
+    WebCore::LocalFrame* dispatchCreatePage(const WebCore::NavigationAction&, WebCore::NewFrameOpenerPolicy, const String&) override;
     void dispatchShow() override;
 
     void dispatchDecidePolicyForResponse(const WebCore::ResourceResponse&, const WebCore::ResourceRequest&, const String&, WebCore::FramePolicyFunction&&) override;
@@ -177,7 +181,7 @@ private:
 
     void updateGlobalHistory() override;
     void updateGlobalHistoryRedirectLinks() override;
-    WebCore::ShouldGoToHistoryItem shouldGoToHistoryItem(WebCore::HistoryItem&, WebCore::IsSameDocumentNavigation, WebCore::ProcessSwapDisposition) const override;
+    WebCore::ShouldGoToHistoryItem shouldGoToHistoryItem(WebCore::HistoryItem&, WebCore::IsSameDocumentNavigation) const override;
     bool supportsAsyncShouldGoToHistoryItem() const override;
     void shouldGoToHistoryItemAsync(WebCore::HistoryItem&, CompletionHandler<void(WebCore::ShouldGoToHistoryItem)>&&) const override;
 

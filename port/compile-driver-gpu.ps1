@@ -12,7 +12,7 @@ $cmd = $cmd -replace '/Fd\S+',''
 $cmd = $cmd -replace '-c\s+--\s+\S+UnifiedSource\S+',''
 $cmd = $cmd -replace 'build-clang-webcore','build-clang-gpu'
 # M2 GPU 呈现:WebCoreDriver.cpp 要包 texmap(经 platform/graphics 已在 -I 上)+ ANGLE 的 GLES2/EGL 头(angle\include 不在 harness-cmd 的 -I 里,补上)。
-$cmd = "$cmd -IE:\Apotheosis\WebKit\Source\WebKitLegacy\WebCoreSupport -IE:\Apotheosis\WebKit\Source\WebKitLegacy\Storage -IE:\Apotheosis\WebKit\Source\WebKitLegacy -IE:\Apotheosis\angle\include /Fo`"$Obj`" -c -- `"$Src`""
+$cmd = "$cmd -IE:\Apotheosis\WebKit\Source\WebKitLegacy\WebCoreSupport -IE:\Apotheosis\WebKit\Source\WebKitLegacy\Storage -IE:\Apotheosis\WebKit\Source\WebKitLegacy -IE:\Apotheosis\angle\include -IE:\Apotheosis\build-clang-gpu\bmalloc\Headers /Fo`"$Obj`" -c -- `"$Src`""
 
 $bat = "E:\Apotheosis\port\_driver_compile_gpu.bat"
 Set-Content -Path $bat -Value $cmd -Encoding ASCII

@@ -30,7 +30,7 @@
 
 #include <openssl/evp.h>   // libcrypto(已为 TLS 链接)的 EVP 摘要;头已在 vcpkg include 路径上
 
-namespace PAL {
+namespace PAL::Crypto {   // Apotheosis: 2.54 把摘要类收进 PAL::Crypto 命名空间
 
 // 累积 addBytes 的输入,computeHash() 时一次性算摘要。
 struct CryptoDigestContext {
@@ -79,5 +79,5 @@ Vector<uint8_t> CryptoDigest::computeHash()
     return result;
 }
 
-} // namespace PAL
+} // namespace PAL::Crypto
 

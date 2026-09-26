@@ -254,8 +254,9 @@ unsigned wkWinUWPTexmapVisibleHoles();
 #include <WebCore/HTMLBodyElement.h>      // is<HTMLBodyElement>: stop the ancestor walk before <body>
 #include <WebCore/StyleTouchAction.h>     // Style::TouchAction::isAuto/isManipulation
 #include <WebCore/RenderObjectStyle.h>        // inline RenderObject::style()
-#include <WebCore/RenderStyle+GettersInlines.h>  // RenderStyle::touchAction()(the umbrella header; the
-                                              // RenderStyleProperties/ComputedStyleProperties inline files
+#include <WebCore/RenderObjectNode.h>   // Apotheosis: 2.54 拆分头 —— RenderObject::node() 的定义处
+#include <WebCore/StyleComputedStyle+GettersInlines.h>  // Style::ComputedStyle::touchAction()(2.54 更名;the
+                                              // ComputedStyleProperties inline files
                                               // it pulls in #error out if included directly)
 #include <optional>
 #include <algorithm>
@@ -1293,10 +1294,15 @@ static LONG NTAPI crashLogVectoredHandler(EXCEPTION_POINTERS* info)
         }
         // Is the fault inside JSC's fixed executable pool? (W^X commit gap vs. stray jump)
         char pool[120];
+#if ENABLE(JIT)
         std::snprintf(pool, sizeof(pool), "jit pool: [0x%08llx, 0x%08llx) isJITPC(fault)=%d",
             static_cast<unsigned long long>(JSC::startOfFixedExecutableMemoryPool<uintptr_t>()),
             static_cast<unsigned long long>(JSC::endOfFixedExecutableMemoryPool<uintptr_t>()),
             JSC::isJITPC(reinterpret_cast<void*>(rec->ExceptionInformation[1])) ? 1 : 0);
+#else
+        // Apotheosis: LLInt 构建(JIT 未启)时池区间不存在。
+        std::snprintf(pool, sizeof(pool), "jit pool: (LLInt build, no JIT pool) isJITPC(fault)=n/a");
+#endif
         crashLogWrite(pool, nullptr);
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -2600,7 +2606,7 @@ static void pumpLoop(WebCore::LocalFrame& frame, const bool* mainDone, bool allo
             // 排微任务:推进 promise 图(ES module 加载/求值这条异步链靠它 + 下方 0_s WebCore 定时器,
             // 只要 RunLoop 持续转就会触发)。isolatedUpdateRendering 自身不排微任务、不跑事件循环任务。
             if (RefPtr<Document> doc = frameRef->document())
-                doc->eventLoop().performMicrotaskCheckpoint();
+                doc->eventLoop().performMicrotaskCheckpoint(doc->vm());
 
             RefPtr<DocumentLoader> dl = frameRef->loader().activeDocumentLoader();
             bool loading = dl && dl->isLoadingInAPISense();
@@ -2775,7 +2781,7 @@ static void pumpQuick(WebCore::LocalFrame& frame, WebCore::Page* pageForRenderin
     if (pageForRendering)
         pageForRendering->isolatedUpdateRendering();
     if (RefPtr<Document> doc = frame.document())
-        doc->eventLoop().performMicrotaskCheckpoint();
+        doc->eventLoop().performMicrotaskCheckpoint(doc->vm());
 }
 
 // ============================ M2 GPU 合成 recipe ============================
@@ -3784,7 +3790,7 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     view->setBaseBackgroundColor(Color::white);
     view->resize(wkViewSizeFromEngine(w, h));
 
-    RefPtr<Document> document = localMainFrame->protectedDocument();
+    RefPtr<Document> document = localMainFrame->document();
     if (!document)
         return kErrNoDocument;
     {
@@ -3805,7 +3811,7 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     view->setTransparent(false);
     view->setBaseBackgroundColor(Color::white);
     view->resize(wkViewSizeFromEngine(w, h));
-    document = localMainFrame->protectedDocument();
+    document = localMainFrame->document();
     if (!document)
         return kErrNoDocument;
     {
@@ -4566,7 +4572,7 @@ int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA)
     const IntSize size = wkViewSizeFromEngine(w, h);   // CSS px, see wkViewSizeFromEngine
     view->resize(size);   // Widget::resize -> setFrameRect; establishes the layout viewport
 
-    RefPtr<Document> document = localMainFrame->protectedDocument();
+    RefPtr<Document> document = localMainFrame->document();
     if (!document)
         return kErrNoDocument;
 
@@ -4798,7 +4804,7 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
         return kErrLoadFailed;
 
     // ---- Final layout ----
-    RefPtr<Document> document = localMainFrame->protectedDocument();
+    RefPtr<Document> document = localMainFrame->document();
     if (!document)
         return kErrNoDocument;
 
@@ -4919,7 +4925,7 @@ public:
                      OptionSet<WebCore::PlatformEvent::Modifier> modifiers, MonotonicTime timestamp,
                      unsigned short buttons)
         : WebCore::PlatformMouseEvent(position, position, button, type, clickCount, modifiers, timestamp,
-                                      /*force*/ 0.0, WebCore::SyntheticClickType::NoTap)
+                                      /*force*/ 0.0, WebCore::SyntheticClickType::NoTap, WebCore::MouseEventInputSource::UserDriven)
     {
         m_buttons = buttons;
     }
@@ -5031,7 +5037,7 @@ static void holdPump(WebCore::LocalFrame& frame, WebCore::Page* pageForRendering
                 }
             }
             if (RefPtr<Document> doc = frameRef->document())
-                doc->eventLoop().performMicrotaskCheckpoint();
+                doc->eventLoop().performMicrotaskCheckpoint(doc->vm());
             if (MonotonicTime::now() >= deadline)
                 stopLoop();
         } });
@@ -7387,7 +7393,7 @@ int WebCoreLiveTick(uint8_t* outRGBA)
     RefPtr<Document> doc = lf->document();
     if (!doc)
         return kErrNoDocument;
-    doc->eventLoop().performMicrotaskCheckpoint();
+    doc->eventLoop().performMicrotaskCheckpoint(doc->vm());
     {
         PerfPhase perfLayout(&g_perfCur.styleLayout);   // M4
         doc->updateLayoutIgnorePendingStylesheets({ WebCore::LayoutOptions::UpdateCompositingLayers });   // see gpuPrepare

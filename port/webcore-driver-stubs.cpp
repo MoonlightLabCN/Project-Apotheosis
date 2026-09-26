@@ -261,3 +261,165 @@ namespace WebCore {
 //     stub that no-ops the timer will hang layout (timers drive style/layout
 //     flushing). This must WORK, not be stubbed.
 // ============================================================================
+
+// ============================================================================
+// Apotheosis (2.54 重排补齐):Gigacage 分配族 / libpas 关机探针 / 2.54 新增的
+// WebResourceLoadScheduler 两个离线虚。
+// Gigacage在 USE(SYSTEM_MALLOC) 下没有实现(bmalloc 的 Gigacage.cpp 不进库),而
+// JSC/WebCore 的 ArrayBuffer 路径会引用它 —— 这里用系统分配器接管。
+// 对齐分配用“基址藏块”布局,让 free() 对普通/对齐块都安全(与本文件
+// FastMalloc 段的 _aligned_malloc/_aligned_free 配对不混用)。
+#include <cstdlib>
+#include <cstring>
+#include "WebResourceLoadScheduler.h"   // WebKitLegacy 调度器类声明(新增两虚的定义依赖)
+
+namespace {
+
+struct GigacageBlockHead {
+    void* base;
+    size_t size;
+};
+
+void* gigacageAlloc(size_t alignment, size_t size)
+{
+    if (alignment < sizeof(void*))
+        alignment = sizeof(void*);
+    size_t total = size + alignment + sizeof(GigacageBlockHead);
+    void* base = std::malloc(total);
+    if (!base)
+        return nullptr;
+    uintptr_t begin = reinterpret_cast<uintptr_t>(base) + sizeof(GigacageBlockHead);
+    uintptr_t aligned = (begin + alignment - 1) & ~static_cast<uintptr_t>(alignment - 1);
+    auto* head = reinterpret_cast<GigacageBlockHead*>(aligned) - 1;
+    head->base = base;
+    head->size = size;
+    return reinterpret_cast<void*>(aligned);
+}
+
+GigacageBlockHead* gigacageHead(void* p)
+{
+    return reinterpret_cast<GigacageBlockHead*>(p) - 1;
+}
+
+void* gigacageRealloc(void* p, size_t size)
+{
+    if (!p)
+        return gigacageAlloc(sizeof(void*), size);
+    auto* head = gigacageHead(p);
+    void* fresh = gigacageAlloc(sizeof(void*), size);
+    if (!fresh)
+        return nullptr;
+    std::memcpy(fresh, p, head->size < size ? head->size : size);
+    std::free(head->base);
+    return fresh;
+}
+
+void gigacageFree(void* p)
+{
+    if (p)
+        std::free(gigacageHead(p)->base);
+}
+
+} // namespace
+
+namespace Gigacage {
+
+void* tryAlignedMalloc(Kind, size_t alignment, size_t size) { return gigacageAlloc(alignment, size); }
+void* tryMalloc(Kind, size_t size) { return gigacageAlloc(sizeof(void*), size); }
+void* tryZeroedMalloc(Kind, size_t size)
+{
+    void* p = gigacageAlloc(sizeof(void*), size);
+    if (p)
+        std::memset(p, 0, size);
+    return p;
+}
+void* tryRealloc(Kind, void* p, size_t size) { return gigacageRealloc(p, size); }
+void free(Kind, void* p) { gigacageFree(p); }
+
+void* tryAllocateZeroedVirtualPages(Kind, size_t size)
+{
+    void* p = gigacageAlloc(sizeof(void*), size);
+    if (p)
+        std::memset(p, 0, size);
+    return p;
+}
+void freeVirtualPages(Kind, void* basePtr, size_t) { gigacageFree(basePtr); }
+
+void* tryMallocArray(Kind kind, size_t numElements, size_t elementSize)
+{
+    if (numElements && elementSize > (static_cast<size_t>(-1) / numElements))
+        return nullptr;
+    return tryMalloc(kind, numElements * elementSize);
+}
+
+void* malloc(Kind kind, size_t size) { return tryMalloc(kind, size); }
+void* zeroedMalloc(Kind kind, size_t size) { return tryZeroedMalloc(kind, size); }
+void* mallocArray(Kind kind, size_t numElements, size_t elementSize) { return tryMallocArray(kind, numElements, elementSize); }
+
+} // namespace Gigacage
+
+// libpas(内嵌于 bmalloc)的关机探针:LLInt/系统分配器路径下永不关机。
+extern "C" bool pas_process_is_shutting_down() { return false; }
+
+// WebKitLegacy 的调度器在 2.54 多了两个离线虚函数(实现在 WebKitLegacy 的 .cpp 里,
+// 本 port 不编该库)。语义:本 port 没有拦截机制,两者恒 false。
+bool WebResourceLoadScheduler::isBlockedError(const WebCore::ResourceError&) const
+{
+    return false;
+}
+
+bool WebResourceLoadScheduler::isHttpNavigationWithHTTPSOnlyError(const WebCore::ResourceError&) const
+{
+    return false;
+}
+
+// ============================================================================
+// Apotheosis (2.54 重排补齐):WTFCrashWithInfoImpl 的 7 个重载。
+// 背景:WTF.lib 里的定义与本库引用的修饰签名不一致(参数类型换代差),链接期对不上。
+// 这里按驱动所见的同一声明(Assertions.h)补定义 —— 走 WK_WINUWP 的
+// 崩溃上报钩子 + CRASH,保证 crash.txt 能写下断言位置。
+// ============================================================================
+namespace {
+
+[[noreturn]] void wkCrashWithLocation(int line, const char* file, const char* function)
+{
+    WTFWinUWPReportCrashLocation(line, file, function);
+    CRASH();
+}
+
+} // namespace
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}
+
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+{
+    wkCrashWithLocation(line, file, function);
+}

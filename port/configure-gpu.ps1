@@ -20,21 +20,29 @@ $WebKit = Join-Path $Root 'WebKit'
 $Build  = Join-Path $Root 'build-clang-gpu'
 $Toolchain = Join-Path $PSScriptRoot 'Toolchain-ARM32-UWP-clang.cmake'
 
-$pkgconfig = (Get-ChildItem "C:\vcpkg\downloads\tools\msys2" -Recurse -Filter "pkg-config.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-$env:PKG_CONFIG_PATH = "C:\vcpkg\installed\arm-uwp\lib\pkgconfig"
+# 经垫片调用 pkg-config:FindPkgConfig 注入的反斜杠路径会被 msys2 pkg-config
+# 按冒号切掉盘符,产出混合路径让 CMake 解析崩溃(见 pkg-config-shim.cmd 说明)。
+$pkgconfig = Join-Path $PSScriptRoot 'pkg-config-shim.cmd'
+# 故意指向空目录:msys2 的 pkg-config 在 PowerShell 环境里能找到 vcpkg 的 .pc,
+# 但其前缀重定位会拼出 "\vcpkg\...\lib\pkgconfig/../../lib" 这种混合路径,CMake 的
+# FindPkgConfig 解析时把 \v 当转义符直接 FATAL(2.54 的 FindHarfBuzz 走 pkg_check_modules
+# 首查)。让 pkg-config 一律"找不到" -> 所有 find_* 走 CMAKE_PREFIX_PATH 兜底,
+# 与本地 2.52.4 实际生效的发现路径一致。
+$env:PKG_CONFIG_PATH = "C:/vcpkg/installed/arm-uwp/lib/pkgconfig-none"
 $env:PATH = "C:\vcpkg\installed\x64-windows\tools\gperf;$env:PATH"
 
 Write-Host "==> configure GPU build (build-clang-gpu, $Config, JIT+TextureMapper+ANGLE)" -ForegroundColor Cyan
 & $cmake -S $WebKit -B $Build -G Ninja `
     "-DCMAKE_MAKE_PROGRAM=$ninja" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
-    "-DCMAKE_PREFIX_PATH=$IcuRoot;C:\vcpkg\installed\arm-uwp" `
+    "-DCMAKE_PREFIX_PATH=$(($IcuRoot -replace '\\','/'));C:/vcpkg/installed/arm-uwp" `
     "-DPKG_CONFIG_EXECUTABLE=$pkgconfig" `
     "-DPORT=WinUWP" `
     "-DCMAKE_BUILD_TYPE=$Config" `
     "-DENABLE_STATIC_JSC=ON" `
     "-DENABLE_C_LOOP=OFF" `
     "-DENABLE_JIT=ON" `
+        "-DAPOTHEOSIS_JIT=OFF" `
     "-DENABLE_DFG_JIT=OFF" `
     "-DENABLE_FTL_JIT=OFF" `
     "-DENABLE_SAMPLING_PROFILER=OFF" `

@@ -97,10 +97,15 @@ public:
     static Ref<PortSocketProvider> create() { return adoptRef(*new PortSocketProvider); }
 
 private:
-    RefPtr<ThreadableWebSocketChannel> createWebSocketChannel(Document& document, WebSocketChannelClient& client) final
+    RefPtr<ThreadableWebSocketChannel> createWebSocketChannel(Document& document, WebSocketChannelClient& client, IsInitiatedByDedicatedWorker) final
     {
         return WebCore::WebSocketChannel::create(document, client, *this);
     }
+
+#if USE(LIBRICE)
+    // Apotheosis: 基类该纯虚只在 USE(LIBRICE) 下存在,覆写须同守卫。
+    RefPtr<WebCore::RiceBackend> createRiceBackend(WebCore::RiceBackendClient&) final { return nullptr; }
+#endif
 
     // WebTransport 本轮不做(它需要 HTTP/3,curl 后端这里没开 QUIC)。明确拒绝,
     // 而不是返回一个永远不 settle 的 promise —— 后者会让页面挂着等。

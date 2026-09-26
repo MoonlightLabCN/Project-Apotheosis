@@ -7,8 +7,8 @@ WebKit tree used by Project Apotheosis, against the upstream tag.
 
 - Base: `webkitgtk-2.54.0`
 - Base commit: `cef114f523d3bd389936cbc7ec2b13e5436d63a0` (tag), `5220e80b97` (release commit)
-- Files changed: 155 under `Source/` (17 new files)
-- Diff: 13473 insertions and 104 deletions
+- Files changed: 167 under `Source/` (17 new files)
+- Diff: 13703 insertions and 108 deletions
 
 The patch contains the ARM32 Windows 10 Mobile / UWP adaptations used by the
 `gpu-path1` development line. It is intentionally a source diff rather than a

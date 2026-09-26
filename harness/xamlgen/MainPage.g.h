@@ -122,6 +122,11 @@ namespace Harness
         private: ::Windows::UI::Xaml::Controls::TextBox^ FindBox;
         private: ::Windows::UI::Xaml::Controls::Grid^ ContentArea;
         private: ::Windows::UI::Xaml::Controls::Image^ RenderImage;
+        private: ::Windows::UI::Xaml::Controls::Grid^ LinkMenu;
+        private: ::Windows::UI::Xaml::Controls::Border^ LinkMenuCard;
+        private: ::Windows::UI::Xaml::Controls::Button^ LinkMenuOpenBtn;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ LinkMenuOpenLabel;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ LinkMenuTarget;
     };
 }
 

@@ -47,7 +47,7 @@ void AXObjectCache::frameLoadingEventPlatformNotification(RenderView*, AXLoading
     // No accessibility client to notify.
 }
 
-void AXObjectCache::platformHandleFocusedUIElementChanged(Element*, Element*)
+void AXObjectCache::platformHandleFocusedUIElementChanged(AccessibilityObject*, AccessibilityObject*)
 {
     // No accessibility client to notify.
 }

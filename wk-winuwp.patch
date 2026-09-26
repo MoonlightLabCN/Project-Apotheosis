@@ -162,10 +162,27 @@ index 5726fd1968..9044961c69 100644
  
  void MacroAssembler::probe(Probe::Function function, void* arg)
 diff --git a/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h b/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
-index d764ed66a9..d28f807e07 100644
+index d764ed66a9..97651cefb9 100644
 --- a/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
 +++ b/Source/JavaScriptCore/assembler/MacroAssemblerARMv7.h
-@@ -4102,7 +4102,9 @@ public:
+@@ -3179,6 +3179,16 @@ public:
+         return branch64Impl(cond, leftHi, leftLo, rightHi, rightLo);
+     }
+ 
++#if defined(WK_WINUWP)
++    // Apotheosis: 2.54 的 AssemblyHelpers::emitAllocateJSBigInt64 模板体内调用单寄存器
++    // branchTest64(64 位平台形态);ARM32 无单寄存器 64 位,该模板在本 port 永不实例化,
++    // 但非依赖调用在解析期就要有可行重载 —— 以 32 位测试语义占位。
++    Jump branchTest64(ResultCondition cond, RegisterID reg)
++    {
++        return branchTest32(cond, reg);
++    }
++#endif
++
+     Jump branchTest64(ResultCondition cond, RegisterID regHi, RegisterID regLo)
+     {
+         if (cond == Signed || cond == PositiveOrZero) {
+@@ -4102,7 +4112,9 @@ public:
      template<PtrTag tag>
      static void revertJumpReplacementToBranchPtrWithPatch(CodeLocationLabel<tag> instructionStart, RegisterID rd, void* initialValue)
      {
@@ -176,6 +193,103 @@ index d764ed66a9..d28f807e07 100644
          ARMv7Assembler::revertJumpTo_movT3movtcmpT2(instructionStart.dataLocation(), rd, dataTempRegister, reinterpret_cast<uintptr_t>(initialValue));
  #else
          UNUSED_PARAM(rd);
+diff --git a/Source/JavaScriptCore/bytecode/CodeBlockInlines.h b/Source/JavaScriptCore/bytecode/CodeBlockInlines.h
+index d04dddf4b3..69526e2080 100644
+--- a/Source/JavaScriptCore/bytecode/CodeBlockInlines.h
++++ b/Source/JavaScriptCore/bytecode/CodeBlockInlines.h
+@@ -28,6 +28,11 @@
+ #include "BaselineJITCode.h"
+ #include "BytecodeStructs.h"
+ #include "CodeBlock.h"
++#if defined(WK_WINUWP)
++// Apotheosis: m_switchJumpTables[i] 的容器元素需要完整类型
++// (FixedVector/span 内部指钁算术);上游其它 TU 靠传递包含,显式包含。
++#include "JumpTable.h"
++#endif
+ #include "DFGJITCode.h"
+ #include "UnlinkedMetadataTableInlines.h"
+ 
+diff --git a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp
+index c6ad00c2f2..f4c1bb0fb4 100644
+--- a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp
++++ b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.cpp
+@@ -2042,14 +2042,28 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         auto isInt32 = jit.branch32(CCallHelpers::Equal, scratchGPR, CCallHelpers::TrustedImm32(IsArray | Int32Shape));
+         auto isContiguous = jit.branch32(CCallHelpers::Equal, scratchGPR, CCallHelpers::TrustedImm32(IsArray | ContiguousShape));
+         fallThrough.append(jit.branch32(CCallHelpers::NotEqual, scratchGPR, CCallHelpers::TrustedImm32(IsArray | DoubleShape)));
++        m_failAndIgnore.append(jit.branchIfNotInt32(valueRegs));
++
++#if USE(JSVALUE64)
+         jit.move(CCallHelpers::TrustedImm64(std::bit_cast<int64_t>(PNaN)), scratchGPR);
+         auto holeReady = jit.jump();
+         isInt32.link(&jit);
+         isContiguous.link(&jit);
+         jit.move(CCallHelpers::TrustedImm64(JSValue::encode(JSValue())), scratchGPR);
+         holeReady.link(&jit);
+-
+-        m_failAndIgnore.append(jit.branchIfNotInt32(valueRegs));
++#else
++        // Apotheosis: JSVALUE32_64 —— 洞值是 64 位双字,拆 tag/payload 两半准备：
++        // 高半进 scratchGPR,低半借 valueRegs.tagGPR()(branchIfNotInt32 已用它,
++        // 后续只读 payload)。高低半都用立即数,无单寄存器 64 位指令。
++        jit.move(CCallHelpers::TrustedImm32(static_cast<int32_t>(std::bit_cast<int64_t>(PNaN) >> 32)), scratchGPR);
++        jit.move(CCallHelpers::TrustedImm32(static_cast<int32_t>(std::bit_cast<int64_t>(PNaN))), valueRegs.tagGPR());
++        auto holeReady = jit.jump();
++        isInt32.link(&jit);
++        isContiguous.link(&jit);
++        jit.move(CCallHelpers::TrustedImm32(static_cast<int32_t>(std::bit_cast<int64_t>(JSValue::encode(JSValue())) >> 32)), scratchGPR);
++        jit.move(CCallHelpers::TrustedImm32(static_cast<int32_t>(std::bit_cast<int64_t>(JSValue::encode(JSValue())))), valueRegs.tagGPR());
++        holeReady.link(&jit);
++#endif
+ 
+         auto allocator = makeDefaultScratchAllocator(scratchGPR);
+         GPRReg scratch2GPR = allocator.allocateScratchGPR();
+@@ -2065,7 +2079,13 @@ void InlineCacheCompiler::generateWithGuard(unsigned index, AccessCase& accessCa
+         auto loopStart = jit.label();
+         auto loopDone = jit.branch32(CCallHelpers::BelowOrEqual, scratch3GPR, valueRegs.payloadGPR());
+         jit.sub32(CCallHelpers::TrustedImm32(1), scratch3GPR);
++#if USE(JSVALUE64)
+         jit.store64(scratchGPR, CCallHelpers::BaseIndex(scratch2GPR, scratch3GPR, CCallHelpers::TimesEight));
++#else
++        // Apotheosis: JSVALUE32_64 —— 双字写回: 低半(tag) 存 +0,高半(payload) 存 +4。
++        jit.store32(valueRegs.tagGPR(), CCallHelpers::BaseIndex(scratch2GPR, scratch3GPR, CCallHelpers::TimesEight, 0));
++        jit.store32(scratchGPR, CCallHelpers::BaseIndex(scratch2GPR, scratch3GPR, CCallHelpers::TimesEight, 4));
++#endif
+         jit.jump().linkTo(loopStart, &jit);
+         loopDone.link(&jit);
+ 
+diff --git a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
+index 41ac33486c..99e8c9e732 100644
+--- a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
++++ b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
+@@ -27,6 +27,11 @@
+ 
+ #if ENABLE(JIT)
+ 
++#if defined(WK_WINUWP)
++// Apotheosis: emitDataIC* 的签名用 CCallHelpers::Jump/JumpList(嵌套类型,需完整类型),
++// LLIntOffsetsExtractor 的 include 顺序下 jit/CCallHelpers.h 未展开 —— 显式拉进来。
++#include <JavaScriptCore/CCallHelpers.h>
++#endif
+ #include "AccessCase.h"
+ #include "InlineCacheHandler.h"
+ #include "JITStubRoutine.h"
+diff --git a/Source/JavaScriptCore/bytecode/PropertyInlineCache.h b/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
+index 14ec550594..e588c33113 100644
+--- a/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
++++ b/Source/JavaScriptCore/bytecode/PropertyInlineCache.h
+@@ -418,6 +418,11 @@ public:
+             return m_extraTagGPR;
+         }
+     }
++#if defined(WK_WINUWP)
++    // Apotheosis: 2.54 的 InlineCacheCompiler.cpp(JSVALUE32_64 分支)引用 propertyPayloadGPR(),
++    // 而上游头文件只提供 propertyGPR/propertyTagGPR —— 32 位路径年久失修的缺口。
++    GPRReg propertyPayloadGPR() const { return propertyGPR(); }
++#endif
+ #endif
+ 
+     CodeOrigin codeOrigin { };
 diff --git a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
 index c9e3589bac..561e9b7d26 100644
 --- a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
@@ -221,6 +335,22 @@ index b2d65a915f..7cc7177a4e 100644
              # Throw a compiler error everywhere else.
              $asm.putStr("#else")
              $asm.putStr("#error Missing globaladdr implementation")
+diff --git a/Source/JavaScriptCore/runtime/JSCJSValue.h b/Source/JavaScriptCore/runtime/JSCJSValue.h
+index a135398c5d..f77c6bbb4a 100644
+--- a/Source/JavaScriptCore/runtime/JSCJSValue.h
++++ b/Source/JavaScriptCore/runtime/JSCJSValue.h
+@@ -28,6 +28,11 @@
+ #include <atomic>
+ #include <cmath>
+ #include <wtf/Forward.h>
++#if defined(WK_WINUWP)
++// Apotheosis: updateEncodedJSValueConcurrent 用 WTF::storeStoreFence,LLIntOffsetsExtractor 的
++// include 顺序下 Atomics.h 尚未展开 —— 显式拉进来。
++#include <wtf/Atomics.h>
++#endif
+ #include <wtf/HashFunctions.h>
+ #include <wtf/HashTraits.h>
+ #include <wtf/MathExtras.h>
 diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
 index 2ac8b24f00..b8cebbb96a 100644
 --- a/Source/JavaScriptCore/runtime/MachineContext.h
@@ -4648,7 +4778,7 @@ index f4b97e5614..3a558a3767 100644
          syncedTime = true;
      }
 diff --git a/Source/WTF/wtf/FastMalloc.cpp b/Source/WTF/wtf/FastMalloc.cpp
-index 7dea132dd7..360cedabce 100644
+index 7dea132dd7..13059610ee 100644
 --- a/Source/WTF/wtf/FastMalloc.cpp
 +++ b/Source/WTF/wtf/FastMalloc.cpp
 @@ -136,6 +136,254 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
@@ -4906,6 +5036,12 @@ index 7dea132dd7..360cedabce 100644
  namespace WTF {
  
  #define TRACK_MALLOC_CALLSTACK 0
+@@ -756,3 +1004,5 @@ void* mallocArray(Kind kind, size_t numElements, size_t elementSize)
+ }
+ 
+ } // namespace Gigacage
++
++#endif // USE(SYSTEM_MALLOC)
 diff --git a/Source/WTF/wtf/FastMalloc.h b/Source/WTF/wtf/FastMalloc.h
 index 3b444e02ad..f0ab779097 100644
 --- a/Source/WTF/wtf/FastMalloc.h
@@ -4955,10 +5091,10 @@ index 921f27e850..266dca7682 100644
  #define SYSV_ABI __attribute__((sysv_abi))
  #else
 diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
-index 08d8ea5a09..24324c34f9 100644
+index 08d8ea5a09..220bb42f83 100644
 --- a/Source/WTF/wtf/PlatformEnable.h
 +++ b/Source/WTF/wtf/PlatformEnable.h
-@@ -726,6 +726,17 @@
+@@ -726,9 +726,21 @@
  #endif
  
  #if USE(JSVALUE32_64)
@@ -4976,12 +5112,16 @@ index 08d8ea5a09..24324c34f9 100644
  #undef ENABLE_JIT
  #define ENABLE_JIT 0
  #endif
++#endif
+ 
+ #if CPU(RISCV64)
+ #undef ENABLE_WEBASSEMBLY
 diff --git a/Source/WTF/wtf/PlatformWinUWP.cmake b/Source/WTF/wtf/PlatformWinUWP.cmake
 new file mode 100644
-index 0000000000..e0a31e9bce
+index 0000000000..8084b759e7
 --- /dev/null
 +++ b/Source/WTF/wtf/PlatformWinUWP.cmake
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,49 @@
 +# PlatformWinUWP.cmake  —  WinUWP port 的 WTF 平台源码
 +# 关键: App Container 无 HWND/消息窗口/桌面通知 API, 所以耦合这些的子系统
 +# (RunLoop/MainThread/MemoryPressure/MemoryFootprint)改用 WebKit 的 generic 实现
@@ -5013,6 +5153,8 @@ index 0000000000..e0a31e9bce
 +)
 +
 +list(APPEND WTF_PUBLIC_HEADERS
++    PlatformEnableWin.h
++
 +    text/win/WCharStringExtras.h
 +
 +    win/GDIObject.h
@@ -5347,6 +5489,39 @@ index 6f873d0771..834ba12f3c 100644
 +#endif
 +
  } // namespace WTF
+diff --git a/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp b/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp
+index 393310d007..353184542b 100644
+--- a/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp
++++ b/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp
+@@ -29,12 +29,28 @@
+ #include <wtf/MemoryFootprint.h>
+ #include <wtf/Platform.h>
+ 
++#if defined(WK_WINUWP)
++// Apotheosis: K32GetProcessMemoryInfo 的声明(链接走 kernel32,无需 psapi.lib)。
++#include <windows.h>
++#include <psapi.h>
++#endif
++
+ namespace WTF {
+ 
+ size_t memoryFootprint()
+ {
++#if defined(WK_WINUWP)
++    // Apotheosis: memoryStatus() 只有 Apple/Linux 实现。App Container 下
++    // K32GetProcessMemoryInfo 在 API 白名单(driver 的 crash 内存腿同款,见
++    // WebCoreDriver.cpp),WorkingSetSize 即进程足迹;失败回 0(调用方只用于统计)。
++    PROCESS_MEMORY_COUNTERS counters;
++    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
++        return 0;
++    return counters.WorkingSetSize;
++#else
+     auto memoryUse = memoryStatus();
+     return memoryUse.memoryFootprint;
++#endif
+ }
+ 
+ } // namespace WTF
 diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
 index 7ac74579c7..8f411c3d8c 100644
 --- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp
@@ -5522,7 +5697,7 @@ index 772aab73a6..903c1469c0 100644
  
  } // namespace WTF
 diff --git a/Source/WTF/wtf/win/MemoryPressureHandlerWin.cpp b/Source/WTF/wtf/win/MemoryPressureHandlerWin.cpp
-index 3e22c2c414..b3388a3d13 100644
+index 3e22c2c414..8e49f3f6d0 100644
 --- a/Source/WTF/wtf/win/MemoryPressureHandlerWin.cpp
 +++ b/Source/WTF/wtf/win/MemoryPressureHandlerWin.cpp
 @@ -26,7 +26,9 @@
@@ -5546,7 +5721,37 @@ index 3e22c2c414..b3388a3d13 100644
  }
  
  VOID CALLBACK lowMemoryNotificationCallback(PVOID context, BOOLEAN)
-@@ -74,6 +79,7 @@ void MemoryPressureHandler::windowsMeasurementTimerFired()
+@@ -47,15 +52,22 @@ VOID CALLBACK lowMemoryNotificationCallback(PVOID context, BOOLEAN)
+ 
+ void MemoryPressureHandler::beginWaitingForLowMemoryNotification()
+ {
++#if !defined(WK_WINUWP)
++    // Apotheosis: RegisterWaitForSingleObject 不在 App Container 分区;通知机制整体
++    // 不存在,内存压力改由 windowsMeasurementTimerFired 的轮询路径负责。
+     if (m_lowMemoryWaitHandle)
+         return;
+ 
+     if (!::RegisterWaitForSingleObject(&m_lowMemoryWaitHandle, m_lowMemoryHandle.get(), lowMemoryNotificationCallback, this, INFINITE, WT_EXECUTEONLYONCE))
+         m_lowMemoryWaitHandle = nullptr;
++#endif
+ }
+ 
+ void MemoryPressureHandler::windowsLowMemoryNotificationFired()
+ {
++#if !defined(WK_WINUWP)
++    // Apotheosis: QueryMemoryResourceNotification 同样不在 App Container 分区;本 port
++    // 没有系统内存通知,整条回调链是死代码,留空即可。
+     m_lowMemoryWaitHandle = nullptr;
+ 
+     if (!m_installed || !m_lowMemoryHandle)
+@@ -68,12 +80,14 @@ void MemoryPressureHandler::windowsLowMemoryNotificationFired()
+         releaseMemory(Critical::Yes);
+     }
+     beginWaitingForLowMemoryNotification();
++#endif
+ }
+ 
+ void MemoryPressureHandler::windowsMeasurementTimerFired()
  {
      setMemoryPressureStatus(SystemMemoryPressureStatus::Normal);
  
@@ -5554,7 +5759,7 @@ index 3e22c2c414..b3388a3d13 100644
      BOOL memoryLow;
  
      if (m_lowMemoryHandle && QueryMemoryResourceNotification(m_lowMemoryHandle.get(), &memoryLow) && memoryLow) {
-@@ -81,6 +87,7 @@ void MemoryPressureHandler::windowsMeasurementTimerFired()
+@@ -81,6 +95,7 @@ void MemoryPressureHandler::windowsMeasurementTimerFired()
          releaseMemory(Critical::Yes);
          return;
      }
@@ -5562,6 +5767,20 @@ index 3e22c2c414..b3388a3d13 100644
  
  #if CPU(X86)
      PROCESS_MEMORY_COUNTERS_EX counters;
+@@ -119,10 +134,13 @@ void MemoryPressureHandler::uninstall()
+         return;
+ 
+     m_windowsMeasurementTimer.stop();
++#if !defined(WK_WINUWP)
++    // Apotheosis: UnregisterWaitEx 不在 App Container 分区(等待句柄从未注册)。
+     if (m_lowMemoryWaitHandle) {
+         ::UnregisterWaitEx(m_lowMemoryWaitHandle, INVALID_HANDLE_VALUE);
+         m_lowMemoryWaitHandle = nullptr;
+     }
++#endif
+     m_installed = false;
+ }
+ 
 diff --git a/Source/WTF/wtf/win/OSAllocatorWin.cpp b/Source/WTF/wtf/win/OSAllocatorWin.cpp
 index f2d3df3a91..a687e9cd11 100644
 --- a/Source/WTF/wtf/win/OSAllocatorWin.cpp
@@ -5736,10 +5955,10 @@ index e02313f747..3ae51a9d03 100644
  }
 diff --git a/Source/WebCore/PlatformWinUWP.cmake b/Source/WebCore/PlatformWinUWP.cmake
 new file mode 100644
-index 0000000000..53b03f7e5c
+index 0000000000..b491c6fbd5
 --- /dev/null
 +++ b/Source/WebCore/PlatformWinUWP.cmake
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,536 @@
 +# ============================================================================
 +# PlatformWinUWP.cmake  —  WebCore platform glue for the WinUWP port
 +# (EdgeHTML Reborn — ARM32 Win10-Mobile App Container)
@@ -5892,10 +6111,17 @@ index 0000000000..53b03f7e5c
 +    # 专属件按需再加)。PlatformDisplay::sharedDisplay()→PlatformDisplayWin::create()→GLDisplay::create()。
 +    list(APPEND WebCore_SOURCES
 +        platform/graphics/PlatformDisplay.cpp
++
++        platform/graphics/angle/PlatformDisplayANGLE.cpp
++
 +        platform/graphics/egl/GLContext.cpp
 +        platform/graphics/egl/GLContextWrapper.cpp
 +        platform/graphics/egl/GLDisplay.cpp
 +        platform/graphics/win/PlatformDisplayWin.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/graphics/win/PlatformDisplayWin.h
 +    )
 +    # ★ 这版 ms-master ANGLE 的 gl2.h/eglext.h 把核心 GL / EGL-ext 函数原型放在 GL_GLEXT_PROTOTYPES /
 +    #   EGL_EGLEXT_PROTOTYPES 宏之下(与 GpuProbe 同坑;否则 glClear/glBindTexture/eglGetPlatformDisplayEXT 全
@@ -5904,6 +6130,9 @@ index 0000000000..53b03f7e5c
 +    #   污染整个 WebCore 目录、触发 654 个 TU 全量重编)。
 +    set(_APO_GPU_GL_SOURCES
 +        platform/graphics/PlatformDisplay.cpp
++
++        platform/graphics/angle/PlatformDisplayANGLE.cpp
++
 +        platform/graphics/egl/GLContext.cpp
 +        platform/graphics/egl/GLContextWrapper.cpp
 +        platform/graphics/egl/GLDisplay.cpp
@@ -5930,6 +6159,54 @@ index 0000000000..53b03f7e5c
 +    )
 +    set_source_files_properties(${_APO_GPU_GL_SOURCES} PROPERTIES COMPILE_DEFINITIONS
 +        "GL_GLEXT_PROTOTYPES=1;EGL_EGLEXT_PROTOTYPES=1;EGL_PLATFORM_ANGLE_DEBUG_LAYERS_ENABLED_ANGLE=0x3451")
++
++    # Apotheosis: 回补 ahorn42 版的 Cairo 绘制栈 + CoordinatedTileBuffer(重排时随 T_full 版
++    # cmake 丢失)TileGrid 的逐层光栅化走这套;CairoPaintingContext.cpp 无限定名包含
++    # "CoordinatedTileBuffer.h"，故把 coordinated 目录加进 include 路径。
++    list(APPEND WebCore_SOURCES
++        platform/graphics/cairo/CairoOperationRecorder.cpp
++        platform/graphics/cairo/CairoPaintingContext.cpp
++        platform/graphics/cairo/CairoPaintingEngine.cpp
++        platform/graphics/cairo/CairoPaintingEngineBasic.cpp
++        platform/graphics/cairo/CairoPaintingEngineThreaded.cpp
++
++        platform/graphics/texmap/coordinated/CoordinatedTileBuffer.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/graphics/cairo/CairoPaintingEngine.h
++    )
++
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${WEBCORE_DIR}/platform/graphics/texmap/coordinated"
++    )
++
++    # Apotheosis: TileGrid v2 (docs/TILEGRID-DESIGN.md). The model and the store
++    # core are WebCore-free C++17 and are also built on the PC by
++    # Project-Apotheosis/tests/tilegrid; TextureMapperTileGridStore.cpp is the
++    # WebCore adapter. WinUWP-only, and since package 5 the only tiled store this
++    # port has - every other port keeps upstream's TextureMapperTiledBackingStore,
++    # which is compiled here but referenced by nothing and dropped by the linker.
++    # (Re-applied during the 2.54 rebase: this block was lost when the two
++    # PlatformWinUWP.cmake drafts got merged.)
++    list(APPEND WebCore_SOURCES
++        platform/graphics/texmap/TextureMapperTileGridCore.cpp
++        platform/graphics/texmap/TextureMapperTileGridModel.cpp
++        platform/graphics/texmap/TextureMapperTileGridStore.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/graphics/texmap/TextureMapperTileGridCore.h
++        platform/graphics/texmap/TextureMapperTileGridModel.h
++        platform/graphics/texmap/TextureMapperTileGridStore.h
++    )
++
++    # Boost.SML, vendored as Source/ThirdParty/sml. Included only from
++    # TextureMapperTileGridMachines.h, i.e. from TextureMapperTileGridModel.cpp,
++    # so the template-heavy header cannot leak into the rest of the build.
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${THIRDPARTY_DIR}/sml"
++    )
 +endif ()
 +
 +# --- Graphics backend: Cairo (software image-surface) ---------------------
@@ -6036,13 +6313,13 @@ index 0000000000..53b03f7e5c
 +    platform/win/BString.cpp                # BSTR/OLE string (allowed)
 +    platform/win/BitmapInfo.cpp             # fills BITMAPINFO struct (no GDI
 +                                            # calls); used by Cairo image bridge
-+    # EXCLUDED(App Container: GetKeyState; 输入暂缓): platform/win/KeyEventWin.cpp            # virtual-key translation tables
++    platform/win/KeyEventWin.cpp            # Apotheosis: GetKeyState 已 WK_WINUWP 守卫;收回 —— 2.54 需 disambiguateKeyDownEvent/currentModifiers
 +    platform/win/LoggingWin.cpp             # debug logging
 +    platform/win/MIMETypeRegistryWin.cpp    # registry read (allowed)
 +    platform/win/SystemInfo.cpp             # OS version string (read-only)
 +    platform/win/UserAgentWin.cpp           # UA string from SystemInfo
 +    platform/win/WebCoreTextRenderer.cpp    # thin FontCascade draw helper
-+    # EXCLUDED(App Container: GetKeyState; 输入暂缓): platform/win/WindowsKeyNames.cpp        # key-name data tables
++    platform/win/WindowsKeyNames.cpp        # Apotheosis: GetKeyState 已 WK_WINUWP 守卫;收回
 +
 +    # --- STUB sources: build but need a non-desktop reimplementation ------
 +    # EXCLUDED(App Container: HWND/SetTimer -> generic RunLoop timer): platform/win/MainThreadSharedTimerWin.cpp   # STUB: creates a hidden
@@ -6219,6 +6496,46 @@ index 0000000000..53b03f7e5c
 +# DROPPED: PlatformWin.cmake L238-240 `if (USE_SKIA) ... SHARPYUV_LIBS` —
 +# Skia is OFF; never built under USE_CAIRO.
 \ No newline at end of file
+diff --git a/Source/WebCore/accessibility/AXObjectCache.h b/Source/WebCore/accessibility/AXObjectCache.h
+index c9905e7da7..c452069a70 100644
+--- a/Source/WebCore/accessibility/AXObjectCache.h
++++ b/Source/WebCore/accessibility/AXObjectCache.h
+@@ -119,7 +119,13 @@ struct AXTreeData {
+     {
+         for (const String& warning : warnings)
+             SAFE_FPRINTF(stderr, "WARNING: %s\n", warning.utf8());
++#if defined(WK_WINUWP)
++        // Apotheosis: getpid() 是 POSIX;用 WTF 自己的 getCurrentProcessID()(wtf/ProcessID.h,
++        // 随本头链已可见),不再依赖 <process.h> 的 _getpid。
++        SAFE_FPRINTF(stderr, "==AX Trees (PID %d)==\n%s\n%s\n", static_cast<int>(WTF::getCurrentProcessID()), liveTree.utf8(), isolatedTree.utf8());
++#else
+         SAFE_FPRINTF(stderr, "==AX Trees (PID %d)==\n%s\n%s\n", getpid(), liveTree.utf8(), isolatedTree.utf8());
++#endif
+     }
+ };
+ 
+diff --git a/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp b/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
+index 61c33bf761..df6e41c5b5 100644
+--- a/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
++++ b/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
+@@ -24,6 +24,11 @@
+  */
+ 
+ #include "config.h"
++
++#if ENABLE(VIDEO)
++// Apotheosis: ENABLE_VIDEO=OFF 时生成器把 JSHTMLMediaElement 绑定整体包在
++// ENABLE(VIDEO) 内(类不存在),而 Sources.txt 无条件收录本文件 —— 整文件跳过。
++
+ #include "JSHTMLMediaElement.h"
+ 
+ #include "TrackOpaqueRoot.h"
+@@ -40,3 +45,5 @@ void JSHTMLMediaElement::visitAdditionalChildrenInGCThread(Visitor& visitor)
+ DEFINE_VISIT_ADDITIONAL_CHILDREN_IN_GC_THREAD(JSHTMLMediaElement);
+ 
+ } // namespace WebCore
++
++#endif // ENABLE(VIDEO)
 diff --git a/Source/WebCore/bindings/js/ScriptController.cpp b/Source/WebCore/bindings/js/ScriptController.cpp
 index dbd5ad45f4..5eb87fe579 100644
 --- a/Source/WebCore/bindings/js/ScriptController.cpp
@@ -6963,28 +7280,20 @@ index 462f5c6dc8..77d8b0ec8c 100644
  endif ()
  
 diff --git a/Source/WebCore/platform/Timer.cpp b/Source/WebCore/platform/Timer.cpp
-index bd18b47595..805f15d7cc 100644
+index bd18b47595..1917e3cc73 100644
 --- a/Source/WebCore/platform/Timer.cpp
 +++ b/Source/WebCore/platform/Timer.cpp
-@@ -265,9 +265,18 @@ struct SameSizeAsTimer {
+@@ -265,6 +265,10 @@ struct SameSizeAsTimer {
  #if CPU(ADDRESS32)
      uint8_t bitfields;
  #endif
-+    void* pointer;
++#if defined(WK_WINUWP)
++    // Apotheosis: 2.54 的占位与真实 Timer 在 thumbv7/MSVC-ABI 上恰好同宽(assert 关时 48),
++    // 2.52 时代那个 +8 校准(winuwpSizePadding)反而超了 8 字节,不再需要。纯编译期尺寸哨兵。
++#endif
  #if ASSERT_ENABLED
      uint32_t threadID;
  #endif
-+#if defined(WK_WINUWP)
-+    // On thumbv7/MSVC-ABI the real WebCore::Timer is 8 bytes larger than this size-tripwire
-+    // placeholder models (sizeof(Timer)==56 vs 48 here), due to MSVC-ABI alignment/padding
-+    // differing from the Itanium model. Pad by one pointer-pair (8 bytes on ARM32) so the size
-+    // assertions below hold. Purely a compile-time size guard with no runtime semantics;
-+    // DeferrableOneShotTimer's assert follows since its placeholder derives from this struct.
-+    void* winuwpSizePadding[2];
-+#endif
- };
- 
- static_assert(sizeof(Timer) == sizeof(SameSizeAsTimer), "Timer should stay small");
 diff --git a/Source/WebCore/platform/graphics/BitmapImage.cpp b/Source/WebCore/platform/graphics/BitmapImage.cpp
 index 2f3e09ccb4..86e888abc8 100644
 --- a/Source/WebCore/platform/graphics/BitmapImage.cpp
@@ -7292,7 +7601,7 @@ index 158b26ae75..997d6fd270 100644
  
      bool setSize(const IntSize& size)
 diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
-index a000bb9b22..d7584c9478 100644
+index a000bb9b22..b3490b2252 100644
 --- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 +++ b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 @@ -31,9 +31,31 @@
@@ -7340,7 +7649,7 @@ index a000bb9b22..d7584c9478 100644
      m_workQueue = WorkQueue::create("org.webkit.ImageDecoder"_s, WorkQueue::QOS::Default);
  
      protect(m_workQueue)->dispatch([protectedThis = Ref { *this }, protectedWorkQueue = Ref { *m_workQueue }, protectedSource = m_source.get(), protectedDecoder = Ref { *decoder }, protectedRequestQueue = Ref { requestQueue() }] () mutable {
-@@ -115,16 +143,71 @@ void ImageFrameWorkQueue::start()
+@@ -115,16 +143,84 @@ void ImageFrameWorkQueue::start()
          // Ensure destruction happens on creation thread.
          callOnMainThread([protectedThis = WTF::move(protectedThis), protectedWorkQueue = WTF::move(protectedWorkQueue), protectedSource = WTF::move(protectedSource)] () mutable { });
      });
@@ -7360,13 +7669,17 @@ index a000bb9b22..d7584c9478 100644
 +    if (!m_workQueue)
 +        return;
 +
-+    RefPtr decoder = protectedSource()->decoder();
++    RefPtr decoder = m_source.get()->decoder();
 +    if (!decoder)
 +        return;
 +
 +    decodeQueue().append(request);
 +
-+    m_workQueue->dispatch([protectedThis = Ref { *this }, generation = m_generation, protectedSource = this->protectedSource(), protectedDecoder = decoder.releaseNonNull(), request] () mutable {
++    // Apotheosis: 捕获的 request 在 thumbv7/clang 闭包里按 const 处理,不能直接改写
++    // 它的 options; 改用本地副本 decodeRequest 承载更新后的解码结果信息。
++    Request decodeRequest = request;
++
++    m_workQueue->dispatch([protectedThis = Ref { *this }, generation = m_generation, protectedSource = m_source.get(), protectedDecoder = Ref { *decoder }, decodeRequest] () mutable {
 +        TraceScope tracingScope(AsyncImageDecodeStart, AsyncImageDecodeEnd);
 +
 +        auto minimumDecodingDuration = protectedThis->minimumDecodingDurationForTesting();
@@ -7375,8 +7688,15 @@ index a000bb9b22..d7584c9478 100644
 +        if (minimumDecodingDuration > 0_s)
 +            startingTime = MonotonicTime::now();
 +
-+        PlatformImagePtr platformImage = protectedDecoder->createFrameImageAtIndex(request.index, request.subsamplingLevel, request.options);
-+        RefPtr nativeImage = NativeImage::create(WTF::move(platformImage));
++        RefPtr<NativeImage> nativeImage;
++        DecodingDestination decodingDestination = decodeRequest.options.decodingDestination();
++
++        if (auto result = protectedDecoder->createNativeImageAtIndex(decodeRequest.index, decodeRequest.subsamplingLevel, decodeRequest.options)) {
++            nativeImage = WTF::move(std::get<Ref<NativeImage>>(*result));
++            decodingDestination = std::get<DecodingDestination>(*result);
++        }
++
++        decodeRequest.options = DecodingOptions(decodeRequest.options.decodingMode(), decodingDestination, decodeRequest.options.sizeForDrawing());
 +
 +        // Pretend as if decoding the frame took minimumDecodingDuration.
 +        if (minimumDecodingDuration > 0_s) {
@@ -7386,21 +7706,23 @@ index a000bb9b22..d7584c9478 100644
 +        }
 +
 +        // Even if we fail to decode the frame, it is important to sync the main thread with this result.
-+        callOnMainThread([protectedThis = WTF::move(protectedThis), generation, protectedSource = WTF::move(protectedSource), request, nativeImage = WTF::move(nativeImage)] () mutable {
-+            // Decoding may have been stopped - and started again - before the frame was decoded.
-+            if (!protectedThis->m_workQueue || generation != protectedThis->m_generation || protectedSource.ptr() != protectedThis->m_source.get()) {
-+                LOG(Images, "ImageFrameWorkQueue::%s - %p - url: %s. WorkQueue was recreated at index = %d.", __FUNCTION__, protectedThis.ptr(), protectedSource->sourceUTF8().data(), request.index);
++        callOnMainThread([protectedThis = WTF::move(protectedThis), generation, protectedSource = WTF::move(protectedSource), decodeRequest, nativeImage = WTF::move(nativeImage)] () mutable {
++            // Decoding may have been stopped - and started again - before the frame was
++            // decoded. WK_WINUWP: all sources share one WorkQueue, so queue identity cannot
++            // tell stale results apart; m_generation can (see the header's note).
++            if (!protectedThis->m_workQueue || generation != protectedThis->m_generation || protectedSource.ptr() != protectedThis->m_source.get().ptr()) {
++                LOG(Images, "ImageFrameWorkQueue::%s - %p - url: %s. WorkQueue was recreated at index = %d.", __FUNCTION__, protectedThis.ptr(), protectedSource->sourceUTF8().data(), decodeRequest.index);
 +                return;
 +            }
 +
 +            // The DecodeQueue may have been cleared before the frame was decoded.
-+            if (protectedThis->decodeQueue().isEmpty() || protectedThis->decodeQueue().first() != request) {
-+                LOG(Images, "ImageFrameWorkQueue::%s - %p - url: %s. DecodeQueue was cleared at index = %d.", __FUNCTION__, protectedThis.ptr(), protectedSource->sourceUTF8().data(), request.index);
++            if (protectedThis->decodeQueue().isEmpty() || !decodeRequest.isCompatibleWith(protectedThis->decodeQueue().first())) {
++                LOG(Images, "ImageFrameWorkQueue::%s - %p - url: %s. DecodeQueue was cleared at index = %d.", __FUNCTION__, protectedThis.ptr(), protectedSource->sourceUTF8().data(), decodeRequest.index);
 +                return;
 +            }
 +
 +            protectedThis->decodeQueue().removeFirst();
-+            protectedSource->imageFrameDecodeAtIndexHasFinished(request.index, request.subsamplingLevel, request.animatingState, request.options, WTF::move(nativeImage));
++            protectedSource->imageFrameDecodeAtIndexHasFinished(decodeRequest.index, decodeRequest.subsamplingLevel, decodeRequest.animatingState, decodeRequest.options, WTF::move(nativeImage));
 +        });
 +    });
 +#else
@@ -7412,7 +7734,7 @@ index a000bb9b22..d7584c9478 100644
  }
  
  void ImageFrameWorkQueue::stop()
-@@ -145,6 +228,12 @@ void ImageFrameWorkQueue::stop()
+@@ -145,6 +241,12 @@ void ImageFrameWorkQueue::stop()
  
      m_decodeQueue.clear();
      m_workQueue = nullptr;
@@ -8537,10 +8859,10 @@ index 063040a986..b90f318f32 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridCore.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridCore.cpp
 new file mode 100644
-index 0000000000..d95ede407c
+index 0000000000..8c5ca63278
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridCore.cpp
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,543 @@
 +/*
 + * Copyright (C) 2026 Andreas Horn. All rights reserved.
 + *
@@ -8575,6 +8897,13 @@ index 0000000000..d95ede407c
 +// handles. It decides nothing the model could decide; the review checklist of
 +// section 6 ("the store never decides anything the model could") is meant to be
 +// checkable by reading it.
++
++#if defined(BUILDING_WebCore)
++// Apotheosis: WebCorePrefix.h 把 new/delete 定义成毒丸宏(防漏 config.h);
++// 本文件为保持宿主测试可独编不带 config.h —— 在此局部解毒。
++#undef new
++#undef delete
++#endif
 +
 +#include "TextureMapperTileGridCore.h"
 +
@@ -9743,10 +10072,10 @@ index 0000000000..ff037c7402
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridModel.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridModel.cpp
 new file mode 100644
-index 0000000000..0d40eb7192
+index 0000000000..d18f920177
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridModel.cpp
-@@ -0,0 +1,1852 @@
+@@ -0,0 +1,1859 @@
 +/*
 + * Copyright (C) 2026 Andreas Horn. All rights reserved.
 + *
@@ -9777,6 +10106,13 @@ index 0000000000..0d40eb7192
 +// Apotheosis: implementation of the TileGrid v2 model. One function per rule
 +// of docs/TILEGRID-DESIGN.md section 2.4, named after it, so a reviewer can
 +// read the plan and the code side by side.
++
++#if defined(BUILDING_WebCore)
++// Apotheosis: WebCorePrefix.h 把 new/delete 定义成毒丸宏(防漏 config.h);
++// 本文件为保持宿主测试可独编不带 config.h —— 在此局部解毒。
++#undef new
++#undef delete
++#endif
 +
 +#include "TextureMapperTileGridModel.h"
 +
@@ -12080,10 +12416,10 @@ index 0000000000..2acd4930a3
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridStore.cpp b/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridStore.cpp
 new file mode 100644
-index 0000000000..8cf624aff4
+index 0000000000..2d1cd98722
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/texmap/TextureMapperTileGridStore.cpp
-@@ -0,0 +1,1525 @@
+@@ -0,0 +1,1532 @@
 +/*
 + * Copyright (C) 2026 Andreas Horn. All rights reserved.
 + *
@@ -12112,6 +12448,13 @@ index 0000000000..8cf624aff4
 + */
 +
 +// Apotheosis: implementation of the TileGrid v2 WebCore adapter. See the header.
++
++#if defined(BUILDING_WebCore)
++// Apotheosis: WebCorePrefix.h 把 new/delete 定义成毒丸宏(防漏 config.h);
++// 本文件为保持宿主测试可独编不带 config.h —— 在此局部解毒。
++#undef new
++#undef delete
++#endif
 +
 +#include "config.h"
 +#include "TextureMapperTileGridStore.h"
@@ -12142,7 +12485,7 @@ index 0000000000..8cf624aff4
 +
 +#if USE(CAIRO)
 +#include "CairoPaintingContext.h"
-+#include "CoordinatedTileBuffer.h"
++#include "coordinated/CoordinatedTileBuffer.h"   // Apotheosis: 2.54 把该头挪进 coordinated/ 子目录
 +#include "GraphicsContext.h"
 +#include <wtf/MonotonicTime.h>
 +#include <wtf/NumberOfCores.h>
@@ -15582,7 +15925,7 @@ index 3d8b2b6d4e..3615a3432c 100644
  };
  
 diff --git a/Source/WebCore/platform/win/WindowsKeyNames.cpp b/Source/WebCore/platform/win/WindowsKeyNames.cpp
-index 83d6ac3bfb..ab7912df7f 100644
+index 83d6ac3bfb..0beaeac20b 100644
 --- a/Source/WebCore/platform/win/WindowsKeyNames.cpp
 +++ b/Source/WebCore/platform/win/WindowsKeyNames.cpp
 @@ -245,6 +245,10 @@ WindowsKeyNames::WindowsKeyNames()
@@ -15604,7 +15947,34 @@ index 83d6ac3bfb..ab7912df7f 100644
      return modifiers;
  }
  
-@@ -533,6 +538,14 @@ String WindowsKeyNames::domCodeFromLParam(LPARAM lParam)
+@@ -307,7 +312,13 @@ bool WindowsKeyNames::shouldExposeLeftControlPlusRightAltAsAltGraph()
+     // m_hasAltGraph is true only for layouts that actually define AltGraph; on
+     // other layouts the right-Alt key behaves as a plain Alt and must not be
+     // folded into AltGraph.
++#if defined(WK_WINUWP)
++    // Apotheosis: GetKeyState 不在 App Container 分区 —— 无法探测按键状态,退化为 false
++    // (宿主随每个事件送修饰键状态,见输入桥接)。
++    return false;
++#else
+     return m_hasAltGraph && GetKeyState(VK_RMENU) < 0;
++#endif
+ }
+ 
+ bool WindowsKeyNames::shouldExposeAltGraphForKeyEvent(UINT message, WPARAM virtualKey, LPARAM)
+@@ -321,8 +332,12 @@ bool WindowsKeyNames::shouldExposeAltGraphForKeyEvent(UINT message, WPARAM virtu
+ 
+     // The remaining cases cover AltGr simulated purely via the Control+Alt
+     // combination, which both Blink and Gecko expose as AltGraph.
++#if !defined(WK_WINUWP)
++    // Apotheosis: GetKeyState 不在 App Container 分区 —— 跳过该早退,继续用
++    // 下方的字符证据判定。
+     if (GetKeyState(VK_CONTROL) >= 0 || GetKeyState(VK_MENU) >= 0)
+         return false;
++#endif
+ 
+     // 2. A character message delivered while Control and Alt are held is, by
+     //    definition, the product of the AltGr combination: a character was
+@@ -533,6 +548,14 @@ String WindowsKeyNames::domCodeFromLParam(LPARAM lParam)
  
  void WindowsKeyNames::updateLayout()
  {
@@ -15619,7 +15989,7 @@ index 83d6ac3bfb..ab7912df7f 100644
      HKL currentLayout = GetKeyboardLayout(0);
      if (currentLayout == m_keyboardLayout)
          return;
-@@ -583,6 +596,7 @@ void WindowsKeyNames::updateLayout()
+@@ -583,6 +606,7 @@ void WindowsKeyNames::updateLayout()
          }
      }
      SetKeyboardState(keyboardStateToRestore);
@@ -15805,6 +16175,22 @@ index 731c5ac2ce..5b4f48aa41 100644
  
  namespace WebCore {
  
+diff --git a/Source/WebCore/rendering/RenderText.cpp b/Source/WebCore/rendering/RenderText.cpp
+index 3995f104ee..f62a34dec1 100644
+--- a/Source/WebCore/rendering/RenderText.cpp
++++ b/Source/WebCore/rendering/RenderText.cpp
+@@ -108,6 +108,11 @@ struct SameSizeAsRenderText : public RenderObject {
+     std::optional<bool> hasPositionDependentContentWidth;
+     std::optional<bool> m_hasStrongDirectionalityContent;
+     uint32_t bitfields : 14;
++#if defined(WK_WINUWP)
++    // Apotheosis: thumbv7/MSVC-ABI 下真实 RenderText 比该占位宽 4 字节(80 vs 76),
++    // 与 Timer 那处同类 —— 纯编译期尺寸哨兵,补 4 字节让断言成立,无运行时语义。
++    uint32_t winuwpSizePadding { 0 };
++#endif
+ };
+ 
+ static_assert(sizeof(RenderText) == sizeof(SameSizeAsRenderText), "RenderText should stay small");
 diff --git a/Source/WebCore/testing/Internals.cpp b/Source/WebCore/testing/Internals.cpp
 index 104fa5b6db..a71ed78b56 100644
 --- a/Source/WebCore/testing/Internals.cpp
@@ -16114,12 +16500,96 @@ index 74cb2950dd..4a0efa9908 100644
  #include "WebSocketChannel.h"
  
  #include "SocketStreamHandle.h"
+diff --git a/Source/bmalloc/bmalloc/BPlatform.h b/Source/bmalloc/bmalloc/BPlatform.h
+index b561227848..82e61468f5 100644
+--- a/Source/bmalloc/bmalloc/BPlatform.h
++++ b/Source/bmalloc/bmalloc/BPlatform.h
+@@ -428,7 +428,7 @@
+ #if BUSE(LIBPAS) || BUSE(MIMALLOC)
+ #error "libpas, mimalloc, and system malloc are exclusive"
+ #endif
+-#if BOS(WINDOWS)
++#if BOS(WINDOWS) && !defined(WK_WINUWP)
+ #error "System malloc configuration is not supported in Windows since aligned memory cannot be freed via ::free. Use mimalloc instead"
+ #endif
+ #else
+diff --git a/Source/bmalloc/bmalloc/VMAllocate.h b/Source/bmalloc/bmalloc/VMAllocate.h
+index 036636ceec..b336fe924c 100644
+--- a/Source/bmalloc/bmalloc/VMAllocate.h
++++ b/Source/bmalloc/bmalloc/VMAllocate.h
+@@ -417,7 +417,9 @@ inline void vmZeroAndPurge(void* p, size_t vmSize, VMTag usage)
+         MEMORY_BASIC_INFORMATION memInfo;
+         VirtualQuery(currentPtr, &memInfo, sizeof(memInfo));
+         RELEASE_BASSERT(memInfo.RegionSize > 0);
+-        size_t chunkSize = std::min(memInfo.RegionSize, vmSize - totalSeen);
++        // Apotheosis: thumbv7 下 MEMORY_BASIC_INFORMATION::RegionSize 是 ULONG_PTR(= unsigned long),
++        // 与 size_t(= unsigned int)同宽不同类型,std::min 模板推导不过 -> 显式统一成 size_t。
++        size_t chunkSize = std::min(static_cast<size_t>(memInfo.RegionSize), vmSize - totalSeen);
+         BOOL freeResult = VirtualFree(currentPtr, chunkSize, MEM_DECOMMIT);
+         RELEASE_BASSERT(freeResult);
+         void* allocResult = VirtualAlloc(currentPtr, chunkSize, MEM_COMMIT, PAGE_READWRITE);
+diff --git a/Source/bmalloc/bmalloc/bmalloc.h b/Source/bmalloc/bmalloc/bmalloc.h
+index b125f5dbe4..632e0562d3 100644
+--- a/Source/bmalloc/bmalloc/bmalloc.h
++++ b/Source/bmalloc/bmalloc/bmalloc.h
+@@ -155,8 +155,15 @@ BINLINE void* tryMemalign(size_t alignment, size_t size, CompactAllocationMode m
+ #else
+     BUNUSED(mode);
+     BUNUSED(kind);
++#if defined(WK_WINUWP)
++    // Apotheosis: UCRT 没有 C11 的 aligned_alloc;参数序相反。本 port USE_SYSTEM_MALLOC,
++    // 真正随镜像出货的分配是 WTF FastMalloc.cpp 里 _aligned_malloc/_aligned_free 的配对
++    // 实现,驱动链接清单不含 bmalloc.lib,这里只为编译存在。
++    return _aligned_malloc(size, alignment);
++#else
+     return ::aligned_alloc(alignment, size);
+ #endif
++#endif
+ }
+ 
+ // Crashes on failure.
+@@ -176,7 +183,11 @@ BINLINE void* memalign(size_t alignment, size_t size, CompactAllocationMode mode
+ #else
+     BUNUSED(mode);
+     BUNUSED(kind);
++#if defined(WK_WINUWP)
++    void* memory = _aligned_malloc(size, alignment);   // Apotheosis: UCRT 无 aligned_alloc,参数序相反
++#else
+     void* memory = ::aligned_alloc(alignment, size);
++#endif
+     RELEASE_BASSERT(memory);
+     return memory;
+ #endif
+@@ -197,7 +208,11 @@ BINLINE void* tryZeroedMemalign(size_t alignment, size_t size, CompactAllocation
+ #else
+     BUNUSED(mode);
+     BUNUSED(kind);
++#if defined(WK_WINUWP)
++    void* memory = _aligned_malloc(size, alignment);   // Apotheosis: UCRT 无 aligned_alloc,参数序相反
++#else
+     void* memory = ::aligned_alloc(alignment, size);
++#endif
+     if (memory) [[likely]]
+         memset(memory, 0, size);
+     return memory;
+@@ -221,7 +236,11 @@ BINLINE void* zeroedMemalign(size_t alignment, size_t size, CompactAllocationMod
+ #else
+     BUNUSED(mode);
+     BUNUSED(kind);
++#if defined(WK_WINUWP)
++    void* memory = _aligned_malloc(size, alignment);   // Apotheosis: UCRT 无 aligned_alloc,参数序相反
++#else
+     void* memory = ::aligned_alloc(alignment, size);
++#endif
+     RELEASE_BASSERT(memory);
+     memset(memory, 0, size);
+     return memory;
 diff --git a/Source/cmake/OptionsWinUWP.cmake b/Source/cmake/OptionsWinUWP.cmake
 new file mode 100644
-index 0000000000..5a05d8da7d
+index 0000000000..711ce7b62b
 --- /dev/null
 +++ b/Source/cmake/OptionsWinUWP.cmake
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,264 @@
 +# ============================================================================
 +# OptionsWinUWP.cmake  —  WinUWP port (EdgeHTML Reborn)
 +# Phase 0: 只编 WTF + JavaScriptCore, CLoop 解释器, 无 JIT, 系统 malloc。
@@ -16307,7 +16777,15 @@ index 0000000000..5a05d8da7d
 +    SET_AND_EXPOSE_TO_BUILD(USE_HARFBUZZ       ON)
 +    SET_AND_EXPOSE_TO_BUILD(USE_SYSTEM_MALLOC  ON)
 +    SET_AND_EXPOSE_TO_BUILD(USE_THEME_ADWAITA  ON)
-+    if (APOTHEOSIS_GPU)
++    # Apotheosis (M4): opt-in baseline JIT. wtf/PlatformEnable.h forces ENABLE_JIT=0 on every
++# 32-bit target except ARMv7 Linux, so ENABLE_JIT=ON is inert by itself; with
++# WK_WINUWP_JIT the header keeps the cmake value. (Re-wired during the 2.54 rebase:
++# the gate lives in wtf/PlatformEnable.h and needs this define.)
++if (APOTHEOSIS_JIT)
++    add_definitions(-DWK_WINUWP_JIT=1)
++endif ()
++
++if (APOTHEOSIS_GPU)
 +        # GPU 路径1:TextureMapper 同步合成(GraphicsLayerTextureMapper,无需 Coordinated/Nicosia/WC)
 +        # + ANGLE。复用预编译 NuGet ANGLE.WindowsStore(arm32 UWP)做 IMPORTED target,不编 in-tree ANGLE。
 +        SET_AND_EXPOSE_TO_BUILD(USE_TEXTURE_MAPPER                ON)

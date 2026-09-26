@@ -13,7 +13,6 @@
 #include "PortUIBridge.h"
 
 #include <WebCore/ColorChooser.h>
-#include <WebCore/CookieConsentDecisionResult.h>
 #include <WebCore/DataListSuggestionPicker.h>
 #include <WebCore/DateTimeChooser.h>
 #include <WebCore/FileChooser.h>
@@ -103,10 +102,6 @@ void PortChromeClient::showShareSheet(ShareDataWithParsedURL&&, CompletionHandle
 {
 }
 
-void PortChromeClient::requestCookieConsent(CompletionHandler<void(CookieConsentDecisionResult)>&& completion)
-{
-    completion(CookieConsentDecisionResult::NotSupported);
-}
 
 RefPtr<Icon> PortChromeClient::createIconForFiles(const Vector<String>& /* filenames */)
 {

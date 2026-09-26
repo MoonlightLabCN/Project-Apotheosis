@@ -341,7 +341,11 @@ void LegacyWebSocketInspectorInstrumentation::didCreateWebSocket(Document*, WebS
 {
 }
 
-void LegacyWebSocketInspectorInstrumentation::willSendWebSocketHandshakeRequest(Document*, WebSocketChannelIdentifier, const ResourceRequest&)
+void LegacyWebSocketInspectorInstrumentation::willSendWebSocketHandshakeRequest(Document*, WebSocketChannelIdentifier, ResourceRequest&)
+{
+}
+
+void LegacyWebSocketInspectorInstrumentation::didSendWebSocketHandshakeRequest(Document*, WebSocketChannelIdentifier, const ResourceRequest&)
 {
 }
 

@@ -658,7 +658,6 @@ void MainPage::FlushCookiesForSuspend(Windows::ApplicationModel::SuspendingDefer
         // 0.2.0:localStorage 同理 —— StorageAreaImpl 攒批异步刷,不在这里主动落盘,
         // 挂起后被冻结/终止就会丢掉最后一批写入。
         try { WebCoreFlushStorage(); } catch (...) {}
-        deferral->Complete();
         // Apotheosis (M4): 同理落盘性能日志 —— 环形缓冲平时只在导航完成时写盘,挂起后进程可能被
         // 系统直接终止,未落盘的行就丢了。关闭时为 no-op。
         try { WebCorePerfFlush(); } catch (...) {}
