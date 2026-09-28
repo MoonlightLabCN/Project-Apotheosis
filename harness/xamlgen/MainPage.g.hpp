@@ -968,6 +968,25 @@ static ::Platform::String^ __MainPageXaml() {
             </Border>
         </Grid>
 
+        <!-- ===== window.prompt() 输入框(Apotheosis 2026-09-27)=====
+             MessageDialog 没有输入框,prompt 此前只能回空串。这里照 LinkMenu 的 overlay 模式自绘:
+             遮照 Tapped 取消(不传播到页面),卡片内 TextBox 收输入,确定/取消两个按钮各自回填
+             WebCoreCompletePrompt。引擎线程正 park 等答案,所以两个按钮都必须作答,没有
+             "弹出来没人管" 的状态(驱动侧另有 60s 超时兜底)。
+             事件属性都是 gen-xaml-codebehind.ps1 认识的类型,重跑生成器即可接线。 -->
+        <Grid x:Name="PromptBox" Grid.Row="0" Grid.RowSpan="2" Background="#99000000" Visibility="Collapsed" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+            <Border Width="300" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{StaticResource Surface}" BorderBrush="{StaticResource Sep}" BorderThickness="1" CornerRadius="12" IsHoldingEnabled="False" IsDoubleTapEnabled="False" x:Name="_ev28">
+                <StackPanel Margin="16">
+                    <TextBlock x:Name="PromptBoxMessage" Text="" Foreground="{StaticResource TxtHi}" FontSize="15" TextWrapping="Wrap" Margin="0,0,0,10" />
+                    <TextBox x:Name="PromptBoxInput" Text="" PlaceholderText="..." Background="{StaticResource Inset}" BorderBrush="{StaticResource Sep}" Foreground="{StaticResource TxtHi}" FontSize="15" Margin="0,0,0,12" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="PromptBoxOkBtn" Content="确定" Background="{StaticResource Accent}" BorderThickness="0" Foreground="{StaticResource PageBg}" Padding="16,6" Margin="0,0,8,0" IsHoldingEnabled="False" IsDoubleTapEnabled="False" />
+                        <Button x:Name="PromptBoxCancelBtn" Content="取消" Background="Transparent" BorderBrush="{StaticResource Sep}" BorderThickness="1" Foreground="{StaticResource TxtLo}" Padding="16,6" IsHoldingEnabled="False" IsDoubleTapEnabled="False" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
         <!-- ===== 首启 OOBE:欢迎 + 选语言(English / 中文)。仅全新安装(settings.ini 无 lang)弹出。 ===== -->
         <Grid x:Name="OobePanel" Grid.Row="0" Grid.RowSpan="2" Background="{StaticResource PageBg}" Visibility="Collapsed">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="36,0" MaxWidth="380">
@@ -978,12 +997,13 @@ static ::Platform::String^ __MainPageXaml() {
                 <TextBlock Text="EdgeHTML Reborn" Foreground="{StaticResource TxtHi}" FontSize="30" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,6,0,0" />
                 <TextBlock Text="Modern web, reborn on Windows Phone" Foreground="{StaticResource TxtLo}" FontSize="13" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Margin="0,10,0,0" />
                 <TextBlock Text="让被放弃的 Windows Phone 重新跑现代网页" Foreground="{StaticResource TxtLo}" FontSize="13" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Margin="0,2,0,0" />
-                <TextBlock Text="Choose your language · 选择语言" Foreground="{StaticResource TxtHi}" FontSize="16" HorizontalAlignment="Center" Margin="0,44,0,18" />
+                <TextBlock Text="Choose your language · 选择语言" Foreground="{StaticResource Txt)APO",
+        LR"APO(Hi}" FontSize="16" HorizontalAlignment="Center" Margin="0,44,0,18" />
                 <Border Background="{StaticResource Accent}" CornerRadius="4" Margin="0,0,0,12">
-                    <Button Tag="en" Background="Transparent" Foreground="#FF07110F" BorderThickness="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Padding="0,16" FontSize="18" Content="English" x:Name="_ev28" />
+                    <Button Tag="en" Background="Transparent" Foreground="#FF07110F" BorderThickness="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Padding="0,16" FontSize="18" Content="English" x:Name="_ev29" />
                 </Border>
                 <Border Background="{StaticResource Surface}" BorderBrush="{StaticResource Sep}" BorderThickness="1" CornerRadius="4">
-                    <Button Tag="zh" Background="Transparent" Foreground="{StaticResource TxtHi}" BorderThickness="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Padding="0,16" FontSize="18" Content="中文" x:Name="_ev29" />
+                    <Button Tag="zh" Background="Transparent" Foreground="{StaticResource TxtHi}" BorderThickness="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Padding="0,16" FontSize="18" Content="中文" x:Name="_ev30" />
                 </Border>
             </StackPanel>
         </Grid>
@@ -1072,26 +1092,32 @@ void MainPage::InitializeComponent() {
     LinkMenuOpenBtn = safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"LinkMenuOpenBtn"));
     LinkMenuOpenLabel = safe_cast<::Windows::UI::Xaml::Controls::TextBlock^>(__root->FindName(L"LinkMenuOpenLabel"));
     LinkMenuTarget = safe_cast<::Windows::UI::Xaml::Controls::TextBlock^>(__root->FindName(L"LinkMenuTarget"));
+    PromptBox = safe_cast<::Windows::UI::Xaml::Controls::Grid^>(__root->FindName(L"PromptBox"));
+    PromptBoxCard = safe_cast<::Windows::UI::Xaml::Controls::Border^>(__root->FindName(L"PromptBoxCard"));
+    PromptBoxMessage = safe_cast<::Windows::UI::Xaml::Controls::TextBlock^>(__root->FindName(L"PromptBoxMessage"));
+    PromptBoxInput = safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"PromptBoxInput"));
+    PromptBoxOkBtn = safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"PromptBoxOkBtn"));
+    PromptBoxCancelBtn = safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"PromptBoxCancelBtn"));
     // ---- 挂事件 ----
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationDelta += ref new ::Windows::UI::Xaml::Input::ManipulationDeltaEventHandler(this, &MainPage::OnImageManipDelta);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->Holding += ref new ::Windows::UI::Xaml::Input::HoldingEventHandler(this, &MainPage::OnPageHolding);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationCompleted += ref new ::Windows::UI::Xaml::Input::ManipulationCompletedEventHandler(this, &MainPage::OnImageManipCompleted);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnPageTapped);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationCompleted += ref new ::Windows::UI::Xaml::Input::ManipulationCompletedEventHandler(this, &MainPage::OnImageManipCompleted);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->Holding += ref new ::Windows::UI::Xaml::Input::HoldingEventHandler(this, &MainPage::OnPageHolding);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationDelta += ref new ::Windows::UI::Xaml::Input::ManipulationDeltaEventHandler(this, &MainPage::OnImageManipDelta);
     safe_cast<::Windows::UI::Xaml::FrameworkElement^>(__root->FindName(L"GpuPanel"))->Loaded += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnGpuPanelLoaded);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ImeBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnImeKeyDown);
     safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"ImeBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnImeTextChanged);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ImeBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnImeKeyDown);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev1"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnScrollUp);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev2"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnScrollDown);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"FindBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnFindKeyDown);
     safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"FindBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnFindChanged);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"FindBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnFindKeyDown);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"FindPrev"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnFindPrev);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"FindNext"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnFindNext);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"FindClose"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnFindClose);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"TabsBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnTabs);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnUrlKeyDown);
+    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"UrlBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnUrlChanged);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->LostFocus += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlLostFocus);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->GotFocus += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlGotFocus);
-    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"UrlBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnUrlChanged);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnUrlKeyDown);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"UrlActionBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlAction);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"UrlClearBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlClear);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"MenuBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnMenu);
@@ -1133,8 +1159,12 @@ void MainPage::InitializeComponent() {
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"LinkMenu"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnLinkMenuScrimTap);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"LinkMenuCard"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnLinkMenuCardTap);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"LinkMenuOpenBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnLinkMenuOpenNewTab);
-    safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev28"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnOobeLang);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"PromptBox"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnPromptBoxScrimTap);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"_ev28"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnPromptBoxCardTap);
+    safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"PromptBoxOkBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnPromptBoxOk);
+    safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"PromptBoxCancelBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnPromptBoxCancel);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev29"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnOobeLang);
+    safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev30"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnOobeLang);
 }
 
 void MainPage::Connect(int, ::Platform::Object^) { }

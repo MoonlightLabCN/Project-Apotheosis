@@ -1046,6 +1046,35 @@
             </Border>
         </Grid>
 
+        <!-- ===== window.prompt() 输入框(Apotheosis 2026-09-27)=====
+             MessageDialog 没有输入框,prompt 此前只能回空串。这里照 LinkMenu 的 overlay 模式自绘:
+             遮照 Tapped 取消(不传播到页面),卡片内 TextBox 收输入,确定/取消两个按钮各自回填
+             WebCoreCompletePrompt。引擎线程正 park 等答案,所以两个按钮都必须作答,没有
+             "弹出来没人管" 的状态(驱动侧另有 60s 超时兜底)。
+             事件属性都是 gen-xaml-codebehind.ps1 认识的类型,重跑生成器即可接线。 -->
+        <Grid x:Name="PromptBox" Grid.Row="0" Grid.RowSpan="2" Background="#99000000" Visibility="Collapsed"
+              Tapped="OnPromptBoxScrimTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+            <Border Width="300" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{StaticResource Surface}" BorderBrush="{StaticResource Sep}" BorderThickness="1" CornerRadius="12"
+                    Tapped="OnPromptBoxCardTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+                <StackPanel Margin="16">
+                    <TextBlock x:Name="PromptBoxMessage" Text="" Foreground="{StaticResource TxtHi}" FontSize="15"
+                               TextWrapping="Wrap" Margin="0,0,0,10"/>
+                    <TextBox x:Name="PromptBoxInput" Text="" PlaceholderText="..." Background="{StaticResource Inset}"
+                             BorderBrush="{StaticResource Sep}" Foreground="{StaticResource TxtHi}" FontSize="15"
+                             Margin="0,0,0,12"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="PromptBoxOkBtn" Content="确定" Click="OnPromptBoxOk"
+                                Background="{StaticResource Accent}" BorderThickness="0" Foreground="{StaticResource PageBg}"
+                                Padding="16,6" Margin="0,0,8,0" IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                        <Button x:Name="PromptBoxCancelBtn" Content="取消" Click="OnPromptBoxCancel"
+                                Background="Transparent" BorderBrush="{StaticResource Sep}" BorderThickness="1"
+                                Foreground="{StaticResource TxtLo}" Padding="16,6" IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
         <!-- ===== 首启 OOBE:欢迎 + 选语言(English / 中文)。仅全新安装(settings.ini 无 lang)弹出。 ===== -->
         <Grid x:Name="OobePanel" Grid.Row="0" Grid.RowSpan="2" Background="{StaticResource PageBg}" Visibility="Collapsed">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="36,0" MaxWidth="380">

@@ -229,6 +229,12 @@ namespace Harness {
         void ShowScriptAlert(const std::string& message);                          // window.alert()
         void ShowScriptConfirm(unsigned long long id, const std::string& message); // window.confirm()
         void ShowScriptPrompt(unsigned long long id, const std::string& message, const std::string& defaultValue); // window.prompt()
+        // prompt 自绘输入框(PromptBox overlay,XAML 新增)的三个事件 + 统一收口。
+        void OnPromptBoxScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnPromptBoxCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnPromptBoxOk(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnPromptBoxCancel(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void AnswerActivePrompt(const char* answerUtf8);
         void OpenUrlInNewTab(const std::string& url);                              // window.open() / target=_blank
         void OnNavDone(Platform::String^ finalTitle, bool ok, bool loadOk);
         void OnLoadWatchdog(Platform::Object^ sender, Platform::Object^ e);
@@ -547,6 +553,11 @@ namespace Harness {
         //   bounds how long the engine may keep the shell waiting for it. Both UI thread only.
         Windows::ApplicationModel::SuspendingDeferral^ m_suspendDeferral { nullptr };
         Windows::UI::Xaml::DispatcherTimer^ m_suspendTimer { nullptr };
+        // Apotheosis (2026-09-27): the prompt() dialog in flight. The engine thread is parked
+        // waiting for this id's answer (WebCoreCompletePrompt), so the overlay answers exactly
+        // once - AnswerActivePrompt is the only way both m_promptActive and the id clear.
+        bool m_promptActive { false };
+        unsigned long long m_promptRequestId { 0 };
         // Apotheosis (axis lock / rail scrolling): SCROLLING toggle, default ON. Pure harness-side
         // logic (see UpdateAxisLock/ApplyAxisLock) — no engine call, so it needs no ApplyXSetting
         // push, m_axisLockEnabled is read directly.

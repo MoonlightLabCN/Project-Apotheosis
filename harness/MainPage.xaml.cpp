@@ -6652,39 +6652,68 @@ void MainPage::ShowScriptPrompt(unsigned long long id, const std::string& messag
 {
     std::wstring text = Utf8ToWide(message);
     if (text.size() > 600) text = text.substr(0, 600) + L"…";
-    // MessageDialog 的 text 输入框在 UWP 上不可定制 placeholder,这里把默认值并进正文,
-    // 用户输入什么就是什么;取消回 null(引擎按取消处理)。
-    std::wstring body = text;
-    if (!defaultValue.empty()) {
-        std::wstring def = Utf8ToWide(defaultValue);
-        if (def.size() > 200) def = def.substr(0, 200) + L"…";
-        body += (g_lang == L"en") ? (L"\n(default: " + def + L")") : (L"\n(默认值: " + def + L")");
-    }
+    PromptBoxMessage->Text = ref new String(text.c_str());
+    std::wstring def = Utf8ToWide(defaultValue);
+    if (def.size() > 4000) def = def.substr(0, 4000);
+    PromptBoxInput->Text = ref new String(def.c_str());
+    PromptBoxOkBtn->Content = L8(L"确定", L"OK");
+    PromptBoxCancelBtn->Content = L8(L"取消", L"Cancel");
+    m_promptRequestId = id;
+    m_promptActive = true;
+    PromptBox->Visibility = Windows::UI::Xaml::Visibility::Visible;
+    try { PromptBoxInput->Focus(Windows::UI::Xaml::FocusState::Programmatic); } catch (...) {}
+}
+
+// 遮照:当 prompt 挂着时,点外面 = 取消(按惯例)。miei 起的事件不往页面传。
+void MainPage::OnPromptBoxScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e)
+{
+    if (!m_promptActive)
+        return;
+    AnswerActivePrompt(nullptr);
+    e->Handled = true;
+}
+
+// 卡片本体:吞掉 Tapped,别让输入框里的点击冒泡到遮照被当成取消。
+void MainPage::OnPromptBoxCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e)
+{
+    if (m_promptActive)
+        e->Handled = true;
+}
+
+void MainPage::OnPromptBoxOk(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e)
+{
+    if (!m_promptActive)
+        return;
+    std::string answer;
     try {
-        auto dlg = ref new Windows::UI::Popups::MessageDialog(ref new String(body.c_str()));
-        auto ok = ref new Windows::UI::Popups::UICommand(L8(L"确定", L"OK"));
-        auto cancel = ref new Windows::UI::Popups::UICommand(L8(L"取消", L"Cancel"));
-        dlg->Commands->Append(ok);
-        dlg->Commands->Append(cancel);
-        dlg->DefaultCommandIndex = 0;
-        dlg->CancelCommandIndex = 1;
-        auto idCopy = id;
-        concurrency::create_task(dlg->ShowAsync()).then(
-            [idCopy, ok](Windows::UI::Popups::IUICommand^ chosen) {
-                try {
-                    if (chosen != ok) {
-                        WebCoreCompletePrompt(idCopy, nullptr);
-                        return;
-                    }
-                    // MessageDialog 不回传输入文本(Commands 模式下没有 text 结果),
-                    // 取消路径之外统一按"用户输入为空串"回,站点拿得到一次真实的 prompt
-                    // 往返(此前恒 false)。完整输入框需要自绘 Popup,留作下一轮。
-                    WebCoreCompletePrompt(idCopy, "");
-                } catch (...) {}
-            });
-    } catch (...) {
-        try { WebCoreCompletePrompt(id, nullptr); } catch (...) {}
-    }
+        auto t = PromptBoxInput->Text;
+        if (t != nullptr && t->Length()) {
+            std::wstring w(t->Data(), t->Length());
+            answer = WideToUtf8(w);
+        }
+    } catch (...) {}
+    AnswerActivePrompt(answer.empty() ? nullptr : answer.c_str());
+}
+
+void MainPage::OnPromptBoxCancel(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e)
+{
+    if (!m_promptActive)
+        return;
+    AnswerActivePrompt(nullptr);
+}
+
+// 收一次 prompt:藏 overlay,把答案直接回填给 park 中的引擎(WebCoreCompletePrompt 只碰
+// 桥接的互斥量,不碰 Page,UI 线程调是安全的)。幂等——重复调用(比如答案后又来一次取消)
+// 第二次会发现 m_promptActive 已假,什么都不做。
+void MainPage::AnswerActivePrompt(const char* answerUtf8)
+{
+    if (!m_promptActive)
+        return;
+    m_promptActive = false;
+    PromptBox->Visibility = Windows::UI::Xaml::Visibility::Collapsed;
+    const unsigned long long id = m_promptRequestId;
+    m_promptRequestId = 0;
+    try { WebCoreCompletePrompt(id, answerUtf8); } catch (...) {}
 }
 
 // <input type=file>。

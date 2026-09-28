@@ -127,6 +127,13 @@ namespace Harness
         private: ::Windows::UI::Xaml::Controls::Button^ LinkMenuOpenBtn;
         private: ::Windows::UI::Xaml::Controls::TextBlock^ LinkMenuOpenLabel;
         private: ::Windows::UI::Xaml::Controls::TextBlock^ LinkMenuTarget;
+        // Apotheosis (2026-09-27): window.prompt() 自绘输入框(MessageDialog 无输入能力)。
+        private: ::Windows::UI::Xaml::Controls::Grid^ PromptBox;
+        private: ::Windows::UI::Xaml::Controls::Border^ PromptBoxCard;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ PromptBoxMessage;
+        private: ::Windows::UI::Xaml::Controls::TextBox^ PromptBoxInput;
+        private: ::Windows::UI::Xaml::Controls::Button^ PromptBoxOkBtn;
+        private: ::Windows::UI::Xaml::Controls::Button^ PromptBoxCancelBtn;
     };
 }
 
