@@ -210,7 +210,14 @@ void LoadingFrameLoaderClient::dispatchDidFailProvisionalLoad(const ResourceErro
     // isRetriableTransportError() in WebCoreDriver.cpp.
     {
         auto url = error.failingURL().string().utf8();
-        WebCorePortRecordMainLoadFailure(error.errorCode(), static_cast<int>(error.type()), url.data());
+        // Apotheosis (2026-09-27): only the MAIN frame's provisional failure may reach the
+        // driver's retry channel. createFrame() below hands every iframe one of these clients,
+        // so without the isMainFrame() gate an iframe/embed/third-party frame whose host is
+        // unreachable writes g_mainFailCode, and the driver's "retry the main resource once"
+        // judgment (WebCoreDriver.cpp: isRetriableTransportError) then restarts the whole page
+        // on the strength of a subresource - and logs the iframe's host as the navigation host.
+        if (m_frameLoader && m_frameLoader->frame().isMainFrame())
+            WebCorePortRecordMainLoadFailure(error.errorCode(), static_cast<int>(error.type()), url.data());
     }
     signalLoadComplete(true);
 }

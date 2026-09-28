@@ -78,7 +78,7 @@
     <Link>
       <!-- Phase 1b: 链接 build-clang-webcore 的 4 个引擎库 + 驱动/stub 库 + 全部软渲染依赖。
            顺序 WebCore->JSC->PAL->WTF(被依赖者在后);MS link.exe 多遍解析,顺序容错。 -->
-      <AdditionalDependencies>libEGL.lib;libGLESv2.lib;WebCoreDriver-gpu.lib;WebCore.lib;JavaScriptCore.lib;PAL.lib;WTF.lib;JavaScriptCore.lib;WTF.lib;libcurl.lib;libssl.lib;libcrypto.lib;cairo.lib;pixman-1.lib;freetype.lib;fontconfig.lib;libexpat.lib;harfbuzz.lib;jpeg.lib;libpng16.lib;libwebp.lib;libwebpdemux.lib;libsharpyuv.lib;libxml2.lib;sqlite3.lib;z.lib;bz2.lib;brotlidec.lib;brotlicommon.lib;icuuc.lib;icuin.lib;icudt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libEGL.lib;libGLESv2.lib;WebCoreDriver-gpu.lib;WebCore.lib;JavaScriptCore.lib;PAL.lib;WTF.lib;JavaScriptCore.lib;WTF.lib;libcurl.lib;libssl.lib;libcrypto.lib;cairo.lib;pixman-1.lib;freetype.lib;fontconfig.lib;libexpat.lib;harfbuzz.lib;jpeg.lib;libpng16.lib;libwebp.lib;libwebpdemux.lib;libsharpyuv.lib;libxml2.lib;sqlite3.lib;z.lib;bz2.lib;brotlidec.lib;brotlicommon.lib;icuuc.lib;icuin.lib;icudt.lib;wininet.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ApotheosisRoot)angle\arm;$(ApotheosisDriverDir);$(ApotheosisEngineBuildDir)\lib;$(ApotheosisVcpkgRoot)\installed\arm-uwp\lib;$(ApotheosisIcuRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- 与 lld-link 验证一致:/OPT:REF 死剥未引用代码,只保留渲染路径闭包(146 stub 覆盖之)。 -->
       <OptimizeReferences>true</OptimizeReferences>
@@ -180,8 +180,11 @@
     <!-- GPU 路径1:ANGLE(老 ms-master ANGLE.WindowsStore)ARM UWP 运行时,随 appx 打包。 -->
     <None Include="$(ApotheosisRoot)angle\arm\libEGL.dll"><DeploymentContent>true</DeploymentContent><Link>libEGL.dll</Link></None>
     <None Include="$(ApotheosisRoot)angle\arm\libGLESv2.dll"><DeploymentContent>true</DeploymentContent><Link>libGLESv2.dll</Link></None>
-    <!-- WebCore 驱动 DLL(port/*.cpp 编成的 clang-cl ARM32 引擎桥接层,含全部 C ABI 导出)。 -->
-    <None Include="$(ApotheosisDriverDir)\WebCoreDriver-gpu.dll"><DeploymentContent>true</DeploymentContent><Link>WebCoreDriver-gpu.dll</Link></None>
+    <!-- WebCore 驱动不随 appx 打包:port\link-driver-gpu.ps1 同时产出 .lib(静态归档)和 .dll,
+         harness 的 AdditionalDependencies 链的是 .lib —— C ABI 全部静态进 Harness.exe(appx 里
+         的 Harness.exe 导入表无 WebCoreDriver-gpu.dll,源码也无 LoadLibrary)。曾经这条 Deployment
+         Content 把 48 MB 的 .dll 原样打进包,每次部署白传 ~4.5 倍字节。detached GPU/JIT 验证若
+         需要 DLL 走 tools\Verify-GPU-Detached.ps1 的设备侧路径,与 appx 无关。 -->
     <!-- CA 根证书包(App Container 无系统证书库,curl 用 CURLOPT_CAINFO 指向它做 TLS 校验)。 -->
     <None Include="Assets\cacert.pem"><DeploymentContent>true</DeploymentContent><Link>cacert.pem</Link></None>
     <!-- Public Suffix List (port\fetch-publicsuffix.ps1, gitignored like the fonts): the engine

@@ -70,11 +70,16 @@ Vector<uint8_t> CryptoDigest::computeHash()
         case CryptoDigestHashFunction::SHA_512:            md = EVP_sha512(); break;
         }
     }
-    auto in = m_context ? m_context->data.span() : std::span<const uint8_t>();
     unsigned char hash[64]; // EVP_MAX_MD_SIZE
     unsigned int len = 0;
     Vector<uint8_t> result;
-    if (EVP_Digest(in.data(), in.size(), hash, &len, md, nullptr) == 1)
+    // Apotheosis (2026-09-27): a missing context is a FAILED digest, and must be
+    // reported as one (empty Vector, which upstream also returns for failure).
+    // EVP_Digest(nullptr, 0, ...) succeeds with the empty-input digest, so the
+    // previous null-context path handed callers a plausible "digest of nothing" -
+    // callers cannot tell "computed" from "creation failed" (SRI would fail-closed,
+    // but nothing above us can log or retry the real cause: the OOM in create()).
+    if (m_context && EVP_Digest(m_context->data.span().data(), m_context->data.span().size(), hash, &len, md, nullptr) == 1)
         result.append(std::span<const uint8_t>(hash, len));
     return result;
 }

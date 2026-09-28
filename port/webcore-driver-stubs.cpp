@@ -275,15 +275,27 @@ namespace WebCore {
 
 namespace {
 
+// Every block carries its base pointer, payload size, and the alignment it was
+// handed, so gigacageRealloc() can re-create the block with the SAME alignment
+// (see below) and so free() stays a single path for plain and aligned blocks.
 struct GigacageBlockHead {
     void* base;
     size_t size;
+    size_t alignment;
 };
+
+// The alignment floor for every allocation in this family. Two consumers assume
+// more than ARM32's 4-byte malloc guarantee: PreciseAllocation
+// (static_assert(halfAlignment == 8, "We assume that memory returned by malloc
+// has alignment >= 8")) and MarkedBlock (blockSize 16, PageBlock.h). Smallest
+// power of two that satisfies both, and the same alignment the FastMalloc family
+// on this port uses (kWinUWPFastMallocAlignment).
+constexpr size_t kGigacageMinAlignment = 16;
 
 void* gigacageAlloc(size_t alignment, size_t size)
 {
-    if (alignment < sizeof(void*))
-        alignment = sizeof(void*);
+    if (alignment < kGigacageMinAlignment)
+        alignment = kGigacageMinAlignment;
     size_t total = size + alignment + sizeof(GigacageBlockHead);
     void* base = std::malloc(total);
     if (!base)
@@ -293,6 +305,7 @@ void* gigacageAlloc(size_t alignment, size_t size)
     auto* head = reinterpret_cast<GigacageBlockHead*>(aligned) - 1;
     head->base = base;
     head->size = size;
+    head->alignment = alignment;
     return reinterpret_cast<void*>(aligned);
 }
 
@@ -304,9 +317,16 @@ GigacageBlockHead* gigacageHead(void* p)
 void* gigacageRealloc(void* p, size_t size)
 {
     if (!p)
-        return gigacageAlloc(sizeof(void*), size);
+        return gigacageAlloc(kGigacageMinAlignment, size);
     auto* head = gigacageHead(p);
-    void* fresh = gigacageAlloc(sizeof(void*), size);
+    // Re-create the block at the alignment it was originally allocated with.
+    // Allocating at sizeof(void*) instead silently downgraded every aligned
+    // block to 4-byte alignment on ARM32, and the sole live caller is
+    // JSC's Primitive Gigacage Auxiliary Space (Heap.cpp) through
+    // PreciseAllocation::tryReallocate, whose space+halfAlignment arithmetic
+    // assumes malloc-grade alignment. The new block is a different allocation,
+    // so its head is read before the old base is freed.
+    void* fresh = gigacageAlloc(head->alignment, size);
     if (!fresh)
         return nullptr;
     std::memcpy(fresh, p, head->size < size ? head->size : size);
@@ -375,51 +395,59 @@ bool WebResourceLoadScheduler::isHttpNavigationWithHTTPSOnlyError(const WebCore:
 
 // ============================================================================
 // Apotheosis (2.54 重排补齐):WTFCrashWithInfoImpl 的 7 个重载。
-// 背景:WTF.lib 里的定义与本库引用的修饰签名不一致(参数类型换代差),链接期对不上。
-// 这里按驱动所见的同一声明(Assertions.h)补定义 —— 走 WK_WINUWP 的
-// 崩溃上报钩子 + CRASH,保证 crash.txt 能写下断言位置。
+// 背景:WTF.lib 不定义这组 UCPURegister 签名的重载(WTF 侧那份带 int counter 的
+// 同形定义匹配不到任何声明,已删),驱动库引用的就是 Assertions.h:975-981 这组,
+// 所以实现落在这里。每个重载把 reason/misc 经导出的
+// WTFWinUWPReportCrashWithInfo() 交回 WTF 的崩溃钩子格式化后再走 CRASH(),
+// 保证 crash.txt 里除了断言位置还有 payload —— 以前参数是匿名的,载荷整个丢掉,
+// 这台设备上唯一的崩溃诊断出口只剩一行位置。
 // ============================================================================
-namespace {
 
-[[noreturn]] void wkCrashWithLocation(int line, const char* file, const char* function)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason)
 {
-    WTFWinUWPReportCrashLocation(line, file, function);
+    const uint64_t values[] = { reason };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 1, values);
     CRASH();
 }
 
-} // namespace
-
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason, UCPURegister misc1)
 {
-    wkCrashWithLocation(line, file, function);
+    const uint64_t values[] = { reason, misc1 };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 2, values);
+    CRASH();
 }
 
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason, UCPURegister misc1, UCPURegister misc2)
 {
-    wkCrashWithLocation(line, file, function);
+    const uint64_t values[] = { reason, misc1, misc2 };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 3, values);
+    CRASH();
 }
 
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason, UCPURegister misc1, UCPURegister misc2, UCPURegister misc3)
 {
-    wkCrashWithLocation(line, file, function);
+    const uint64_t values[] = { reason, misc1, misc2, misc3 };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 4, values);
+    CRASH();
 }
 
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason, UCPURegister misc1, UCPURegister misc2, UCPURegister misc3, UCPURegister misc4)
 {
-    wkCrashWithLocation(line, file, function);
+    const uint64_t values[] = { reason, misc1, misc2, misc3, misc4 };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 5, values);
+    CRASH();
 }
 
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason, UCPURegister misc1, UCPURegister misc2, UCPURegister misc3, UCPURegister misc4, UCPURegister misc5)
 {
-    wkCrashWithLocation(line, file, function);
+    const uint64_t values[] = { reason, misc1, misc2, misc3, misc4, misc5 };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 6, values);
+    CRASH();
 }
 
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
+void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister reason, UCPURegister misc1, UCPURegister misc2, UCPURegister misc3, UCPURegister misc4, UCPURegister misc5, UCPURegister misc6)
 {
-    wkCrashWithLocation(line, file, function);
-}
-
-void WTFCrashWithInfoImpl(int line, const char* file, const char* function, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister)
-{
-    wkCrashWithLocation(line, file, function);
+    const uint64_t values[] = { reason, misc1, misc2, misc3, misc4, misc5, misc6 };
+    WTFWinUWPReportCrashWithInfo(line, file, function, 0, 7, values);
+    CRASH();
 }

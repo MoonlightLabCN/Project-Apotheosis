@@ -172,9 +172,30 @@ Vector<unsigned, 8> labelStarts(const String& host)
     return starts;
 }
 
-// The public suffix of an already-lowercased host, per the publicsuffix.org
-// algorithm. Never empty: with no matching rule the implicit "*" rule makes the
-// last label the suffix.
+// Cookie-shaped input (leading dot) and DNS-shaped input (trailing root dot)
+// both have to reach the same answer, so normalize once here: strip leading
+// dots, strip trailing root dots, lowercase. libpsl does the same at both ends.
+String normalizeCookieHost(StringView domain)
+{
+    unsigned begin = 0;
+    while (begin < domain.length() && domain[begin] == '.')
+        ++begin;
+    unsigned end = domain.length();
+    while (end > begin && domain[end - 1] == '.')
+        --end;
+    return domain.substring(begin, end - begin).convertToASCIILowercase();
+}
+
+// The public suffix of an already-normalized host, per the publicsuffix.org
+// algorithm, WITHOUT the implicit "*" rule (libpsl PSL_TYPE_NO_STAR_RULE, the
+// flavor the upstream PublicSuffixStoreCurl.cpp this port forked from used):
+// when no rule matches - including every single-label host such as localhost
+// or an intranet name - there is no public suffix, so this returns the empty
+// string. (With the implicit "*" the answer would be the rightmost label,
+// which would make "localhost" a registry, and then
+// CookieJarDB::canAcceptCookie would refuse every cookie on single-label
+// hosts. tests/psl/psl-test.cpp asserts exactly this: isPublicSuffix
+// ("localhost") == false.)
 String publicSuffixOf(const String& host)
 {
     auto& data = publicSuffixData();
@@ -199,7 +220,7 @@ String publicSuffixOf(const String& host)
             return candidate;
     }
 
-    return host.substring(starts[labels - 1]);
+    return String();
 }
 
 // What the GTK port falls back to when the list does not know the host: assume
@@ -220,21 +241,19 @@ bool PublicSuffixStore::platformIsPublicSuffix(StringView domain) const
     if (domain.isEmpty() || !publicSuffixData().loaded)
         return false;
 
-    auto host = domain.convertToASCIILowercase();
+    auto host = normalizeCookieHost(domain);
+    if (host.isEmpty())
+        return false;
     return publicSuffixOf(host) == host;
 }
 
 String PublicSuffixStore::platformTopPrivatelyControlledDomain(StringView domain) const
 {
     // Called with cookie-shaped domains too, which may carry a leading dot.
-    unsigned position = 0;
-    while (position < domain.length() && domain[position] == '.')
-        ++position;
-    auto view = domain.substring(position);
-    if (view.isEmpty())
+    auto host = normalizeCookieHost(domain);
+    if (host.isEmpty())
         return String();
 
-    auto host = view.convertToASCIILowercase();
     if (!publicSuffixData().loaded)
         return lastTwoLabels(host);
 

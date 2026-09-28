@@ -206,12 +206,22 @@ static void SetupRuntimeEnv()
 // writer would wipe on the very next after-load line. So: truncate ONCE per process, append
 // afterwards. The file stays small - two harness lines plus one driver line per navigation -
 // and the device scripts that tail it keep working, now with history instead of one line.
+//
+// Apotheosis (2026-09-27): the "truncate once" flag decides app-vs-trunc, so the flag test and
+// the open must be one critical section, and the flag must be atomic. Two threads write here
+// (the engine thread's SetupRuntimeEnv writes "psl rules=..." while the UI thread is already
+// logging), so two concurrent first-writers both took the trunc branch and the later open wiped
+// the earlier line - stage.txt is the only timeline every device round is read through, and it
+// was losing its own startup lines. A function-local mutex makes the whole check-and-open
+// atomic across threads (the flag itself is then just a fast path; both are under the lock).
 static void WriteStage(const char* stage)
 {
     try {
+        static std::mutex s_stageWrite;
         static bool truncated = false;
         std::wstring d = LocalStateDir();
         if (d.empty()) return;
+        std::lock_guard<std::mutex> lock(s_stageWrite);
         auto mode = truncated ? std::ios::app : std::ios::trunc;
         truncated = true;
         std::ofstream f(WideToUtf8(d) + "\\stage.txt", std::ios::binary | mode);
@@ -627,6 +637,14 @@ void MainPage::DrainUIRequests(CoreDispatcher^ disp, Platform::Agile<MainPage^> 
 // Complete deferral——UWP 挂起到进程被冻结/可能被系统直接终止之间只给系统定的几秒钟,这是唯一
 // 有时间保证的落盘时机(Window::VisibilityChanged 触发的是不等结果的 fire-and-forget,曾实测
 // 切后台重开后 cookie 没保住,应是没跑完就被冻结)。
+//
+// Apotheosis (2026-09-27, honesty fix): the 2 s guard timer can only win while the UI thread
+// is still being pumped. Once PLM freezes the process the timer stops ticking with everything
+// else, so "whoever gets there first answers the shell" is true only up to the freeze. The
+// bounded-wait still holds for the case it was built for (engine busy with a slow job), but
+// the freeze window is answered by the RESUME path instead - see CompleteSuspendDeferral's
+// callers, which now include OnResuming, so an un-completed deferral is completed the moment
+// the shell comes back rather than being remembered as "the timer handled it".
 void MainPage::FlushCookiesForSuspend(Windows::ApplicationModel::SuspendingDeferral^ deferral)
 {
     // Apotheosis (review 2026-09-04 item 3): suspend is the last edge that can swallow a
@@ -671,8 +689,8 @@ void MainPage::FlushCookiesForSuspend(Windows::ApplicationModel::SuspendingDefer
 }
 
 // Apotheosis (review 2026-09-04 item 4): idempotent, UI thread only. Whoever gets here first -
-//   the engine flush's UI hop or the 2 s guard timer - answers the shell; the other one finds the
-//   deferral gone and does nothing.
+//   the engine flush's UI hop, the 2 s guard timer, or App::OnResuming for a deferral the freeze
+//   caught unanswered - answers the shell; the others find the deferral gone and do nothing.
 void MainPage::CompleteSuspendDeferral()
 {
     if (m_suspendTimer) { try { m_suspendTimer->Stop(); } catch (...) {} }
@@ -6439,7 +6457,13 @@ void MainPage::CheckForUpdate(bool manual)
                             });
                     } catch (...) {}
                 }));
-        } catch (...) {}
+        } catch (...) {
+            // Apotheosis (2026-09-27): RunAsync itself failed (window gone / dispatcher
+            // contended) - the continuation above is the only place m_updateChecking was
+            // ever cleared, so a throw here used to latch the flag true forever and every
+            // later check (button or the startup self-check) silently returned.
+            if (auto s = self.Get()) s->m_updateChecking = false;
+        }
     }).detach();
 }
 

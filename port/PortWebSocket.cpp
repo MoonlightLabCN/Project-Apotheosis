@@ -281,6 +281,14 @@ void PortWebSocketChannel::didOpen(CurlStreamID)
     m_handshake = makeUnique<WebSocketHandshake>(m_request.url(), m_protocol, m_request.httpUserAgent(),
         m_request.httpHeaderField(HTTPHeaderName::Origin), m_request.allowCookies(), false);
     m_handshake->reset();
+    // Apotheosis (2026-09-27): carry the request's own headers into the handshake - without
+    // this the Sec-Fetch-Dest/Mode/Site (Fetch-Metadata) headers that
+    // ThreadableWebSocketChannel::webSocketConnectRequest() put on m_request never reach the
+    // wire: clientHandshakeMessage() emits only its own fixed set plus whatever is registered
+    // here, and servers that gate the upgrade on fetch metadata answer 403 while lenient ones
+    // stay silent - the "some ws sites work, some don't" shape. Upstream
+    // NetworkProcess/curl/WebSocketTaskCurl.cpp:128 does exactly this.
+    m_handshake->setClientHandshakeRequestHeaders(m_request.httpHeaderFields());
     m_handshake->addExtensionProcessor(m_deflateFramer.createExtensionProcessor());
 
     // WebSocketHandshake::clientHandshakeMessage() cannot add the Cookie header itself, so

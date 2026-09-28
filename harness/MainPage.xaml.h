@@ -68,6 +68,11 @@ namespace Harness {
         // may fire on the engine thread or on a raster worker). Rate-limits and schedules one
         // composite; never touches the engine itself.
         void OnPresentWake();
+        // Apotheosis (review 2026-09-04 item 4): complete the suspend deferral, exactly once, on the
+        // UI thread. Called by the engine flush's UI hop, by the 2 s guard timer, and - since
+        // 2026-09-27, for a deferral the freeze caught unanswered - by App::OnResuming, whichever
+        // gets there first. Public so App can reach it.
+        void CompleteSuspendDeferral();
 
     private:
         // ---- 工具栏 ----
@@ -338,10 +343,6 @@ namespace Harness {
         // Apotheosis (review 2026-09-04 item 3): the ONE exit from a gesture - see the comment on the
         //   definition. Resets pinch, pan, nested-scroll and drag state together, whatever ended it.
         void EndGesture(GestureEnd reason);
-        // Apotheosis (review 2026-09-04 item 4): complete the suspend deferral, exactly once, on the
-        //   UI thread. Called by the engine flush's UI hop and by the 2 s guard timer, whichever
-        //   gets there first.
-        void CompleteSuspendDeferral();
         // Apotheosis (review 2026-09-03): status-bar / software-nav-bar insets from
         //   ApplicationView::VisibleBounds vs CoreWindow::Bounds → RootGrid bottom padding + top
         //   margin of the top-anchored chrome. UI thread only.

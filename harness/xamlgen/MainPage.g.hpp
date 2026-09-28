@@ -283,7 +283,7 @@ static ::Platform::String^ __MainPageXaml() {
                      ORIGINAL SOURCE of the tap owns it, so the child (RenderImage, hit-testable in
                      software mode) and the Border around it need the flag as much as the Grid does -
                      otherwise their recogniser swallows the second tap before it can bubble. -->
-                <Grid x:Name="ContentArea" Background="White" ManipulationMode="TranslateX,TranslateY,TranslateInertia,Scale" IsTapEnabled="True" IsDoubleTapEnabled="False" IsHoldingEnabled="True" Holding="OnPageHolding">
+                <Grid x:Name="ContentArea" Background="White" ManipulationMode="TranslateX,TranslateY,TranslateInertia,Scale" IsTapEnabled="True" IsDoubleTapEnabled="False" IsHoldingEnabled="True">
                     <!-- 固定 720x1080 的软件帧须随可用视口铺满；否则横屏时右侧会留下空白。 -->
                     <Image x:Name="RenderImage" Stretch="Fill" IsDoubleTapEnabled="False" />
                 </Grid>
@@ -306,9 +306,9 @@ static ::Platform::String^ __MainPageXaml() {
                  Transparent) so the strip stays OLED-friendly and the dots stay visible over any page
                  colour.
                  ★ Apotheosis (0.1.9.47): the strip is a pure OVERLAY. It always was in layout terms —
-                 a top-anchored sibling in this Grid cell costs the cell no )APO",
-        LR"APO(height — but
-                 ApplyViewInsets() used to hand its 5 DIP to the content as an extra top inset
+                 a top-anchored sibling in this Grid cell costs the cell no height — but
+          )APO",
+        LR"APO(       ApplyViewInsets() used to hand its 5 DIP to the content as an extra top inset
                  (ContentBorder's top margin and GpuPanel's translate), so the whole page slid down 5
                  DIP the moment a load started and back up when it ended, and on the software path
                  (start page, pre-GPU window) the margin change resized ContentArea and cost a
@@ -372,9 +372,9 @@ static ::Platform::String^ __MainPageXaml() {
                  behind the URL bar — see RevealTitleRow()/CollapseTitleRow() in MainPage.xaml.cpp.
                  TitleRowShift is the row's own TranslateTransform (Y: 0 = resting/visible, +Height =
                  fully tucked under the bottom chrome); the nav bar Grid (Grid.Row="1" below) is
-                 declared AFTER this content Grid as a RootGrid child, so it paints o)APO",
-        LR"APO(n top and covers
-                 the row the moment the slide carries it past the row/row boundary — no separate
+                 declared AFTER this content Grid as a RootGrid child, so it paints on top and covers
+      )APO",
+        LR"APO(           the row the moment the slide carries it past the row/row boundary — no separate
                  z-index needed, just this declaration order.
                  ★ Overlay and not a chrome row ON PURPOSE: a bottom chrome that shrinks would grow
                  the content row, and growing the content row RESIZES GpuPanel — ANGLE then rebuilds
@@ -447,8 +447,8 @@ static ::Platform::String^ __MainPageXaml() {
             <!-- 标签键:方框数字,点开标签切换器 -->
             <Button x:Name="TabsBtn" Grid.Column="0" Background="Transparent" BorderThickness="0" Width="44" Height="48" Padding="0" IsHoldingEnabled="False">
                 <Border BorderBrush="{StaticResource Accent}" Background="{StaticResource AccentDim}" BorderThickness="1.5" CornerRadius="7" Width="28" Height="28">
-      )APO",
-        LR"APO(              <TextBlock x:Name="TabCountText" Text="1" Foreground="{StaticResource Accent}" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock)APO",
+        LR"APO( x:Name="TabCountText" Text="1" Foreground="{StaticResource Accent}" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
             </Button>
 
@@ -511,8 +511,8 @@ static ::Platform::String^ __MainPageXaml() {
                          put the text past the boundary of the single grid cell UrlBox itself occupies.
                          Fix: give UrlBox Grid.ColumnSpan="2" so it also occupies the button's own
                          column (Button Background is Transparent and paints after UrlBox in z-order, so
-                         a scrolled-in tail of text is simply covere)APO",
-        LR"APO(d by the button's own 40x40 hit area,
+                         a scrolled-in tail of text is simply covered by the button's own 40)APO",
+        LR"APO(x40 hit area,
                          not visible on top of it or stealing its taps), and grow its own right Padding
                          to 27 DIP so the ContentElement boundary this buys back lands just before the
                          glyph instead of at the pill's own outer edge: 415.2 (measured pill edge) - 27 =
@@ -566,9 +566,9 @@ static ::Platform::String^ __MainPageXaml() {
                     <Button x:Name="UrlActionBtn" Grid.Column="2" Background="Transparent" BorderThickness="0" Width="40" Height="40" Padding="0" VerticalAlignment="Center" HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
                         <TextBlock x:Name="UrlActionGlyph" Text="↻" FontSize="17" TextLineBounds="Tight" Foreground="{StaticResource Accent}" Margin="12,-2,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Button>
-                    <!-- 编辑地址时占用同一格:白色清除键顶掉刷新/停止键(见 OnUrlGotFocus/OnUrlLos)APO",
-        LR"APO(tFocus),
-                         输入框因此拿到整条胶囊的宽度。IsTabStop=False → 点它不夺焦,软键盘不收。
+                    <!-- 编辑地址时占用同一格:白色清除键顶掉刷新/停止键(见 OnUrlGotFocus/OnUrlLostFocus),
+              )APO",
+        LR"APO(           输入框因此拿到整条胶囊的宽度。IsTabStop=False → 点它不夺焦,软键盘不收。
                          2026-09-04 review item 5: glyph in its own TextBlock (TextLineBounds="Tight"),
                          same technique as UrlActionGlyph above — plain Button.Content centred on the
                          ✕'s full font line box sat ~2px high.
@@ -634,8 +634,8 @@ static ::Platform::String^ __MainPageXaml() {
                                 </StackPanel>
                             </Button>
                             <Button Grid.Column="3" Tag="bookmark" Style="{StaticResource QuickBtn}" x:Name="_ev5">
-           )APO",
-        LR"APO(                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <St)APO",
+        LR"APO(ackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                     <TextBlock Text="" FontFamily="Segoe MDL2 Assets" FontSize="22" VerticalAlignment="Center" Foreground="{StaticResource Warm}" />
                                     <TextBlock x:Name="ActFavLabel" Text="收藏" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource TxtLo}" Margin="6,1,0,0" />
                                 </StackPanel>
@@ -710,8 +710,8 @@ static ::Platform::String^ __MainPageXaml() {
 
                         <Border Height="1" Background="{StaticResource Sep}" Margin="16,10,16,5" />
 
-                     )APO",
-        LR"APO(   <Button Tag="settings" Style="{StaticResource MenuRow}" x:Name="_ev16">
+                        <Button Tag="settings)APO",
+        LR"APO(" Style="{StaticResource MenuRow}" x:Name="_ev16">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="" FontFamily="Segoe MDL2 Assets" FontSize="17" Width="34" VerticalAlignment="Center" Foreground="{StaticResource TxtLo}" />
                                 <TextBlock Text="设置" VerticalAlignment="Center" />
@@ -801,8 +801,8 @@ static ::Platform::String^ __MainPageXaml() {
                         <ComboBoxItem Content="Qwant" />
                     </ComboBox>
 
-                    <TextBlock Text="主页(URL,留空用内置主页)" Foreground="{StaticResource Tx)APO",
-        LR"APO(tLo}" FontSize="13" Margin="0,18,0,4" />
+                    <TextBlock Text="主页(URL,留空用内置主页)" Foreground="{StaticResource TxtLo}" FontSize="13" Marg)APO",
+        LR"APO(in="0,18,0,4" />
                     <TextBox x:Name="SetHomeBox" HorizontalAlignment="Stretch" InputScope="Url" PlaceholderText="about:home" />
 
                     <ToggleSwitch x:Name="SetUaSwitch" Header="启动请求桌面版网站" Foreground="{StaticResource TxtHi}" Margin="0,18,0,0" />
@@ -865,8 +865,8 @@ static ::Platform::String^ __MainPageXaml() {
                     <Button Tag="clearhist" Style="{StaticResource SetRow}" Content="清除历史记录" Margin="0,0,0,6" x:Name="_ev20" />
                     <Button Tag="clearfav" Style="{StaticResource SetRow}" Content="清除全部收藏" Margin="0,0,0,6" x:Name="_ev21" />
                     <Button Tag="cleardl" Style="{StaticResource SetRow}" Content="清除下载记录" Margin="0,0,0,6" x:Name="_ev22" />
-                    <Button Tag="clearcookies" Style="{StaticResource SetRow}" Foreground="{StaticResource )APO",
-        LR"APO(Danger}" Content="清除 Cookie(退出全部登录)" x:Name="_ev23" />
+                    <Button Tag="clearcookies" Style="{StaticResource SetRow}" Foreground="{StaticResource Danger}" Content="清除 Coo)APO",
+        LR"APO(kie(退出全部登录)" x:Name="_ev23" />
 
                     <!-- 自动检查更新：唯一一条非用户发起的外部请求（api.github.com），默认关。 -->
                     <ToggleSwitch x:Name="SetUpdateSwitch" Header="自动检查更新" Foreground="{StaticResource TxtHi}" Margin="0,12,0,2" />
@@ -940,8 +940,8 @@ static ::Platform::String^ __MainPageXaml() {
              (Transparent is; a null Background is not) or a tap outside would fall through to the
              page and scroll it instead of dismissing.
              The card is Left/Top aligned and positioned by its Margin from code (ShowLinkMenu),
-             which is why it declares an explicit Width: the placement)APO",
-        LR"APO( math needs a width before
+             which is why it declares an explicit Width: the placement math needs a width befo)APO",
+        LR"APO(re
              the first arrange.
              IsHoldingEnabled/IsDoubleTapEnabled False throughout - a hold or a double tap on the
              menu itself is not a gesture, and the double-tap flag has the same "the recogniser
@@ -1073,24 +1073,25 @@ void MainPage::InitializeComponent() {
     LinkMenuOpenLabel = safe_cast<::Windows::UI::Xaml::Controls::TextBlock^>(__root->FindName(L"LinkMenuOpenLabel"));
     LinkMenuTarget = safe_cast<::Windows::UI::Xaml::Controls::TextBlock^>(__root->FindName(L"LinkMenuTarget"));
     // ---- 挂事件 ----
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnPageTapped);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationCompleted += ref new ::Windows::UI::Xaml::Input::ManipulationCompletedEventHandler(this, &MainPage::OnImageManipCompleted);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationDelta += ref new ::Windows::UI::Xaml::Input::ManipulationDeltaEventHandler(this, &MainPage::OnImageManipDelta);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->Holding += ref new ::Windows::UI::Xaml::Input::HoldingEventHandler(this, &MainPage::OnPageHolding);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->ManipulationCompleted += ref new ::Windows::UI::Xaml::Input::ManipulationCompletedEventHandler(this, &MainPage::OnImageManipCompleted);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ContentArea"))->Tapped += ref new ::Windows::UI::Xaml::Input::TappedEventHandler(this, &MainPage::OnPageTapped);
     safe_cast<::Windows::UI::Xaml::FrameworkElement^>(__root->FindName(L"GpuPanel"))->Loaded += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnGpuPanelLoaded);
-    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"ImeBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnImeTextChanged);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"ImeBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnImeKeyDown);
+    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"ImeBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnImeTextChanged);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev1"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnScrollUp);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"_ev2"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnScrollDown);
-    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"FindBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnFindChanged);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"FindBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnFindKeyDown);
+    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"FindBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnFindChanged);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"FindPrev"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnFindPrev);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"FindNext"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnFindNext);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"FindClose"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnFindClose);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"TabsBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnTabs);
-    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"UrlBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnUrlChanged);
-    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->GotFocus += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlGotFocus);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->KeyDown += ref new ::Windows::UI::Xaml::Input::KeyEventHandler(this, &MainPage::OnUrlKeyDown);
     safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->LostFocus += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlLostFocus);
+    safe_cast<::Windows::UI::Xaml::UIElement^>(__root->FindName(L"UrlBox"))->GotFocus += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlGotFocus);
+    safe_cast<::Windows::UI::Xaml::Controls::TextBox^>(__root->FindName(L"UrlBox"))->TextChanged += ref new ::Windows::UI::Xaml::Controls::TextChangedEventHandler(this, &MainPage::OnUrlChanged);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"UrlActionBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlAction);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"UrlClearBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnUrlClear);
     safe_cast<::Windows::UI::Xaml::Controls::Button^>(__root->FindName(L"MenuBtn"))->Click += ref new ::Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnMenu);

@@ -17,20 +17,39 @@
 using namespace WebCore;
 
 // ---- WebResourceLoadScheduler 错误工厂(全局命名空间类)----
-static ResourceError webKitStubError(const URL& url, ASCIILiteral desc)
+// Apotheosis (2026-09-27): every factory used to hand back the same
+// ResourceError(domain, 0, url, desc) - errorCode 0 and Type::General regardless
+// of what happened. Callers that branch on the code/type (FrameLoader's failure
+// classification, the driver's retry judgment, isCancellation(), the
+// https-only/https-upgrade recovery) all collapsed to "unknown error", so
+// blocked vs cancelled vs httpsOnly was indistinguishable in the logs AND in
+// behavior. Each factory now carries its own stable code and the closest
+// ResourceErrorBase::Type; the messages are unchanged.
+static constexpr int kStubErrCancelled              = 100;
+static constexpr int kStubErrBlocked                = 101;
+static constexpr int kStubErrBlockedByContentBlocker = 102;
+static constexpr int kStubErrCannotShowURL          = 103;
+static constexpr int kStubErrInterruptedForPolicy   = 104;
+static constexpr int kStubErrHTTPSUpgradeLoop       = 105;
+static constexpr int kStubErrHTTPSOnly              = 106;
+static constexpr int kStubErrCannotShowMIMEType     = 107;
+static constexpr int kStubErrFileDoesNotExist       = 108;
+static constexpr int kStubErrPluginWillHandleLoad   = 109;
+
+static ResourceError webKitStubError(const URL& url, ASCIILiteral desc, int code, ResourceError::Type type)
 {
-    return ResourceError("WebKitErrorDomain"_s, 0, url, desc);
+    return ResourceError("WebKitErrorDomain"_s, code, url, desc, type);
 }
-ResourceError WebResourceLoadScheduler::cancelledError(const ResourceRequest& r) const { return webKitStubError(r.url(), "cancelled"_s); }
-ResourceError WebResourceLoadScheduler::blockedError(const ResourceRequest& r) const { return webKitStubError(r.url(), "blocked"_s); }
-ResourceError WebResourceLoadScheduler::blockedByContentBlockerError(const ResourceRequest& r) const { return webKitStubError(r.url(), "blocked by content blocker"_s); }
-ResourceError WebResourceLoadScheduler::cannotShowURLError(const ResourceRequest& r) const { return webKitStubError(r.url(), "cannot show URL"_s); }
-ResourceError WebResourceLoadScheduler::interruptedForPolicyChangeError(const ResourceRequest& r) const { return webKitStubError(r.url(), "interrupted for policy change"_s); }
-ResourceError WebResourceLoadScheduler::httpsUpgradeRedirectLoopError(const ResourceRequest& r) const { return webKitStubError(r.url(), "https upgrade redirect loop"_s); }
-ResourceError WebResourceLoadScheduler::httpNavigationWithHTTPSOnlyError(const ResourceRequest& r) const { return webKitStubError(r.url(), "http navigation with https-only"_s); }
-ResourceError WebResourceLoadScheduler::cannotShowMIMETypeError(const ResourceResponse& r) const { return webKitStubError(r.url(), "cannot show MIME type"_s); }
-ResourceError WebResourceLoadScheduler::fileDoesNotExistError(const ResourceResponse& r) const { return webKitStubError(r.url(), "file does not exist"_s); }
-ResourceError WebResourceLoadScheduler::pluginWillHandleLoadError(const ResourceResponse& r) const { return webKitStubError(r.url(), "plugin will handle load"_s); }
+ResourceError WebResourceLoadScheduler::cancelledError(const ResourceRequest& r) const { return webKitStubError(r.url(), "cancelled"_s, kStubErrCancelled, ResourceError::Type::Cancellation); }
+ResourceError WebResourceLoadScheduler::blockedError(const ResourceRequest& r) const { return webKitStubError(r.url(), "blocked"_s, kStubErrBlocked, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::blockedByContentBlockerError(const ResourceRequest& r) const { return webKitStubError(r.url(), "blocked by content blocker"_s, kStubErrBlockedByContentBlocker, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::cannotShowURLError(const ResourceRequest& r) const { return webKitStubError(r.url(), "cannot show URL"_s, kStubErrCannotShowURL, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::interruptedForPolicyChangeError(const ResourceRequest& r) const { return webKitStubError(r.url(), "interrupted for policy change"_s, kStubErrInterruptedForPolicy, ResourceError::Type::Cancellation); }
+ResourceError WebResourceLoadScheduler::httpsUpgradeRedirectLoopError(const ResourceRequest& r) const { return webKitStubError(r.url(), "https upgrade redirect loop"_s, kStubErrHTTPSUpgradeLoop, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::httpNavigationWithHTTPSOnlyError(const ResourceRequest& r) const { return webKitStubError(r.url(), "http navigation with https-only"_s, kStubErrHTTPSOnly, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::cannotShowMIMETypeError(const ResourceResponse& r) const { return webKitStubError(r.url(), "cannot show MIME type"_s, kStubErrCannotShowMIMEType, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::fileDoesNotExistError(const ResourceResponse& r) const { return webKitStubError(r.url(), "file does not exist"_s, kStubErrFileDoesNotExist, ResourceError::Type::General); }
+ResourceError WebResourceLoadScheduler::pluginWillHandleLoadError(const ResourceResponse& r) const { return webKitStubError(r.url(), "plugin will handle load"_s, kStubErrPluginWillHandleLoad, ResourceError::Type::Cancellation); }
 
 namespace WebCore {
 

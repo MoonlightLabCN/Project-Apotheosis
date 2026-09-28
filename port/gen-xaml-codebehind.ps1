@@ -19,6 +19,7 @@ $nsX = 'http://schemas.microsoft.com/winfx/2006/xaml'
 $EVMAP = @{
   'Click'                 = @('::Windows::UI::Xaml::Controls::Button',       '::Windows::UI::Xaml::RoutedEventHandler')
   'Tapped'                = @('::Windows::UI::Xaml::UIElement',              '::Windows::UI::Xaml::Input::TappedEventHandler')
+  'Holding'               = @('::Windows::UI::Xaml::UIElement',              '::Windows::UI::Xaml::Input::HoldingEventHandler')
   'ManipulationDelta'     = @('::Windows::UI::Xaml::UIElement',              '::Windows::UI::Xaml::Input::ManipulationDeltaEventHandler')
   'ManipulationCompleted' = @('::Windows::UI::Xaml::UIElement',              '::Windows::UI::Xaml::Input::ManipulationCompletedEventHandler')
   'TextChanged'           = @('::Windows::UI::Xaml::Controls::TextBox',      '::Windows::UI::Xaml::Controls::TextChangedEventHandler')
@@ -131,6 +132,15 @@ if ($env:HC_MAXCHILD2) {
   }
 }
 $xamlStr = $rootGrid.OuterXml
+
+# 防回归:EVMAP 之外的事件属性(handler 一律 OnXxx 命名)剥不掉,会原样留在上面的 XAML 串里。
+# 运行期两种结果都不可接受:XamlReader::Load 抛(启动即崩),或静默忽略该属性(整条事件路由
+# 死掉,不报错 —— Holding="OnPageHolding" 曾经正是这么静默死掉的)。故在此直接失败,
+# 逼着先把事件补进 EVMAP 再生成。
+$leftover = [regex]::Matches($xamlStr, '(\w+)="On[A-Z]\w*"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+if ($leftover) {
+  throw ("XAML 里有生成器不认识的事件属性(剥不掉,XamlReader::Load 会抛或静默丢弃): {0}。请先把它们加进 EVMAP。" -f ($leftover -join ', '))
+}
 
 # 读 MainPage.g.h 的字段表: "private: TYPE^ NAME;"
 $fields = @()

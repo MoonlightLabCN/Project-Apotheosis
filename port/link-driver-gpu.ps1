@@ -27,6 +27,9 @@ $libs = @(
   'jpeg.lib','libpng16.lib','libwebp.lib','libwebpdemux.lib','libsharpyuv.lib'
   'libxml2.lib','sqlite3.lib','z.lib','bz2.lib','brotlidec.lib','brotlicommon.lib'
   'icuuc.lib','icuin.lib','icudt.lib','WindowsApp.lib'
+  # stubs-network.cpp 的 NetworkStateNotifier::updateStateWithoutNotifying 不再恒 true,
+  # 改用 InternetGetConnectedState 查真实在线态(wininet 在 App partition,清单已带 internetClient)。
+  'wininet.lib'
 )
 $log = "$P\link-driver-gpu.log"
 & $lld /DLL /MACHINE:ARM /OUT:"$P\WebCoreDriver-gpu.dll" `

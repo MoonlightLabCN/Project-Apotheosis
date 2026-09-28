@@ -68,6 +68,9 @@ App::App()
     UnhandledException += ref new UnhandledExceptionEventHandler(this, &App::OnUnhandledException);
     InitializeComponent();
     Suspending += ref new Windows::UI::Xaml::SuspendingEventHandler(this, &App::OnSuspending);
+    // Apotheosis (2026-09-27): the other half of a deferral that was never answered before
+    // the freeze - see OnResuming.
+    Resuming += ref new Windows::Foundation::EventHandler<Platform::Object^>(this, &App::OnResuming);
 }
 
 // Apotheosis: XAML swallows exceptions that escape a dispatched handler into this event
@@ -93,18 +96,52 @@ void App::OnUnhandledException(Platform::Object^, Windows::UI::Xaml::UnhandledEx
 // cookie JSON 落盘的真正触发点(见 App.xaml.h 注释)。拿 deferral,转给引擎线程串行写完再 Complete——
 // deferral 是 agile 对象,Complete() 不需要转回 UI 线程调。MainPage::FlushCookiesForSuspend 里实现
 // (WebEngine 队列是 MainPage.xaml.cpp 内部实现细节,没有跨 TU 头,故走页面方法转发)。
+//
+// Apotheosis (2026-09-27): the whole body is exception-guarded. Between GetDeferral() and
+// FlushCookiesForSuspend() (which stores the deferral and starts its 2 s watchdog) a
+// Platform::Exception - a XAML property write on a torn-down window, a failed ref new - would
+// skip every one of those steps, leaving the deferral never Completed. PLM then kills the
+// process with no dump, and App::UnhandledException cannot see a throw from OnSuspending
+// (only from dispatched handlers): exactly the "kill without a dump" shape this app spends
+// its diagnostics budget on. The catch page answer the shell immediately, which is safe: the
+// cookie flush is best-effort and the next launch reloads what the previous one managed to
+// write.
 void App::OnSuspending(Platform::Object^, Windows::ApplicationModel::SuspendingEventArgs^ e)
 {
-    auto deferral = e->SuspendingOperation->GetDeferral();
-    auto page = dynamic_cast<MainPage^>(Window::Current->Content);
-    if (!page) {
-        if (auto frame = dynamic_cast<Frame^>(Window::Current->Content))
-            page = dynamic_cast<MainPage^>(frame->Content);
+    Windows::ApplicationModel::SuspendingDeferral^ deferral = nullptr;
+    try {
+        deferral = e->SuspendingOperation->GetDeferral();
+        auto page = dynamic_cast<MainPage^>(Window::Current->Content);
+        if (!page) {
+            if (auto frame = dynamic_cast<Frame^>(Window::Current->Content))
+                page = dynamic_cast<MainPage^>(frame->Content);
+        }
+        if (page)
+            page->FlushCookiesForSuspend(deferral);
+        else
+            deferral->Complete();
+    } catch (...) {
+        // Best effort: if the throw happened before FlushCookiesForSuspend stored the deferral,
+        // nothing else will ever Complete it - answer the shell here. If it stored it, the page's
+        // watchdog owns it and this Complete() throws (already completed / mid-flight); that is
+        // exactly why the nested try is here.
+        if (deferral) {
+            try { deferral->Complete(); } catch (...) {}
+        }
     }
-    if (page)
-        page->FlushCookiesForSuspend(deferral);
-    else
-        deferral->Complete();
+}
+
+void App::OnResuming(Platform::Object^, Platform::Object^)
+{
+    try {
+        auto page = dynamic_cast<MainPage^>(Window::Current->Content);
+        if (!page) {
+            if (auto frame = dynamic_cast<Frame^>(Window::Current->Content))
+                page = dynamic_cast<MainPage^>(frame->Content);
+        }
+        if (page)
+            page->CompleteSuspendDeferral();
+    } catch (...) {}
 }
 
 void App::OnLaunched(LaunchActivatedEventArgs^ e)

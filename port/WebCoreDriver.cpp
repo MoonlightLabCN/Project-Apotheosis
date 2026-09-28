@@ -3064,8 +3064,16 @@ static int gpuPresent(WebCore::LocalFrameView& view, int w, int h, WebCore::Grap
         // driver goes quiet until something actually changes. Anything that closes a hole changes
         // the count, so a converging store is never cut short - the bound only ends a loop that is
         // not converging, and it is released again the moment the count moves.
+        //
+        // Apotheosis (2026-09-27): the guard above only bounds a STALLED count. A count that
+        // oscillates (3 -> 2 -> 3 ...) moves on every composite, so the run counter never reaches
+        // kTgMaxOwedComposites and the presents never stop - the exact busy loop the bound exists
+        // to end, just wearing a costume. Track the best (minimum) count seen in the current
+        // window as well: kTgMaxOwedComposites consecutive composites without a NEW minimum also
+        // ends the loop. A count that genuinely converges sets new minima until it reaches zero.
         static unsigned tgHolesPrevious = 0;
         static unsigned tgOwedRun = 0;
+        static unsigned tgHolesBest = 0;
         static bool tgLoopNoted = false;
         const unsigned kTgMaxOwedComposites = 8;
         if (holes != tgHolesPrevious) {
@@ -3076,23 +3084,32 @@ static int gpuPresent(WebCore::LocalFrameView& view, int w, int h, WebCore::Grap
         if (!holes) {
             tgOwedRun = 0;
             tgLoopNoted = false;
-        } else if (tgOwedRun < kTgMaxOwedComposites) {
-            ++tgOwedRun;
-            if (g_session && g_session->chrome) {
-                g_session->chrome->setNeedsPresent();
-                WebCorePort::presentRequested();
+            tgHolesBest = 0;
+        } else {
+            // First composite of the window, or a new minimum: keep the window alive.
+            if (tgHolesBest == 0 || holes < tgHolesBest) {
+                tgHolesBest = holes;
+                tgOwedRun = 0;
             }
-        } else if (!tgLoopNoted) {
-            // Grep for "tgloop": the hole count did not move for kTgMaxOwedComposites composites,
-            // so the extra present is not helping and is not asked for again until it does.
-            tgLoopNoted = true;
-            if (!g_stagePath.empty()) {
-                FILE* fp = nullptr;
-                if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
-                    const float ps = g_session && g_session->page ? g_session->page->pageScaleFactor() : -1.f;
-                    std::fprintf(fp, "tgloop holes=%u owed=%u ps=%.3f\n",
-                        holes, tgOwedRun, ps);
-                    std::fclose(fp);
+            if (tgOwedRun < kTgMaxOwedComposites) {
+                ++tgOwedRun;
+                if (g_session && g_session->chrome) {
+                    g_session->chrome->setNeedsPresent();
+                    WebCorePort::presentRequested();
+                }
+            } else if (!tgLoopNoted) {
+                // Grep for "tgloop": the hole count did not reach a new minimum for
+                // kTgMaxOwedComposites composites (stalled or oscillating), so the extra present is
+                // not helping and is not asked for again until it does.
+                tgLoopNoted = true;
+                if (!g_stagePath.empty()) {
+                    FILE* fp = nullptr;
+                    if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
+                        const float ps = g_session && g_session->page ? g_session->page->pageScaleFactor() : -1.f;
+                        std::fprintf(fp, "tgloop holes=%u owed=%u best=%u ps=%.3f\n",
+                            holes, tgOwedRun, tgHolesBest, ps);
+                        std::fclose(fp);
+                    }
                 }
             }
         }
@@ -5795,8 +5812,30 @@ int WebCoreDragAt(int phase, int x, int y, uint8_t* outRGBA)
         // release turns this mousedown into a pointermove (the chorded-button rules see the pointer
         // as already pressed), so the page would never see a press at all. Same guard, same reason,
         // as at the top of WebCoreClickAt.
-        if (lf->eventHandler().mousePressed())
+        if (lf->eventHandler().mousePressed()) {
             releaseDanglingPress(*lf, p, mods);
+            // Apotheosis (2026-09-27): that release dispatches a mouseup, which runs script and
+            // in the worst case navigates - everything below must ask the CURRENT document, not
+            // the one we just unwound. WebCoreClickAt/WebCoreLongPressAt re-fetch right here;
+            // without it the hover/press below land on a detached or replaced frame and
+            // `wants` decides the gesture's owner on a stale tree.
+            lf = g_session->page ? g_session->page->localMainFrame() : nullptr;
+            if (!lf) {
+                g_dragActive = false;
+                return kErrFrameGone;
+            }
+            g_session->mainFrame = lf;
+            view = lf->view();
+            if (!view) {
+                g_dragActive = false;
+                return kErrNoView;
+            }
+            doc = lf->document();
+            if (!doc) {
+                g_dragActive = false;
+                return kErrNoDocument;
+            }
+        }
         // Apotheosis (map site, 2026-09-04): ask the SAME question WebCoreWantsDragAt asked, on
         // the same point and the layout we just updated, BEFORE dispatching - the press itself can
         // run script that changes the tree. See the decision below.
@@ -7263,7 +7302,10 @@ int WebCoreResize(int w, int h, int* outSurfaceW, int* outSurfaceH, uint8_t* out
     if (!doc)
         return kErrNoDocument;
 
-    // Past the last exit: commit both sizes together.
+    // Past the last exit: commit both sizes together. Remember the previous pair so a paint
+    // failure can restore it (see the rollback below).
+    const int prevW = g_gpuW;
+    const int prevH = g_gpuH;
     g_gpuW = w;
     g_gpuH = h;
     g_session->mainFrame = lf;
@@ -7305,8 +7347,21 @@ int WebCoreResize(int w, int h, int* outSurfaceW, int* outSurfaceH, uint8_t* out
     // After the composite: the swap is what makes ANGLE pick up the panel's new size, so this is
     // the first moment the real surface can be read back.
     querySurfaceSize(outSurfaceW, outSurfaceH);
-    if (prc != kOK)
+    if (prc != kOK) {
+        // Apotheosis (2026-09-27): the header contract is all-or-nothing - "the GL viewport and
+        // the LocalFrameView are still the pair the previous call left". The commit above already
+        // happened, so put the previous pair back before reporting failure; otherwise the harness
+        // (which rolls its own kW/kH back and retries) and the engine disagree on the viewport,
+        // and the retry blits a frame of the wrong size into a buffer of the other.
+        g_gpuW = prevW;
+        g_gpuH = prevH;
+        g_session->w = prevW;
+        g_session->h = prevH;
+        view->resize(wkViewSizeFromEngine(prevW, prevH));
+        doc->updateLayoutIgnorePendingStylesheets();
+        g_gpuForceFullNext = true;
         return prc;
+    }
     writeDiag(*doc, *view, w, h, nonWhite);
     return kOK;
 }
