@@ -6,7 +6,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 **Project Apotheosis / EdgeHTML Reborn** —— 把现代 WebKit/WebCore（webkitgtk-2.52.4）移植到 **Windows 10 Mobile / Lumia 950（ARM32, UWP, App Container）**，让被微软放弃的 Windows Phone 跑真实现代网页，带 JIT 与 GPU 合成。它是"复活 Win10M 生态"大计划的浏览器引擎组件。
 
-真机（Lumia 950, Win10M 15254）已验证跑通：WTF+JSC CLoop → WebCore+Cairo 软渲染（Bing/GitHub/Apple 等真实站点）→ 真实事件交互 → JSC JIT → ANGLE(D3D11 FL9_3)+TextureMapper GPU 合成直呈现到 SwapChainPanel → 平滑滚动 + 捏合缩放。当前在演进 UI 向 Safari/Edge 形态。
+真机（Lumia 950, Win10M 15254）已验证跑通：WTF+JSC CLoop → WebCore+Cairo 软渲染（Bing/GitHub/Apple 等真实站点）→ 真实事件交互 → ANGLE(D3D11 FL9_3)+TextureMapper GPU 合成直呈现到 SwapChainPanel → 平滑滚动 + 捏合缩放。当前在演进 UI 向 Safari/Edge 形态。
+
+（2026-09-27 订正："JSC JIT 已验证"不实——三条历史线的 `JavaScriptCore.lib` 符号级验证 JIT 计数均为 0（`docs/JIT-254-PORTING.md`），真机验证过的是可执行内存原语（`harness/JitProbe.cpp` 的 W^X 场景 + `codeGeneration` capability），JIT 本体从未在出货构建里启用过。）
 
 ## 关键约束（先读，违反必踩坑）
 

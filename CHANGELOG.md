@@ -229,6 +229,15 @@ project's own version.
 - The host tests look for a WebKit checkout beside the repository instead of an
   absolute path, and say so when there is none.
 - `nghttp2.dll` and the bold font cuts are packaged with the application.
+  (2026-09-27 audit, corrected: the font cuts are conditional on files a fresh
+  clone does not have — copy them from `C:\Windows\Fonts` (segoeuib/arialbd/
+  timesbd/courbd.ttf) into `harness\Assets\fonts`, and fetch the Noto CJK /
+  symbols / emoji cuts with `port\fetch-fonts.ps1`; without either the package
+  builds but ships four regular Latin faces only (Chinese text → tofu, bold →
+  synthetic). `nghttp2.dll` is likewise conditional in `Harness.vcxproj` and
+  was NOT in the 0.2.0.0 package — the vcpkg arm-uwp curl was built without
+  HTTP/2, so `libcurl` negotiates HTTP/1.1 only. The claim above described the
+  intent, not the shipped bytes.)
 - `.gitattributes` keeps `wk-winuwp.patch` out of the CRLF conversion, so the
   file a checkout produces is byte-for-byte the one `git diff` wrote.
 - `wk-winuwp.patch` is regenerated from the whole patched tree, and

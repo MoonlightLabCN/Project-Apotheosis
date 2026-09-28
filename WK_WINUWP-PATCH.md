@@ -171,10 +171,11 @@ what this port needs:
   back to upstream plus ~40 lines of viewport-limited 1024-pixel tiling (pure
   upstream tiles a long page into a dozen 16 MB textures, which is an
   out-of-memory kill on a 32-bit address space).
-- `Source/ThirdParty/sml/` – Boost.SML 1.2.0, vendored verbatim with its Boost
-  Software License 1.0 and a README recording origin, version and the rule that
-  it may only be included from `TextureMapperTileGridMachines.h` and the two
-  `.cpp` files, so it never leaks into a WebCore header.
+- `Source/ThirdParty/sml/` – Boost.SML 1.2.0, vendored from upstream with its
+  Boost Software License 1.0 and a README recording origin, version, the local
+  additions (it is NOT byte-for-byte - covariant `try_get` overloads), and the
+  rule that it may only be included from `TextureMapperTileGridMachines.h` and
+  the two `.cpp` files, so it never leaks into a WebCore header.
 
 Every pass derives the desired tile set from (layer bounds, scale, visible rect,
 budget) and reconciles the grid to it; nothing survives by accident, there are no
