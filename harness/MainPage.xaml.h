@@ -68,6 +68,10 @@ namespace Harness {
         // may fire on the engine thread or on a raster worker). Rate-limits and schedules one
         // composite; never touches the engine itself.
         void OnPresentWake();
+        // Apotheosis (2026-09-27): the confirm()/prompt() wake. Same marshalling discipline as
+        // OnPresentWake (UIRequestWakeThunk posts the engine-thread callback here); takes the
+        // parked dialog's request with the UI-thread ABI variant and answers it on the spot.
+        void OnUIRequestWake();
         // Apotheosis (review 2026-09-04 item 4): complete the suspend deferral, exactly once, on the
         // UI thread. Called by the engine flush's UI hop, by the 2 s guard timer, and - since
         // 2026-09-27, for a deferral the freeze caught unanswered - by App::OnResuming, whichever
@@ -223,6 +227,8 @@ namespace Harness {
         void OnEngineUIRequest(int kind, unsigned long long id, const std::string& payload);
         void ShowFileChooser(unsigned long long id, const std::string& payload);   // <input type=file>
         void ShowScriptAlert(const std::string& message);                          // window.alert()
+        void ShowScriptConfirm(unsigned long long id, const std::string& message); // window.confirm()
+        void ShowScriptPrompt(unsigned long long id, const std::string& message, const std::string& defaultValue); // window.prompt()
         void OpenUrlInNewTab(const std::string& url);                              // window.open() / target=_blank
         void OnNavDone(Platform::String^ finalTitle, bool ok, bool loadOk);
         void OnLoadWatchdog(Platform::Object^ sender, Platform::Object^ e);

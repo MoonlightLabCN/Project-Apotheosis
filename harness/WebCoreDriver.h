@@ -469,17 +469,37 @@ unsigned WebCoreGetFrameHash();
 //   1 = 文件选择。payload = "<是否多选 0|1>\t<accept>\t<accept>...",accept 是页面原样写的
 //       MIME 或 ".扩展名"。shell **必须**最终用 WebCoreCompleteFileChooser(id,...) 回话。
 //   2 = alert。payload = 消息文本,不需要回话。
+//   3 = confirm。payload = 消息文本。**引擎线程正 park 着等** WebCoreCompleteConfirm(id, ok)
+//       ——shell 必须回(确定或取消);请求经 WebCoreSetUIRequestCallback 的唤醒在 UI 线程上用
+//       WebCoreTakeUIRequestUI 取。
+//   4 = prompt。payload = "<消息>\t<默认值>"。同样 park;用 WebCoreCompletePrompt(id, text)
+//       回答,text 传 nullptr = 取消。
 //   8 = 在新标签打开。payload = URL(window.open() / target=_blank)。不需要回话:
 //       标签模型归 shell 管。⚠ 新标签没有 opener(等价 rel="noopener"),原因见
 //       port/PortChromeClient.h ——本 port 是"一个热 Page + 快照"模型,给不出第二个
 //       同时在跑的 Page,也就给不出可用的 WindowProxy。
 int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
 
+// WebCoreTakeUIRequest 的 UI 线程版,confirm/prompt 唤醒路径专用(引擎已 park,跑不了自己的
+// drain)。同队列同 payload 约定;shell 取到什么就答什么。
+int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len);
+
 // 回复文件选择请求。pathsUtf8 里是 count 个连续的、各自以 NUL 结尾的 UTF-8 绝对路径;
 // count==0 表示用户取消。传过期的 id 也安全(已导航走/会话已销毁)——直接丢弃。
 // ⚠ 路径必须是引擎进程读得到的:UWP 下即 app 自己的目录,所以 shell 要先把选中的文件
 //   复制进 LocalState 再交给引擎。
 void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
+
+// 回答 confirm() 对话框。ok!=0=确定(脚本以 true 继续),0=取消。引擎 park 期间可从 UI 线程
+// 调;过期 id(对话框已超时)是 no-op。返回 1=答案被接收。
+int WebCoreCompleteConfirm(unsigned long long id, int ok);
+
+// 回答 prompt() 对话框。text==nullptr 表示取消;否则是用户输入的 UTF-8。同线程/过期规则。
+int WebCoreCompletePrompt(unsigned long long id, const char* text);
+
+// confirm/prompt 排队时引擎→壳的唤醒:引擎线程即将 park,没法再跑壳平时的 drain。回调在
+// **引擎线程**上调用——先 marshal 回 UI 线程再碰 XAML,然后调 WebCoreTakeUIRequestUI。
+void WebCoreSetUIRequestCallback(void (*callback)(void*), void* context);
 
 // ---- 页内查找 find-in-page ----
 // 标记并高亮全部匹配 + 选中第一个,滚动到它,重绘到 outBuf。matchCase!=0 区分大小写;wrap!=0 回绕。

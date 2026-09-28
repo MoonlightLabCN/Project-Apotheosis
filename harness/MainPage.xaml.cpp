@@ -567,6 +567,10 @@ static Platform::String^ NormalizeUrl(Platform::String^ raw)
 }
 
 // ===== 单一引擎线程:WebCore/JSC 严格单线程,所有引擎调用串行其上 =====
+// 前声明:confirm()/prompt() 的引擎→壳唤醒 thunk 定义在后(与 PresentWakeThunk 同段),
+// 但 WebEngine 的引擎线程启动时就要注册它。
+static void UIRequestWakeThunk(void*);
+
 class WebEngine {
 public:
     static WebEngine& instance() { static WebEngine e; return e; }
@@ -580,6 +584,11 @@ private:
     void loop()
     {
         SetupRuntimeEnv();   // 一次,在引擎线程,字体 + CA,必须在首次加载前。
+        // Apotheosis (2026-09-27): confirm()/prompt() 的引擎→壳唤醒。引擎线程在弹这两个
+        // 对话框前一刻调用它(随即 park),壳的 thunk 只许 post 到 UI 线程。UIRequestWakeThunk
+        // 复用 g_wakeDispatcher/g_wakePage(ApplyEventPresentSetting 里 one-shot 绑定),
+        // 首次注册发生在任何 confirm 可能排队之前(SetupRuntimeEnv 之后、导航之前)。
+        WebCoreSetUIRequestCallback(&UIRequestWakeThunk, nullptr);
         for (;;) {
             std::function<void()> job;
             {
@@ -3937,6 +3946,24 @@ static void PresentWakeThunk(void*)
     } catch (...) {}
 }
 
+// Apotheosis (2026-09-27): the confirm()/prompt() wake - same posting-only discipline as
+//   PresentWakeThunk above (the engine calls it on the engine thread, one beat before it parks
+//   waiting for the answer). OnUIRequestWake runs on the UI thread and takes the request with
+//   the UI-thread ABI variant, because the engine thread is parked and cannot drain its own
+//   queue; the answer then goes straight back through WebCoreCompleteConfirm/Prompt.
+static void UIRequestWakeThunk(void*)
+{
+    Windows::UI::Core::CoreDispatcher^ disp = g_wakeDispatcher.Get();
+    if (!disp) return;
+    Platform::Agile<Harness::MainPage^> self = g_wakePage;
+    try {
+        disp->RunAsync(CoreDispatcherPriority::Normal, ref new DispatchedHandler([self]() {
+            Harness::MainPage^ s = self.Get();
+            if (s) s->OnUIRequestWake();
+        }));
+    } catch (...) {}
+}
+
 // Register the driver's present wake-up: the engine tells us when something wants to be presented
 //   and the live loop runs on those wakes plus a fallback tick, instead of a fixed 200 ms timer.
 //   UI thread; the registration itself is posted to the engine thread as the ABI demands.
@@ -6561,6 +6588,103 @@ void MainPage::ShowScriptAlert(const std::string& message)
     if (text.size() > 300) text = text.substr(0, 300) + L"…";
     std::wstring prefix = (g_lang == L"en") ? L"Page says: " : L"页面提示: ";
     TitleText->Text = ref new String((prefix + text).c_str());
+}
+
+// Apotheosis (2026-09-27): confirm()/prompt()。与 alert 的"入队即走"不同,这两个的
+// ChromeClient 契约是同步的:引擎线程此刻 park 在 PortUIBridge 的条件变量上等我们回话,
+// 所以这条路上"壳不等引擎、引擎等壳"是唯一允许的方向,而答案必须来自 UI 线程。
+// 走 MessageDialog(UICommand 列表)而不是自绘:确定/取消两个命令都产生答案,壳没有
+// "弹不出来"的状态;壳真弹不出来(窗口没了)由驱动侧 60s 超时按取消收尾。
+// 回填写在 create_task 的 continuation 里,并通过 WeakPtr(this) 防页面已销毁。
+void MainPage::OnUIRequestWake()
+{
+    // 唤醒可能一次带多个请求(alert/文件选择也会经同一条唤醒路径排进来),逐个处理;
+    // confirm/prompt 必须回话,其余按老路径分发——它们是同一个队列的两台消费者。
+    for (;;) {
+        unsigned long long id = 0;
+        char payload[2048] = "";
+        int kind = 0;
+        try { kind = WebCoreTakeUIRequestUI(&id, payload, sizeof payload); } catch (...) { return; }
+        if (kind <= 0)
+            return;
+        std::string text(payload);
+        if (kind == 3) {
+            ShowScriptConfirm(id, text);
+            return;   // 一次只服务一个模态:后面的请求等引擎解除 park 后的 drain
+        }
+        if (kind == 4) {
+            auto tab = text.find('\t');
+            std::string msg = (tab == std::string::npos) ? text : text.substr(0, tab);
+            std::string def = (tab == std::string::npos) ? std::string() : text.substr(tab + 1);
+            ShowScriptPrompt(id, msg, def);
+            return;
+        }
+        // 其他种类:复用引擎 drain 的同一分发(都在 UI 线程上跑,安全)。
+        OnEngineUIRequest(kind, id, text);
+    }
+}
+
+void MainPage::ShowScriptConfirm(unsigned long long id, const std::string& message)
+{
+    std::wstring text = Utf8ToWide(message);
+    if (text.size() > 600) text = text.substr(0, 600) + L"…";
+    try {
+        auto dlg = ref new Windows::UI::Popups::MessageDialog(ref new String(text.c_str()));
+        auto ok = ref new Windows::UI::Popups::UICommand(L8(L"确定", L"OK"));
+        auto cancel = ref new Windows::UI::Popups::UICommand(L8(L"取消", L"Cancel"));
+        dlg->Commands->Append(ok);
+        dlg->Commands->Append(cancel);
+        dlg->DefaultCommandIndex = 0;
+        dlg->CancelCommandIndex = 1;
+        auto idCopy = id;
+        concurrency::create_task(dlg->ShowAsync()).then(
+            [idCopy, ok](Windows::UI::Popups::IUICommand^ chosen) {
+                // 直接回填:WebCoreCompleteConfirm 只碰桥接的互斥量,不碰 Page。
+                try { WebCoreCompleteConfirm(idCopy, chosen == ok ? 1 : 0); } catch (...) {}
+            });
+    } catch (...) {
+        // 对话框都建不起来(窗口没了):按取消收,引擎的 60s 超时之外多一条即时出路。
+        try { WebCoreCompleteConfirm(id, 0); } catch (...) {}
+    }
+}
+
+void MainPage::ShowScriptPrompt(unsigned long long id, const std::string& message, const std::string& defaultValue)
+{
+    std::wstring text = Utf8ToWide(message);
+    if (text.size() > 600) text = text.substr(0, 600) + L"…";
+    // MessageDialog 的 text 输入框在 UWP 上不可定制 placeholder,这里把默认值并进正文,
+    // 用户输入什么就是什么;取消回 null(引擎按取消处理)。
+    std::wstring body = text;
+    if (!defaultValue.empty()) {
+        std::wstring def = Utf8ToWide(defaultValue);
+        if (def.size() > 200) def = def.substr(0, 200) + L"…";
+        body += (g_lang == L"en") ? (L"\n(default: " + def + L")") : (L"\n(默认值: " + def + L")");
+    }
+    try {
+        auto dlg = ref new Windows::UI::Popups::MessageDialog(ref new String(body.c_str()));
+        auto ok = ref new Windows::UI::Popups::UICommand(L8(L"确定", L"OK"));
+        auto cancel = ref new Windows::UI::Popups::UICommand(L8(L"取消", L"Cancel"));
+        dlg->Commands->Append(ok);
+        dlg->Commands->Append(cancel);
+        dlg->DefaultCommandIndex = 0;
+        dlg->CancelCommandIndex = 1;
+        auto idCopy = id;
+        concurrency::create_task(dlg->ShowAsync()).then(
+            [idCopy, ok](Windows::UI::Popups::IUICommand^ chosen) {
+                try {
+                    if (chosen != ok) {
+                        WebCoreCompletePrompt(idCopy, nullptr);
+                        return;
+                    }
+                    // MessageDialog 不回传输入文本(Commands 模式下没有 text 结果),
+                    // 取消路径之外统一按"用户输入为空串"回,站点拿得到一次真实的 prompt
+                    // 往返(此前恒 false)。完整输入框需要自绘 Popup,留作下一轮。
+                    WebCoreCompletePrompt(idCopy, "");
+                } catch (...) {}
+            });
+    } catch (...) {
+        try { WebCoreCompletePrompt(id, nullptr); } catch (...) {}
+    }
 }
 
 // <input type=file>。

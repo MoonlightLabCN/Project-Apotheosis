@@ -150,13 +150,13 @@ public:
 
     // alert() 走异步 UI bridge(shell 弹提示,JS 不等)——见 .cpp 顶部说明。
     void runJavaScriptAlert(WebCore::LocalFrame&, const String&) final;
-    // ⚠ confirm()/prompt() 仍是"永远取消"。WebCore 这两个钩子按契约必须**同步返回**用户的答案,
-    //   而本 port 的引擎线程绝不能同步等 UI 线程。唯一正解是在引擎线程上跑嵌套 run loop 等 UI
-    //   回填(GTK/WPE port 的做法),那会让 WebCore 在任意 JS 调用点被重入(定时器、网络回调、
-    //   甚至新导航都可能在嵌套循环里跑起来),没有真机验证不敢上。0.1.9 明确标记为架构阻塞项,
-    //   不做一个"看起来实现了"的版本。
-    bool runJavaScriptConfirm(WebCore::LocalFrame&, const String&) final { return false; }
-    bool runJavaScriptPrompt(WebCore::LocalFrame&, const String&, const String&, String&) final { return false; }
+    // confirm()/prompt() 是真模态(Apotheosis 2026-09-27):两者按 ChromeClient 契约必须同步
+    // 返回用户答案,实现见 PortUIBridge.h 的 confirm/prompt 段——引擎线程 park 在条件变量上
+    // (不跑嵌套 run loop,所以 WebCore 不会在任意 JS 调用点被重入:对话框期间定时器/网络回调
+    // 全部排队),UI 线程通过 WebCoreCompleteConfirm/WebCoreCompletePrompt 回填;
+    // 壳不应答(suspend/窗口没了)由 60s 超时按 Cancel 收尾。
+    bool runJavaScriptConfirm(WebCore::LocalFrame&, const String&) final;
+    bool runJavaScriptPrompt(WebCore::LocalFrame&, const String&, const String&, String&) final;
 
     RefPtr<WebCore::PopupMenu> createPopupMenu(WebCore::PopupMenuClient&) const final;
     RefPtr<WebCore::SearchPopupMenu> createSearchPopupMenu(WebCore::PopupMenuClient&) const final;

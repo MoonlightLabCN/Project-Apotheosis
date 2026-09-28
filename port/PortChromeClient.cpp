@@ -76,10 +76,45 @@ void PortChromeClient::runOpenPanel(LocalFrame&, FileChooser& chooser)
 // making it truly modal needs a nested run loop on the engine thread, and shipping
 // that untested on device is a worse trade than an alert that does not pause JS.
 // See the 0.1.9 report ("JS dialogs") for the design that would make it modal.
+//
+// Apotheosis (2026-09-27): confirm()/prompt() DID get that treatment - but without
+// the nested run loop. They park the engine thread on a condition variable while
+// the shell answers on the UI thread (PortUIBridge.h), so nothing runs on the
+// engine underneath the dialog and the re-entrancy risk the alert comment cites
+// does not exist. alert() stays non-modal: pausing JS for a notification the user
+// did not ask for is the rarer, less useful direction.
 void PortChromeClient::runJavaScriptAlert(LocalFrame&, const String& message)
 {
     auto utf8 = message.utf8();
     WebCorePort::enqueueAlert(utf8.data() ? std::string(utf8.data(), utf8.length()) : std::string());
+}
+
+// window.confirm(). Parks the engine thread until the shell answers (OK -> true,
+// Cancel/timeout -> false). The 60 s timeout means a shell that never shows the
+// dialog - suspend, torn-down window - cannot take the page (and every later
+// navigation) down with it; the site sees a Cancel, which is what a walked-away
+// user produces anyway.
+bool PortChromeClient::runJavaScriptConfirm(LocalFrame&, const String& message)
+{
+    auto utf8 = message.utf8();
+    return WebCorePort::enqueueConfirm(utf8.data() ? std::string(utf8.data(), utf8.length()) : std::string()) != 0;
+}
+
+// window.prompt(). Same dialog round trip; returns false (and leaves result
+// untouched) when the user cancels or the timeout fires.
+bool PortChromeClient::runJavaScriptPrompt(LocalFrame&, const String& message, const String& defaultValue, String& result)
+{
+    auto messageUtf8 = message.utf8();
+    auto defaultUtf8 = defaultValue.utf8();
+    std::string answer;
+    const int rc = WebCorePort::enqueuePrompt(
+        messageUtf8.data() ? std::string(messageUtf8.data(), messageUtf8.length()) : std::string(),
+        defaultUtf8.data() ? std::string(defaultUtf8.data(), defaultUtf8.length()) : std::string(),
+        answer);
+    if (rc == 0)
+        return false;
+    result = String::fromUTF8(answer.c_str());
+    return true;
 }
 
 // window.open()。设计与限制见 PortChromeClient.h 上方的长注释。

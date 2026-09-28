@@ -26,6 +26,7 @@
 - ES 模块、Promise/微任务（驱动显式排 `performMicrotaskCheckpoint`）、rAF/定时器、WebAssembly（ENABLE_WEBASSEMBLY=0，关闭）
 - WebCrypto：OpenSSL 后端（ECDSA/HKDF/RSA…；EC_KEY const-cast 适配点见 crypto/openssl 补丁）
 - console 输出镜像到 `LocalState\console.txt`
+- 对话框（2026-09-27 起）：`confirm()` 真模态——引擎线程 park 在 PortUIBridge 条件变量上，UI 线程 MessageDialog 回填，60s 超时按取消；`prompt()` 同链路但 MessageDialog 没有输入框，确定=回空串（输入版要自绘 Popup，未做）；`alert()` 仍是非阻塞通知（设计如此）
 - **风险点**：LLInt-only 语义（无 JIT 的时序/内存差异）；微任务排空点在驱动侧（漏排/重排）
 
 ### 2.2 网络与会话

@@ -6138,7 +6138,7 @@ int WebCoreSyncLinks()
 }
 
 // ---- 异步 UI 请求队列(0.1.9,见 PortUIBridge.h)------------------------------
-// 引擎侧只负责"攒请求 / 收答案",真 UI 全在 shell。这两个入口本身不碰 Page,
+// 引擎侧只负责"攒请求 / 收答案",真 UI 全在壳。这两个入口本身不碰 Page,
 // 所以没有会话时调也安全(返回 0 / 静默丢弃)。
 int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len)
 {
@@ -6146,6 +6146,22 @@ int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len)
     uint64_t id = 0;
     std::string text;
     if (!WebCorePort::takeNextUIRequest(kind, id, text))
+        return 0;
+    if (outId)
+        *outId = id;
+    if (payload && len > 0)
+        std::snprintf(payload, static_cast<size_t>(len), "%s", text.c_str());
+    return kind;
+}
+
+// confirm/prompt 专用 UI 线程版:调用它时引擎正 park 在 PortUIBridge 的条件变量上,
+// 壳从自己的线程把请求取走。返回值/ payload 约定与 WebCoreTakeUIRequest 相同。
+int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len)
+{
+    int kind = 0;
+    uint64_t id = 0;
+    std::string text;
+    if (!WebCorePort::takeNextUIRequestFromUIThread(kind, id, text))
         return 0;
     if (outId)
         *outId = id;
@@ -6167,6 +6183,25 @@ void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, in
         }
     }
     WebCorePort::completeFileChooser(id, paths);
+}
+
+// 回答 confirm()/prompt()。引擎线程此刻 park 在 PortUIBridge 里,这两个入口只碰
+// 桥接自己的互斥量,不碰 Page,所以壳从 UI 线程直接调是安全的(UI 线程不等引擎)。
+int WebCoreCompleteConfirm(unsigned long long id, int ok)
+{
+    return WebCorePort::answerConfirm(id, ok != 0);
+}
+
+int WebCoreCompletePrompt(unsigned long long id, const char* text)
+{
+    return WebCorePort::answerPrompt(id, text);
+}
+
+// 引擎→壳唤醒(在引擎线程上调用,壳的 thunk 要 marshal 回 UI 线程)。
+// 回调指针存放在 PortUIBridge 里(它才是排队那一侧),这里只是 C ABI 转发。
+void WebCoreSetUIRequestCallback(void (*callback)(void*), void* context)
+{
+    WebCorePort::setUIRequestWakeCallback(callback, context);
 }
 
 // 页内查找:标记并高亮全部匹配 + 选中(从当前选区起)第一个,滚动到它,重绘。返回匹配数(>=0)或负错误码。

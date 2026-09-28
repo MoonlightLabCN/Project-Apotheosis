@@ -492,11 +492,22 @@ unsigned WebCoreGetFrameHash();                       // pixel hash of the last 
 //       accept is a MIME type or ".ext" exactly as the page wrote it. The shell
 //       MUST eventually answer with WebCoreCompleteFileChooser(id, ...).
 //   2 = alert.        payload = the message. No reply expected.
+//   3 = confirm.      payload = the message. The ENGINE THREAD IS PARKED waiting
+//       for WebCoreCompleteConfirm(id, ok) — the shell must answer (OK or Cancel),
+//       and it takes the request from the UI thread via WebCoreTakeUIRequestUI
+//       after the WebCoreSetUIRequestCallback wake fires.
+//   4 = prompt.       payload = "<message>\t<default>". Same parking; answer with
+//       WebCoreCompletePrompt(id, text), where a null text means Cancel.
 //   8 = open in new tab. payload = the URL (window.open() / target=_blank).
 //       No reply expected: the shell owns the tab model. Note the new tab has no
 //       opener — see PortChromeClient.h for why this port cannot hand JS a live
 //       WindowProxy for a second, simultaneously-running Page.
 int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
+
+// UI-thread twin of WebCoreTakeUIRequest, used by the confirm/prompt wake path
+// (the engine is parked and cannot run its own drain). Same queue, same payload
+// conventions; the shell answers everything it takes.
+int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len);
 
 // Answer a file-chooser request. `pathsUtf8` holds `count` NUL-terminated UTF-8
 // absolute paths back to back; count == 0 means the user cancelled. Safe to call
@@ -504,6 +515,21 @@ int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
 // The paths must be readable by the engine process: on UWP that means files the
 // app itself owns, so the shell copies picked files into LocalState first.
 void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
+
+// Answer a confirm() dialog. ok != 0 = OK (script continues with true), 0 =
+// Cancel. May be called from the UI thread while the engine is parked; a stale id
+// (dialog already timed out) is a no-op. Returns 1 when the answer was taken.
+int WebCoreCompleteConfirm(unsigned long long id, int ok);
+
+// Answer a prompt() dialog. text == nullptr (or empty-with-null) means Cancel;
+// otherwise it is the UTF-8 the user typed. Same threading/staleness rules.
+int WebCoreCompletePrompt(unsigned long long id, const char* text);
+
+// Engine->shell wake used when a confirm/prompt is queued: the engine thread is
+// about to park, so it cannot run the shell's usual drain. The callback is
+// invoked ON THE ENGINE THREAD — marshal to the UI thread before touching XAML,
+// then call WebCoreTakeUIRequestUI.
+void WebCoreSetUIRequestCallback(void (*callback)(void*), void* context);
 
 // ---- find-in-page ----
 int WebCoreFindString(const char* utf8, int matchCase, int wrap, uint8_t* outRGBA); // mark+highlight all, select first; returns match count (>=0) or neg error
