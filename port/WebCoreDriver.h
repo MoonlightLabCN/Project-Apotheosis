@@ -98,6 +98,8 @@ void WebCoreSetPerfLogPath(const char* path);
 // navigation completion or when the ring fills, so call this before suspend
 // (UWP can terminate a suspended app without notice). No-op when off.
 void WebCorePerfFlush(void);
+// Apotheosis (0.2.6 诊断): 最近一次导航的人读性能摘要(total/ttfb/样式布局/渲染更新/绘制/帧数/子资源)。引擎线程调。
+int WebCorePerfLastNav(char* out, int len);
 
 // ---- crash reporting (always on) ----
 // Point the engine at a crash log file (LocalState\crash.txt) and arm all three

@@ -442,6 +442,9 @@ namespace Harness {
         void OnFallbackTick(Platform::Object^ sender, Platform::Object^ e);
         // Register the driver wake callback (engine-thread post) and (re)arm the live loop.
         void ApplyEventPresentSetting();
+        void ApplyJitSetting();   // Apotheosis: EXPERIMENTAL JIT toggle -> engine thread
+        void ApplyPerfLogSetting();
+        void LogBrowsePerf(const std::wstring& url, bool loadOk);
         // 输入法:点中可编辑元素后唤起屏幕键盘;键入转发给引擎活会话。
         void OnImeTextChanged(Platform::Object^ sender, Windows::UI::Xaml::Controls::TextChangedEventArgs^ e);
         void OnImeKeyDown(Platform::Object^ sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs^ e);
@@ -548,6 +551,7 @@ namespace Harness {
         //   (0=1.0 / 1=1.25 / 2=1.5 / 3=1.75 / 4=2.0). The factor is the engine device scale
         //   factor: the page lays out at (engine px / factor) CSS px. settings.ini pagewidth
         int  m_pageWidth { 2 };
+        int  m_clarity { 0 };           // 渲染清晰度 0=720p/1=1080p/2=原生;settings.ini clarity;重启生效
         bool m_showScrollFab { false };// 开发者选项:悬浮翻页按钮(默认关);settings.ini scrollfab
         // Apotheosis (review 2026-09-04 item 4): the suspend deferral in flight, and the timer that
         //   bounds how long the engine may keep the shell waiting for it. Both UI thread only.
@@ -593,6 +597,8 @@ namespace Harness {
         bool m_gpuOn { false };       // GPU 合成是否已开(一次性;引擎侧 g_gpuActive 无 teardown,重启回软件)
         bool m_gpuPresent { false };  // GPU 直呈现模式(合成直接画到 GpuPanel,省 readback+blit)
         bool m_gpuDefault { true };   // 默认启用 GPU(设置可关;启动后首个网络页加载完自动开)
+        bool m_jitEnabled { false };   // Apotheosis: EXPERIMENTAL,默认关(0.2.5.6 真机 github.com 崩过);settings.ini jit
+        bool m_perfLog { false };         // 性能诊断记录(每次导航写 browse-log.txt);settings.ini perflog    // EXPERIMENTAL JIT 开关,默认开(引擎基线);settings.ini jit
         bool m_gpuAutoTried { false };// 本次会话已自动尝试过开 GPU(不重复)
         // Apotheosis (M4): 首次网络导航被推迟到 GpuInit 之后时,URL 暂存在这里(空=没有待发导航)。
         std::wstring m_pendingFirstNav;
@@ -809,6 +815,7 @@ namespace Harness {
         bool   m_dtapPending { false };      // a tap is held, waiting for a possible second one
         bool   m_dtapPolicyReady { false };  // WebCoreTapPolicyAt has answered for the held tap
         bool   m_dtapZoomable { false };
+        bool   m_dtapPageNoZoom { false };    // 本页视口全局禁缩放(policy reason 3/4),单击不再等待;导航复位
         bool   m_dtapSecondSeen { false };   // second tap arrived before the answer did
         int    m_dtapPx { -1 }, m_dtapPy { -1 };         // held tap, engine px (proximity + click target)
         float  m_dtapTargetScale { 1.0f };

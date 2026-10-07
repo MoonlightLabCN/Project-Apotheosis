@@ -5,6 +5,7 @@
 #endif
 #include "WebCoreDriver.h"
 #include "JitProbe.h"
+#include "GpuInitGuard.h"   // Apotheosis: SEH 壳包 WebCoreGpuInit(老驱动初始化崩溃 → 错误码)
 #include "GpuProbe.h"
 
 #include <robuffer.h>
@@ -130,6 +131,11 @@ static void SetupRuntimeEnv()
             // before FcDefaultSubstitute, which is what synthesises lang - so a pattern-target
             // lang test sees no value and never fires. The append above carries Chinese anyway,
             // because no other packaged face has a single CJK glyph to compete with.
+            // Apotheosis (font tuning, 0.2.5): 所有 face 统一 slight hinting + 灰阶抗锯齿。
+            //   手机屏上 subpixel/LCD 没意义(竖屏/旋转方向不固定),hintslight 保住字形比例。
+            conf << "  <match target=\"font\"><edit name=\"antialias\" mode=\"assign\"><bool>true</bool></edit>"
+                    "<edit name=\"hinting\" mode=\"assign\"><bool>true</bool></edit>"
+                    "<edit name=\"hintstyle\" mode=\"assign\"><const>hintslight</const></edit></match>\n";
             conf << "</fontconfig>\n";
             conf.close();
             _putenv_s("FONTCONFIG_FILE", confPath.c_str());
@@ -147,13 +153,15 @@ static void SetupRuntimeEnv()
         // 里 CreateFileW 那一项被编成了空函数指针,并用 SQLite 自己的 xSetSystemCall 补上了
         // (port/PortSQLiteAppContainer.*);补不齐时引擎自动退回纯内存态,不会崩。
         // 实际走了哪条路(持久 or 内存)看 WebCoreGetStorageDiag()。
+        // Apotheosis: profile setup initializes JSC; pin cold-start diagnostics before it.
+        WebCoreSetCrashLogPath((localDir + "\\crash.txt").c_str());
         WebCoreSetProfilePath((localDir + "\\profile").c_str());
 
         // Apotheosis: crash log. Always on (not opt-in like perf.txt): a crash with no
         // WER dump — which is every fast-fail/trap termination on Windows 10 Mobile — is
         // exactly the case we cannot reproduce on the build machine. The engine appends
         // reason + stack frames to LocalState\crash.txt; pull it with WDP after a crash.
-        WebCoreSetCrashLogPath((localDir + "\\crash.txt").c_str());
+        // Crash logging is armed above, before any engine initialization.
 
         // Apotheosis (M4): per-phase timing. Device-side opt-in exactly like imedebug.txt —
         // only when the tester dropped LocalState\perf.txt (via WDP, effective after restart)
@@ -786,7 +794,33 @@ static void WriteBmp32(const std::string& path, const uint8_t* rgba, int w, int 
 // the high-water mark over every viewport this session has had, and never at kW*kH*4 directly.
 static int kW = 720, kH = 1080;
 // The reference short side. Portrait width stays exactly what it has always been.
+static double CurrentDeviceScale();   // Apotheosis: defined below; the clarity helpers read it
 static const int kEngineShortSidePx = 720;
+
+// Apotheosis (render clarity, 0.2.5): 引擎短边像素目标。0=720p(默认,最省电),1=1080p,2=原生
+//   (逻辑短边 × RawPixelsPerViewPixel,950 即 1440)。提高短边=文字/图形按更细的网格光栅化,
+//   代价是合成与内存开销随像素数平方涨。settings.ini clarity;m_engineScale 在首帧锁定,
+//   所以改了重启才生效。锁定后实际短边 = m_engineScale × 短边 DIP,供页面宽度倍率补偿用。
+static int g_clarityEffective = 0;   // 启动时从设置冻结;运行期改设置不影响本会话
+
+static double ClarityShortSideTarget(double shortSideDip)
+{
+    if (g_clarityEffective == 1) return 1080.0;
+    if (g_clarityEffective == 2) {
+        double n = shortSideDip * CurrentDeviceScale();
+        return n > 720.0 ? n : 720.0;
+    }
+    return 720.0;
+}
+
+// 页面宽度倍率补偿:CSS 宽 = 引擎 px / 倍率。清晰度提高引擎密度时,倍率同比例跟上,
+// 否则同一台机器改个清晰度就把排版变成桌面宽度。
+static float ClarityFactorRatio()
+{
+    if (g_clarityEffective == 1) return 1080.0f / 720.0f;
+    if (g_clarityEffective == 2) return (float)(CurrentDeviceScale() * 360.0 / 720.0);
+    return 1.0f;
+}
 // Ceiling on the engine viewport, in pixels. The sizes this device actually asks for are around
 // 0.9 MPixel in either orientation; this is roughly twice that, and exists only as a stop on the
 // surface-mismatch path in UpdateEngineViewport - rastering several times the intended number of
@@ -1471,7 +1505,7 @@ MainPage::MainPage()
             std::string dump;
             int gi = -999;
             const int dw = kW, dh = kH;
-            try { gi = WebCoreGpuInit(nullptr, dw, dh); } catch (...) { gi = -1000; }
+            try { gi = GpuInitGuarded(nullptr, dw, dh); } catch (...) { gi = -1000; }
             NoteEngineFrameSize(dw, dh);
             dump += "WebCoreGpuInit(offscreen) rc=" + std::to_string(gi) + "\n\n";
             auto rgba = std::vector<uint8_t>(EngineBufferBytes(), 0);
@@ -2254,6 +2288,7 @@ void MainPage::NavigateTo(Platform::String^ url, bool pushHistory)
     }
 
     m_currentUrl = isHome ? L"about:home" : wurl;
+    m_dtapPageNoZoom = false;   // 新页面:单击恢复"等待双击"策略,直到 policy 再次判定
 
     // M4:导航=新页面,引擎 pageScaleFactor 复位 1.0 → harness 缩放状态/显示变换同步复位(否则下次捏合基准错)。
     // Apotheosis (review 2026-09-04 items 3 + 6b): one exit. This used to clear the pinch flag and
@@ -2476,6 +2511,8 @@ void MainPage::OnNavDone(Platform::String^ finalTitle, bool ok, bool loadOk)
     TitleText->Text = (m_currentTitle.empty() ? ref new String(L"EdgeHTML Reborn") : finalTitle);
     if (loadOk && m_currentUrl != L"about:home")   // 仅真正加载成功才记历史,失败不污染
         AddHistory(m_currentUrl, m_currentTitle);
+    if (m_perfLog && m_currentUrl != L"about:home")
+        LogBrowsePerf(m_currentUrl, loadOk);   // Apotheosis (0.2.6): 每次导航写一行 browse-log.txt
     if (m_currentUrl != L"about:home") {
         m_urlSyncing = true;
         UrlBox->Text = ref new String(m_currentUrl.c_str());
@@ -2669,6 +2706,12 @@ void MainPage::OnPageTapped(Platform::Object^, Windows::UI::Xaml::Input::TappedR
             ForwardClickToEngine(px, py);   // 双击缩放关:一切照旧
             return;
         }
+        if (m_dtapPageNoZoom) {
+            // 本页视口禁缩放(上一个 policy 答案是 reason 3/4,页面级属性,与点的位置无关):
+            // 双击缩放在这页永远无事发生,单击不再压 kDoubleTapHoldMs 等第二下。
+            ForwardClickToEngine(px, py);
+            return;
+        }
         if (pairing) {
             if (m_dtapPolicyReady) {
                 DtapCompleteSecond();
@@ -2739,6 +2782,8 @@ void MainPage::OnPageTapped(Platform::Object^, Windows::UI::Xaml::Input::TappedR
                                 + " late=" + std::to_string(late) + " act=drop:stale");
                             return;
                         }
+                        // 页面级禁缩放(viewport user-scalable=no / 移动优化页):后续单击直通。
+                        if (reason == 3 || reason == 4) s->m_dtapPageNoZoom = true;
                         s->m_dtapPolicyReady = true;
                         s->m_dtapZoomable = (zoomable != 0);
                         s->m_dtapTargetScale = target;
@@ -3179,6 +3224,69 @@ void MainPage::ApplyPrefetchSetting()
     WebEngine::instance().post([en]() { try { WebCoreSetSpeculativePrefetch(en); } catch (...) {} });
 }
 
+// Apotheosis (JIT toggle, EXPERIMENTAL): settings.ini "jit". Posted to the engine thread like
+//   every other engine call. The driver owns the decision: on this port it refuses to arm the
+//   baseline JIT (unvalidated on ARM32 - real-device execute faults inside the JIT pool) and
+//   writes a "jit: enable refused" line to stage.txt. The switch still persists the user's choice
+//   so the UI is honest about what was asked, but WebCoreGetJitEnabled() reports the real state.
+//   With the driver's refusal the harness reads the engine state back after the post settles.
+void MainPage::ApplyJitSetting()
+{
+    int en = m_jitEnabled ? 1 : 0;
+    WebEngine::instance().post([this, en]() {
+        try {
+            WebCoreSetJitEnabled(en);
+            // The driver owns the decision: on this port it refuses to arm the baseline JIT
+            // (unvalidated on ARM32) and logs a stage.txt line. Read the real state back so the
+            // switch and settings.ini stop claiming a JIT that is not running.
+            int real = WebCoreGetJitEnabled();
+            if (real != en) {
+                m_jitEnabled = (real != 0);
+                // UI thread only: the switch just mirrors memory; a settings-page reopen
+                // would do this too, but do it at once so the user sees the true state.
+                Dispatcher->RunAsync(CoreDispatcherPriority::Normal,
+                    ref new DispatchedHandler([this]() { if (SetJitSwitch) SetJitSwitch->IsOn = m_jitEnabled; }));
+            }
+        } catch (...) {}
+    });
+}
+
+// Apotheosis (0.2.6 性能诊断): 开关 = 引擎 perf.csv 计时 + 每次导航一行 browse-log.txt。
+//   引擎侧探针在关掉后只剩一个分支(见 SetupRuntimeEnv 的 perf.txt 注释);这里把开关搬进设置页,
+//   不再需要 WDP 手放 perf.txt。立即生效:WebCoreSetPerfLogPath 空串即关。
+void MainPage::ApplyPerfLogSetting()
+{
+    std::wstring d = LocalStateDir();
+    std::string path = d.empty() ? std::string() : WideToUtf8(d + L"\\perf.csv");
+    bool on = m_perfLog;
+    WebEngine::instance().post([on, path]() {
+        try { WebCoreSetPerfLogPath(on ? path.c_str() : nullptr); } catch (...) {}
+    });
+}
+
+// 每次成功/失败的导航写一行:时间 URL 结果 + 引擎最近一次 nav 的阶段摘要。引擎线程取数,引擎线程写。
+void MainPage::LogBrowsePerf(const std::wstring& url, bool loadOk)
+{
+    std::string u = WideToUtf8(url);
+    WebEngine::instance().post([u, loadOk]() {
+        try {
+            char perf[512];
+            perf[0] = 0;
+            WebCorePerfLastNav(perf, (int)sizeof(perf));
+            std::wstring d = LocalStateDir();
+            if (d.empty()) return;
+            std::ofstream f(WideToUtf8(d + L"\\browse-log.txt"), std::ios::binary | std::ios::app);
+            if (!f) return;
+            SYSTEMTIME st; GetLocalTime(&st);
+            char ts[40];
+            std::snprintf(ts, sizeof ts, "%04d-%02d-%02d %02d:%02d:%02d",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            std::string line = std::string(ts) + "  " + (loadOk ? "ok  " : "FAIL") + "  " + u + "\n    " + perf + "\n";
+            f.write(line.data(), line.size());
+        } catch (...) {}
+    });
+}
+
 // Apotheosis (page width, 0.1.9.58): the page-width factor behind Settings -> INTERACTION, which
 //   is the engine's device scale factor. The engine lays a page out at (engine px / factor) CSS px,
 //   so 1.5 turns the 720 engine px portrait panel into a 480 CSS px layout viewport - a phone-sized
@@ -3229,7 +3337,7 @@ static std::wstring PageWidthLabel(int index)
 void MainPage::ApplyPageWidthSetting()
 {
     if (m_pageWidth < 0 || m_pageWidth >= kPageWidthCount) m_pageWidth = kPageWidthDefault;
-    const float f = PageWidthFactorFor(m_pageWidth);
+    const float f = PageWidthFactorFor(m_pageWidth) * ClarityFactorRatio();   // Apotheosis: clarity 补偿,见 ClarityFactorRatio
     WebEngine::instance().post([f]() { try { WebCoreSetPageWidthFactor(f); } catch (...) {} });
 }
 
@@ -4961,9 +5069,12 @@ void MainPage::ScheduleWakeComposite()
     // 最小间隔 16ms(≈60Hz)。上一帧比这贵 → 按上一帧的耗时来(占空比 ≤50%,别把这台机器打满:
     // 代码托管站那种"每帧都请求渲染更新"的页面否则会从 5fps 直接变成背靠背合成)。上限 200ms = 旧 tick。
     // 连续动画 150 帧(≈30s)无交互 → 至少 1s 一帧,搬的是旧 tick 的防永久动画降速。
+    // Apotheosis (frame-rate tuning, 0.2.5): 旧的占空比规则让慢帧把间隔翻倍(100ms 合成 → 200ms 一帧
+    //   ≈5fps),失控动画规则让任何连续动画 30s 后掉到 1fps。现在:慢帧追平有上限(50ms,≥13fps),
+    //   失控动画落在 250ms(4fps)而不是 1fps。
     unsigned minGap = 16;
-    if (m_lastPresentDurMs > minGap) minGap = (m_lastPresentDurMs > 200) ? 200 : m_lastPresentDurMs;
-    if (m_liveTotalTicks >= 150) minGap = 1000;
+    if (m_lastPresentDurMs > minGap) minGap = (m_lastPresentDurMs > 50) ? 50 : m_lastPresentDurMs;
+    if (m_liveTotalTicks >= 150) minGap = 250;
     const ULONGLONG now = GetTickCount64();
     const ULONGLONG since = (now >= m_lastPresentMs) ? (now - m_lastPresentMs) : 0;
     if (since >= minGap) {
@@ -6082,6 +6193,9 @@ void MainPage::ApplySettings()
     });
     UpdateScrollFab();
     ApplyPrefetchSetting();
+    ApplyJitSetting();
+    ApplyPerfLogSetting();
+    ApplyPageWidthSetting();
     ApplyPageWidthSetting();                 // Apotheosis: INTERACTION page width, UI thread only
     ApplyEventPresentSetting();              // Apotheosis: registers the engine present wake-up
     ApplyHideNavBarSetting();                // Apotheosis: DISPLAY toggle, UI thread only
@@ -6110,6 +6224,7 @@ void MainPage::LoadSettings()
             else if (k == "ua") m_setUaDesktop = (atoi(v.c_str()) != 0);
             else if (k == "zoom") m_defaultZoom = atoi(v.c_str());
             else if (k == "gpudefault") m_gpuDefault = (atoi(v.c_str()) != 0);
+            else if (k == "jit") m_jitEnabled = (atoi(v.c_str()) != 0);
             else if (k == "ua_custom") m_uaCustom = Utf8ToWide(v);
             else if (k == "updatecheck") m_updateAuto = (atoi(v.c_str()) != 0);
             else if (k == "prefetch") m_prefetch = atoi(v.c_str());
@@ -6119,6 +6234,8 @@ void MainPage::LoadSettings()
             else if (k == "hidestatusbar") m_hideStatusBar = (atoi(v.c_str()) != 0);
             else if (k == "axislock") m_axisLockEnabled = (atoi(v.c_str()) != 0);
             else if (k == "dtapzoom") m_dtapZoomEnabled = (atoi(v.c_str()) != 0);
+            else if (k == "perflog") m_perfLog = (atoi(v.c_str()) != 0);
+            else if (k == "clarity") { m_clarity = atoi(v.c_str()); if (m_clarity < 0 || m_clarity > 2) m_clarity = 0; g_clarityEffective = m_clarity; }
             else if (k == "lang") { g_lang = Utf8ToWide(v); m_langSet = true; }
         }
     }
@@ -6138,6 +6255,7 @@ void MainPage::SaveSettings()
     s += "ua=" + std::to_string(m_setUaDesktop ? 1 : 0) + "\n";
     s += "zoom=" + std::to_string(m_defaultZoom) + "\n";
     s += "gpudefault=" + std::to_string(m_gpuDefault ? 1 : 0) + "\n";
+    s += "jit=" + std::to_string(m_jitEnabled ? 1 : 0) + "\n";
     s += "ua_custom=" + WideToUtf8(m_uaCustom) + "\n";
     s += "updatecheck=" + std::to_string(m_updateAuto ? 1 : 0) + "\n";
     s += "prefetch=" + std::to_string(m_prefetch) + "\n";
@@ -6147,6 +6265,8 @@ void MainPage::SaveSettings()
     s += "hidestatusbar=" + std::to_string(m_hideStatusBar ? 1 : 0) + "\n";
     s += "axislock=" + std::to_string(m_axisLockEnabled ? 1 : 0) + "\n";
     s += "dtapzoom=" + std::to_string(m_dtapZoomEnabled ? 1 : 0) + "\n";
+    s += "clarity=" + std::to_string(m_clarity) + "\n";
+    s += "perflog=" + std::to_string(m_perfLog ? 1 : 0) + "\n";
     s += "lang=" + WideToUtf8(g_lang) + "\n";
     std::ofstream f(WideToUtf8(d) + "\\settings.ini", std::ios::binary | std::ios::trunc);
     if (f) f.write(s.data(), s.size());
@@ -6163,6 +6283,7 @@ void MainPage::ShowSettings()
     if (SetZoomSlider) SetZoomSlider->Value = m_defaultZoom;
     if (SetZoomLabel) SetZoomLabel->Text = ref new String((std::to_wstring(m_defaultZoom) + L"%").c_str());
     if (SetGpuSwitch) SetGpuSwitch->IsOn = m_gpuDefault;
+    if (SetJitSwitch) SetJitSwitch->IsOn = m_jitEnabled;
     if (SetUpdateSwitch) SetUpdateSwitch->IsOn = m_updateAuto;
     if (SetPrefetchCombo) SetPrefetchCombo->SelectedIndex = m_prefetch;
     // Apotheosis (page width, 0.1.9.58): the five labels carry the CSS width the factor produces,
@@ -6182,6 +6303,8 @@ void MainPage::ShowSettings()
     if (SetHideStatusBarSwitch) SetHideStatusBarSwitch->IsOn = m_hideStatusBar;
     if (SetAxisLockSwitch) SetAxisLockSwitch->IsOn = m_axisLockEnabled;
     if (SetDtapZoomSwitch) SetDtapZoomSwitch->IsOn = m_dtapZoomEnabled;
+    if (SetClarityCombo) SetClarityCombo->SelectedIndex = m_clarity;
+    if (SetPerfLogSwitch) SetPerfLogSwitch->IsOn = m_perfLog;
     if (SetUaCustomBox) SetUaCustomBox->Text = ref new String(m_uaCustom.c_str());
     // Apotheosis: app version comes from the package manifest, so it can never drift from what
     //   was actually deployed. The engine has no version export (WebCoreDriver.h) — the WebCore
@@ -6216,6 +6339,7 @@ void MainPage::HideSettings()
     if (SetUaSwitch) m_setUaDesktop = SetUaSwitch->IsOn;
     if (SetZoomSlider) m_defaultZoom = (int)(SetZoomSlider->Value + 0.5);
     if (SetGpuSwitch) m_gpuDefault = SetGpuSwitch->IsOn;
+    if (SetJitSwitch) m_jitEnabled = SetJitSwitch->IsOn;
     if (SetUpdateSwitch) m_updateAuto = SetUpdateSwitch->IsOn;
     if (SetPrefetchCombo && SetPrefetchCombo->SelectedIndex >= 0) m_prefetch = SetPrefetchCombo->SelectedIndex;
     if (SetPageWidthCombo && SetPageWidthCombo->SelectedIndex >= 0) m_pageWidth = SetPageWidthCombo->SelectedIndex;
@@ -6224,6 +6348,8 @@ void MainPage::HideSettings()
     if (SetHideStatusBarSwitch) m_hideStatusBar = SetHideStatusBarSwitch->IsOn;
     if (SetAxisLockSwitch) m_axisLockEnabled = SetAxisLockSwitch->IsOn;
     if (SetDtapZoomSwitch) m_dtapZoomEnabled = SetDtapZoomSwitch->IsOn;
+    if (SetClarityCombo && SetClarityCombo->SelectedIndex >= 0) m_clarity = SetClarityCombo->SelectedIndex;   // 本会话不动:g_clarityEffective 重启才换
+    if (SetPerfLogSwitch) m_perfLog = SetPerfLogSwitch->IsOn;
     if (SetUaCustomBox) {
         std::wstring u = SetUaCustomBox->Text ? std::wstring(SetUaCustomBox->Text->Data()) : L"";
         while (!u.empty() && (u.front() == L' ' || u.front() == L'\t')) u.erase(u.begin());
@@ -6292,6 +6418,16 @@ static const wchar_t* const kI18n[][2] = {
     { L"关闭预取", L"Off" }, { L"仅 Wi-Fi", L"Wi-Fi only" }, { L"始终", L"Always" },
     { L"网站可提前加载你还没点击的链接",
       L"Sites may load links you have not clicked yet" },
+    { L"JIT 编译加速(实验性)", L"JIT compilation (experimental)" },
+    { L"把 JavaScript 编译成本机代码执行,网页脚本明显更快;已知个别站点会崩,遇崩溃关掉",
+      L"Compiles JavaScript to native code for much faster pages; known to crash on some sites - turn off if you see crashes" },
+    { L"性能诊断记录(每次导航计时写入日志,供导出分析)", L"Performance logging (per-navigation timing, visible in exported logs)" },
+    { L"渲染清晰度", L"Render clarity" },
+    { L"标准(720p,省电)", L"Standard (720p, power saver)" },
+    { L"高清(1080p)", L"High (1080p)" },
+    { L"原生分辨率(最清晰,最耗电)", L"Native (sharpest, most power)" },
+    { L"提高渲染分辨率,文字和图形更锐利;重启后生效",
+      L"Higher render resolution: sharper text and graphics; takes effect after restart" },
     { L"标签", L"Tabs" }, { L"完成", L"Done" }, { L"新建标签页", L"New tab" },
 };
 static Platform::String^ I18n(Platform::String^ s, bool toEn) {
@@ -6502,7 +6638,7 @@ void MainPage::ExportDebug()
     report += "harness / WebCore 2.52.4 / ARM32 UWP\n\n";
     if (!d.empty()) {
         std::string dd = WideToUtf8(d);
-        const char* names[] = { "stage.txt", "gpuinit.txt", "gpuresult.txt", "layertree.txt", "autodump.txt", "imedebug.txt", "jitresult.txt", "diag.txt" };
+        const char* names[] = { "stage.txt", "gpuinit.txt", "gpuresult.txt", "layertree.txt", "autodump.txt", "imedebug.txt", "jitresult.txt", "browse-log.txt", "diag.txt" };
         for (const char* fn : names) {
             std::ifstream f(dd + "\\" + fn, std::ios::binary);
             if (!f) continue;
@@ -7268,7 +7404,7 @@ bool MainPage::ComputeEngineViewport(bool useGpuPanel, int& outW, int& outH)
     //   the two sides only stay in step while they use the same factor. EnableGpu() deliberately
     //   clears it first, so it is pinned to whichever element actually ends up presenting.
     if (!(m_engineScale > 0.0)) {
-        m_engineScale = (double)kEngineShortSidePx / (w < h ? w : h);
+        m_engineScale = ClarityShortSideTarget(w < h ? w : h) / (w < h ? w : h);
         if (m_engineScale < 0.25) m_engineScale = 0.25;
         if (m_engineScale > 8.0) m_engineScale = 8.0;
     }
@@ -7800,7 +7936,7 @@ void MainPage::EnableGpu()
     const float pwDsf = PageWidthFactorFor(m_pageWidth);
     WebEngine::instance().post([disp, self, win, engW, engH, pwDsf]() {
         int rc = -999;
-        try { rc = WebCoreGpuInit(win, engW, engH); } catch (...) { rc = -1000; }
+        try { rc = GpuInitGuarded(win, engW, engH); } catch (...) { rc = -1000; }   // SEH 壳:驱动崩 → -23
         if (rc == 0) NoteEngineFrameSize(engW, engH);
         try {
             std::wstring d = LocalStateDir();

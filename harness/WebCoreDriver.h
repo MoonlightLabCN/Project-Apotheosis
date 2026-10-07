@@ -124,6 +124,8 @@ void WebCoreSetPerfLogPath(const char* path);
 // navigation completion or when the ring fills, so call this before suspend
 // (UWP can terminate a suspended app without notice). No-op when off.
 void WebCorePerfFlush(void);
+// Apotheosis (0.2.6 诊断): 最近一次导航的人读性能摘要(total/ttfb/样式布局/渲染更新/绘制/帧数/子资源)。引擎线程调。
+int WebCorePerfLastNav(char* out, int len);
 
 // ---- crash reporting (always on) ----
 // Point the engine at a crash log file (LocalState\crash.txt) and arm all three
@@ -406,6 +408,11 @@ void WebCoreSetUserAgentString(const char* ua);
 // Apotheosis（隐私审查）：推测预取（<script type="speculationrules">）开关，默认关。
 // enabled!=0 时网页可预取用户未点击的 URL。仅引擎线程调；对当前会话和新建会话都生效。
 void WebCoreSetSpeculativePrefetch(int enabled);
+// Apotheosis（实验性 JIT 开关）：运行期开/关 JSC 基线 JIT。引擎按 ENABLE_JIT=ON 构建；
+// 关掉后不再做新的 JIT 编译（纯 LLInt 解释），已编译代码继续跑（软切换）。harness 在
+// 启动、首次加载页面之前应用持久化值；仅引擎线程调。
+void WebCoreSetJitEnabled(int enabled);
+int  WebCoreGetJitEnabled(void);   // 1 = JIT 生效中,0 = 纯解释 / 构建无 JIT
 
 // Apotheosis (page width, 0.1.9.58): the page-width factor = the engine's device scale factor.
 // The engine lays a page out at (engine px / factor) CSS px, so 1.5 gives a 480 CSS px layout

@@ -75,6 +75,16 @@
 // ---- JavaScriptCore ----
 // E:\Apotheosis\build-clang-webcore\JavaScriptCore\PrivateHeaders\JavaScriptCore\...
 #include <JavaScriptCore/InitializeThreading.h>   // JSC::initialize
+#include <JavaScriptCore/Options.h>                // Apotheosis: JSC::Options::useJIT (JIT toggle)
+#include <JavaScriptCore/JSCConfig.h>             // Apotheosis: g_jscConfig (JIT pool diag)
+#include <wtf/PageReservation.h>                  // Apotheosis: jit-diag 直接探 JSC 预留路径
+
+static void jitPoolDiagLine();   // Apotheosis: defined next to g_stagePath
+// Apotheosis: a Page (and with it the first JSC::VM) is about to be created on this thread. Record
+// it so WebCoreSetJitEnabled() can refuse a late false->true flip; defined next to that function.
+static void markJitSessionStarted();
+extern "C" void wkWinUWPSetJitPoolDiagSink(void (*sink)(const char*));   // WK_WINUWP: ExecutableAllocator.cpp 的池诊断注入点
+static void jitPoolSinkWrite(const char* s);   // 定义同 jitPoolDiagLine
 #include <JavaScriptCore/JSCJSValue.h>            // JSC::JSValue(WebCoreEvalJS)
 #include <JavaScriptCore/JSCJSValueInlines.h>     // JSValue::toWTFString(inline)
 #include <JavaScriptCore/JSGlobalObject.h>        // JSGlobalObject::vm()
@@ -495,6 +505,39 @@ static void wkCollectJSCHeapNow()
     vm->heap.collectNow(JSC::Synchronousness::Sync, JSC::CollectionScope::Full);
 }
 
+// Apotheosis: JIT runtime-switch state (must be declared before ensureWebCoreInitialized, which
+// pins the value during JSC::initialize()).
+static bool g_apoJitEnabled = true;   // Apotheosis: JIT toggle mirror, default ON (engine baseline is JIT-on)
+// Apotheosis: shipping JIT state, used only when LocalState/jitdiag.txt explicitly pins mode 0.
+// The lean build (VM.cpp: JITThunks is created whenever executable memory exists, not only when
+// useJIT() is true) runs the LLInt with every thunk available, so the whole 0.2.4.4-class
+// JavaScript behaviour is preserved with useJIT()==false.
+// The baseline JIT itself has never been validated on ARM32: with it armed (a settings.ini jit=1
+// reaching WebCoreSetJitEnabled before the first JSC::VM exists) real page loads execute a call
+// to address 0x00000100/0x00040000 from inside the JIT pool - an execute fault whose lr is in the
+// pool, i.e. JIT code calling through a broken function pointer (crash.txt records of 2026-10-07,
+// both with the runtime switch on and off). So an explicit mode 0 keeps JIT off unless someone
+// flips this to false and validates the baseline JIT on the device.
+// NOTE: before 1.0.0.0 the project ships diagnostics ON, so the *default* (no jitdiag.txt at all)
+// is kDefaultJitDiagnosticMode = 1, not this flag.
+static bool g_apoJitDisabledByDefault = true;
+// Apotheosis: explicit, cold-start-only diagnostic opt-in from LocalState/jitdiag.txt.
+// 0 = shipping policy, 1 = JIT thunks without baseline, 2 = JIT with baseline.
+// kDefaultJitDiagnosticMode is used when the file is absent. Before 1.0.0.0 the project ships
+// with diagnostics on, so the default is 1 (JIT thunks, no baseline tier-up) rather than 0.
+static constexpr int kDefaultJitDiagnosticMode = 1;
+static int g_jitDiagnosticMode = 0;
+static bool g_jitDiagnosticOptionsPinned = false;
+// Apotheosis: set once the first Page/VM has been created (any of the session-building C ABI
+// entry points). While clear, WebCoreSetJitEnabled() may turn the JIT on or off freely; once set,
+// only "off" is accepted - see the comment on WebCoreSetJitEnabled(). A late true would arm
+// baseline-JIT tier-up against a VM created on the LLInt path (real-device execute faults).
+static bool g_jitRefuseAfterSession = false;
+// Apotheosis: the single place that decides the port's shipping JIT state. Used by
+// ensureWebCoreInitialized() (to pin the value before anything can create a JSC::VM) and by
+// WebCoreSetJitEnabled() (to refuse an enable the baseline cannot honour).
+static inline bool startsJitDisabled() { return g_apoJitDisabledByDefault; }
+
 // Run the WebCore one-time process initialization exactly once.
 // Sequence taken from Source/WebKit/Shared/WebKit2Initialize.cpp
 // (the !PLATFORM(COCOA) branch — our case).
@@ -519,7 +562,32 @@ bool ensureWebCoreInitialized()
         // to "collect only once more than N bytes were allocated *this cycle*", bypassing the
         // proportional heuristic entirely. The 384 MB we used to set therefore made GC happen
         // *later*, not earlier — the opposite of what it was added for.
+        // Apotheosis: 不要动池大小 - 0.2.4.4/0.2.5.x 上 JSC_jitMemoryReservationSize=8MB 反而
+        //   与池建不起来相关(0.2.4.1 默认 32MB 时池正常)。恢复默认,只留门禁+诊断。
+        wkWinUWPSetJitPoolDiagSink(&jitPoolSinkWrite);   // Apotheosis: JSC 建池决策写进 stage.txt
+        if (g_jitDiagnosticMode) {
+            _putenv_s("JSC_useJIT", "true");
+            _putenv_s("JSC_useBaselineJIT", g_jitDiagnosticMode == 2 ? "true" : "false");
+        }
         JSC::initialize();                       // JSC heap/threading/options
+        // Apotheosis: pin the JIT state here, before anything else can create a JSC::VM.
+        // jitEnabledByDefault() returns true on this port, so without this the process starts
+        // with Options::useJIT()==true until the harness's (racy) WebCoreSetJitEnabled post
+        // lands; a VM built in that window could arm the baseline JIT. Diagnostic mode wins
+        // over the shipping default (g_apoJitDisabledByDefault): mode 2 = JIT + baseline
+        // tier-up (unvalidated beyond bing/pigai/apple), mode 1 = JIT thunks with tier-up
+        // off (the safe, fully-thunked LLInt configuration the VM.cpp fix targets), mode 0 =
+        // the shipping default.
+        bool poolOk = JSC::ExecutableAllocator::singleton().isValid();
+        if (g_jitDiagnosticMode) {
+            JSC::Options::useJIT() = poolOk;
+            JSC::Options::useBaselineJIT() = g_jitDiagnosticMode == 2;
+        } else {
+            JSC::Options::useJIT() = !startsJitDisabled() && poolOk;
+        }
+        JSC::Options::notifyOptionsChanged();
+        g_jitDiagnosticOptionsPinned = true;
+        // Apotheosis: jitPoolDiagLine moved to session create (stage path not set yet here)
         WTF::initializeMainThread();             // pins this thread as the WebKit main thread + RunLoop::main
         WebCore::initializeCommonAtomStrings();  // interns "auto", "all", content types, etc.
         installPortPlatformStrategies();         // PlatformStrategies (loader strategy) — required before any load
@@ -1129,6 +1197,38 @@ static DWORD crashLogModuleSize(HMODULE module)
     return nt->OptionalHeader.SizeOfImage;
 }
 
+// Apotheosis: bounded raw evidence, avoiding heap allocation in the VEH. Only read
+// committed readable memory, stopping at page/region boundaries and never touching guards.
+static void crashLogBytes(FILE* fp, const char* label, uintptr_t address, size_t bytes)
+{
+    std::fprintf(fp, "memory %s address=0x%08lx requested=%u\n", label,
+        static_cast<unsigned long>(address), static_cast<unsigned>(bytes));
+    std::fflush(fp);
+    while (bytes) {
+        MEMORY_BASIC_INFORMATION mbi = { };
+        if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi)))
+            break;
+        DWORD protection = mbi.Protect & 0xff;
+        bool readable = protection == PAGE_READONLY || protection == PAGE_READWRITE
+            || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READ
+            || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || !readable)
+            break;
+        uintptr_t end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (end <= address)
+            break;
+        size_t n = std::min<size_t>(16, std::min<size_t>(bytes, end - address));
+        std::fprintf(fp, "bytes 0x%08lx:", static_cast<unsigned long>(address));
+        auto* data = reinterpret_cast<const volatile unsigned char*>(address);
+        for (size_t i = 0; i < n; ++i)
+            std::fprintf(fp, " %02x", static_cast<unsigned>(data[i]));
+        std::fputc('\n', fp);
+        address += n;
+        bytes -= n;
+    }
+    std::fflush(fp);
+}
+
 // The one writer. `ctxOrNull` is the vectored handler's CONTEXT when we have one.
 static void crashLogWrite(const char* reason, const CONTEXT* ctxOrNull)
 {
@@ -1166,6 +1266,34 @@ static void crashLogWrite(const char* reason, const CONTEXT* ctxOrNull)
             static_cast<unsigned long>(ctxOrNull->Pc), static_cast<unsigned long>(ctxOrNull->Lr),
             static_cast<unsigned long>(ctxOrNull->Sp), static_cast<unsigned long>(ctxOrNull->R0),
             static_cast<unsigned long>(ctxOrNull->R1));
+        std::fprintf(fp, "registers: r2=%08lx r3=%08lx r4=%08lx r5=%08lx r6=%08lx r7=%08lx r8=%08lx r9=%08lx r10=%08lx r11=%08lx r12=%08lx cpsr=%08lx\n",
+            ctxOrNull->R2, ctxOrNull->R3, ctxOrNull->R4, ctxOrNull->R5, ctxOrNull->R6,
+            ctxOrNull->R7, ctxOrNull->R8, ctxOrNull->R9, ctxOrNull->R10, ctxOrNull->R11,
+            ctxOrNull->R12, ctxOrNull->Cpsr);
+#if ENABLE(JIT)
+        std::fprintf(fp, "jit-context: mode=%d useJIT=%d baseline=%d pool=[%p,%p)\n",
+            g_jitDiagnosticMode, JSC::Options::useJIT() ? 1 : 0,
+            JSC::Options::useBaselineJIT() ? 1 : 0,
+            g_jscConfig.startExecutableMemory, g_jscConfig.endExecutableMemory);
+#endif
+        std::fflush(fp);
+        if (g_jitDiagnosticMode) {
+            uintptr_t lr = ctxOrNull->Lr & ~static_cast<uintptr_t>(1);
+            crashLogBytes(fp, "lr-code", lr >= 256 ? lr - 256 : lr, 384);
+            crashLogBytes(fp, "exception-stack", ctxOrNull->Sp, 512);
+            crashLogBytes(fp, "r0-data", ctxOrNull->R0, 128);
+            crashLogBytes(fp, "r2-data", ctxOrNull->R2, 256);
+            crashLogBytes(fp, "r3-data", ctxOrNull->R3, 128);
+            crashLogBytes(fp, "r4-data", ctxOrNull->R4, 128);
+            crashLogBytes(fp, "r5-data", ctxOrNull->R5, 128);
+            crashLogBytes(fp, "r6-data", ctxOrNull->R6, 128);
+            crashLogBytes(fp, "r7-frame", ctxOrNull->R7, 128);
+            crashLogBytes(fp, "r8-property-cache", ctxOrNull->R8, 128);
+            crashLogBytes(fp, "r9-handler", ctxOrNull->R9, 128);
+            crashLogBytes(fp, "r10-metadata", ctxOrNull->R10, 128);
+            crashLogBytes(fp, "r11-data", ctxOrNull->R11, 128);
+            crashLogBytes(fp, "r12-data", ctxOrNull->R12, 128);
+        }
     }
 #else
     (void)ctxOrNull;
@@ -1425,6 +1553,84 @@ static std::string g_perfPath;
 // WebCoreSetCrashLogPath (the same trick console.txt uses below). One human-readable
 // "timeline ..." line per navigation, so the load breakdown is legible without perf.csv.
 static std::string g_stagePath;
+
+// Apotheosis (JIT bring-up): the fixed executable pool state and one real thunk-sized
+// allocation, appended to stage.txt. A null pool range or a failed probe here explains a
+// later crash in JITThunks::initialize (it patches code at null+offset when the pool is gone).
+static void jitPoolSinkWrite(const char* s)
+{
+    if (g_stagePath.empty() || !s) return;
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
+        std::fwrite(s, 1, std::strlen(s), fp);
+        std::fwrite("\n", 1, 1, fp);
+        std::fclose(fp);
+    }
+}
+
+static void jitPoolDiagLine()
+{
+    if (g_stagePath.empty())
+        return;
+#if ENABLE(JIT)
+    auto& ea = JSC::ExecutableAllocator::singleton();
+    auto probe = ea.allocate(256, JSC::JITCompilationCanFail);
+    void* probeStart = probe ? probe->start().untaggedPtr() : nullptr;
+    char buf[256];
+    std::snprintf(buf, sizeof buf, "jit-diag useJIT=%d canUseJIT=%d pool=[%p,%p) probe256=%p",
+        JSC::Options::useJIT() ? 1 : 0, g_jscConfig.vm.canUseJIT ? 1 : 0,
+        g_jscConfig.startExecutableMemory, g_jscConfig.endExecutableMemory,
+        probeStart);
+    if (g_jitDiagnosticMode) {
+        size_t used = std::strlen(buf);
+        std::snprintf(buf + used, sizeof(buf) - used, " diagnosticMode=%d baseline=%d pid=%lu",
+            g_jitDiagnosticMode, JSC::Options::useBaselineJIT() ? 1 : 0, GetCurrentProcessId());
+    }
+#else
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "jit-diag LLInt build (no JIT)");
+#endif
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
+        std::fwrite(buf, 1, std::strlen(buf), fp);
+        std::fwrite("\n", 1, 1, fp);
+        std::fclose(fp);
+    }
+#if ENABLE(JIT)
+    if (!probeStart) {
+        // 池空了:现场直接试一次 8MB 预留,把真正的 Win32 错误码记下来
+        void* probe = VirtualAllocFromApp(nullptr, 8 * 1024 * 1024, MEM_RESERVE, PAGE_READWRITE);
+        DWORD rawErr = GetLastError();
+        // 再用 JSC 自己的预留 API 试一遍(JSJITCodePages 用法 + executable=true),缩小分歧点
+        auto pr = WTF::PageReservation::tryReserveWithGuardPages(32 * 1024 * 1024, WTF::OSAllocator::JSJITCodePages, nullptr, true, true, false, false);
+        bool prOk = !!pr;
+        DWORD prErr = prOk ? 0 : GetLastError();
+        if (prOk) pr.deallocate();
+        char ebuf[160];
+        std::snprintf(ebuf, sizeof ebuf, "jit-diag reserve8MB %s err=%lu pageReservation32 %s err=%lu",
+            probe ? "ok" : "FAIL", rawErr, prOk ? "ok" : "FAIL", prErr);
+        if (probe) VirtualFree(probe, 0, MEM_RELEASE);
+        if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
+            std::fwrite(ebuf, 1, std::strlen(ebuf), fp);
+            std::fwrite("\n", 1, 1, fp);
+            std::fclose(fp);
+        }
+    }
+#endif
+}
+// Apotheosis: one stage.txt line for the JIT-enable refusal in WebCoreSetJitEnabled() - same
+// append-only writer as jitPoolDiagLine() so it lands in the same diagnostic stream.
+static void jitStageNote(const char* text)
+{
+    if (g_stagePath.empty() || !text)
+        return;
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
+        std::fwrite(text, 1, std::strlen(text), fp);
+        std::fwrite("\n", 1, 1, fp);
+        std::fclose(fp);
+    }
+}
 static bool g_perfOn = false;
 static bool g_perfHeaderDone = false;
 
@@ -3637,6 +3843,8 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     // HTTP(Cookie/Set-Cookie 头)路由 LoadingFrameLoaderClient::createNetworkingContext 提供,二者共用同一 jar。
     pageConfiguration.cookieJar = WebCore::CookieJar::create(WebCorePort::makeStorageSessionProvider());
 
+    { static bool s_jitDiagDone = false; if (!s_jitDiagDone) { s_jitDiagDone = true; jitPoolDiagLine(); } }   // Apotheosis: JIT pool diag, once
+    markJitSessionStarted();   // Apotheosis: from here on a JIT enable must be refused
     applyPortProviders(pageConfiguration);
 
     // Apotheosis (2026-09-07): WebSocket. pageConfigurationWithEmptyClients installs
@@ -3740,6 +3948,7 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     page->settings().setSessionStorageEnabled(true);
 #if ENABLE(VIDEO)
     page->settings().setMediaEnabled(false);
+    page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
     page->setIsVisible(true);
     // Apotheosis (M4 load timeline): opt in to the visually-non-empty milestone. WebCore only
@@ -4191,6 +4400,29 @@ void WebCoreSetCrashLogPath(const char* path)
         // Apotheosis (M4 load timeline): stage.txt lives in the same LocalState directory.
         g_stagePath = (slash == std::string::npos) ? std::string("stage.txt")
             : crashPath.substr(0, slash + 1) + "stage.txt";
+        // Apotheosis: read exactly once before engine initialization; runtime settings cannot
+        // change this diagnostic configuration.
+        //
+        // Default when LocalState/jitdiag.txt does not exist: kDefaultJitDiagnosticMode (1),
+        // i.e. useJIT=true with the baseline JIT off. That is the LLInt-with-all-thunks
+        // configuration the VM.cpp fix made safe, and it is what the whole 0.2.4.x line ran.
+        // The baseline JIT (mode 2) is NOT default: only bing / pigai / apple have been
+        // exercised with it armed, and the ARM32 baseline codegen is otherwise unvalidated
+        // (see docs/JIT-ARM32-R9-ROOT-CAUSE-2026-10-07.md - the r9 fix was verified only on
+        // those sites). Writing "0" into jitdiag.txt pins the shipping policy explicitly;
+        // "2" opts into the baseline JIT for a test.
+        if (!g_jitDiagnosticOptionsPinned) {
+            std::string diagnosticPath = (slash == std::string::npos) ? std::string("jitdiag.txt")
+                : crashPath.substr(0, slash + 1) + "jitdiag.txt";
+            FILE* diagnostic = nullptr;
+            if (fopen_s(&diagnostic, diagnosticPath.c_str(), "rb") == 0 && diagnostic) {
+                int mode = std::fgetc(diagnostic);
+                if (mode == '0' || mode == '1' || mode == '2')
+                    g_jitDiagnosticMode = mode - '0';
+                std::fclose(diagnostic);
+            } else
+                g_jitDiagnosticMode = kDefaultJitDiagnosticMode;
+        }
         FILE* probe = nullptr;
         if (fopen_s(&probe, g_consolePath.c_str(), "rb") == 0 && probe) {
             g_consoleFileExisted = true;   // opt-in: console.txt already exists on disk
@@ -4273,6 +4505,32 @@ void WebCoreSetPerfLogPath(const char* path)
             g_perfHeaderDone = true;
         std::fclose(fp);
     }
+}
+
+// Apotheosis (0.2.6 诊断开关):最近一次导航的人读性能摘要,供 harness 追加进 browse-log.txt。
+//   引擎线程调。返回写入字节数;perf 关或无 nav 行时写 "n/a" 并返回 0。
+int WebCorePerfLastNav(char* out, int len)
+{
+    if (!out || len <= 0)
+        return 0;
+    out[0] = 0;
+    const PerfRow* nav = nullptr;
+    for (int i = 0; i < g_perfRows; ++i)
+        if (g_perfRing[i].kind[0] == 'n')   // "nav"
+            nav = &g_perfRing[i];
+    if (!g_perfOn || !nav) {
+        std::snprintf(out, len, "perf off 或无导航记录");
+        return 0;
+    }
+    auto ms = [](double v, char* b, size_t n) { if (v >= 0) std::snprintf(b, n, "%.0fms", v); else std::snprintf(b, n, "-"); };
+    char bNet[24], bStyle[24], bRender[24], bPaint[24], bBack[24], bTotal[24];
+    ms(nav->netTtfb, bNet, sizeof bNet); ms(nav->styleLayout, bStyle, sizeof bStyle);
+    ms(nav->renderUpdate, bRender, sizeof bRender); ms(nav->paint, bPaint, sizeof bPaint);
+    ms(nav->backing, bBack, sizeof bBack); ms(nav->total, bTotal, sizeof bTotal);
+    int n = std::snprintf(out, len,
+        "total=%s ttfb=%s 样式布局=%s 渲染更新=%s 绘制=%s 后备=%s 帧=%d 子资源 ok=%d fail=%d gpu=%d",
+        bTotal, bNet, bStyle, bRender, bPaint, bBack, nav->frames, nav->subOk, nav->subFail, nav->gpu);
+    return n < 0 ? 0 : n;
 }
 
 // Apotheosis (M4 step 1): drain the in-memory perf ring to disk. Rows otherwise
@@ -4534,6 +4792,8 @@ int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA)
             pageConfiguration.mainFrameCreationParameters);
         params.effectiveSandboxFlags = { };
     }
+    { static bool s_jitDiagDone = false; if (!s_jitDiagDone) { s_jitDiagDone = true; jitPoolDiagLine(); } }   // Apotheosis: JIT pool diag, once
+    markJitSessionStarted();   // Apotheosis: from here on a JIT enable must be refused
     applyPortProviders(pageConfiguration);
 
     // ---- 3. Page ----
@@ -4546,6 +4806,7 @@ int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA)
     page->settings().setSpeculationRulesPrefetchEnabled(g_apoSpecPrefetch);   // Apotheosis: privacy, see g_apoSpecPrefetch
 #if ENABLE(VIDEO)
     page->settings().setMediaEnabled(false);
+    page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
 
     wkApplyPageWidthFactor(page.get());   // Apotheosis: device scale factor, before the first layout
@@ -4735,6 +4996,8 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
                 return client;
             } };
     }
+    { static bool s_jitDiagDone = false; if (!s_jitDiagDone) { s_jitDiagDone = true; jitPoolDiagLine(); } }   // Apotheosis: JIT pool diag, once
+    markJitSessionStarted();   // Apotheosis: from here on a JIT enable must be refused
     applyPortProviders(pageConfiguration);
 
     // ---- Page ----
@@ -4749,6 +5012,7 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
     page->settings().setSpeculationRulesPrefetchEnabled(g_apoSpecPrefetch);   // Apotheosis: privacy, see g_apoSpecPrefetch
 #if ENABLE(VIDEO)
     page->settings().setMediaEnabled(false);
+    page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
     wkApplyPageWidthFactor(page.get());   // Apotheosis: device scale factor, before the first layout
     // 标记页面可见,否则后台节流会推迟图片/定时器/资源加载(headless 默认可能非可见)。
@@ -6769,6 +7033,63 @@ void WebCoreSetSpeculativePrefetch(int enabled)
     g_apoSpecPrefetch = (enabled != 0);
     if (g_session && g_session->page)
         g_session->page->settings().setSpeculationRulesPrefetchEnabled(g_apoSpecPrefetch);
+}
+// Apotheosis (JIT toggle, experimental): runtime switch for the JSC baseline JIT - see the
+// contract in WebCoreDriver.h. Engine thread only: JSC::Options are read by concurrent JIT
+// compilation threads, so flipping them off the engine thread would race. useJIT=false stops all
+// future JIT tier-up (LLInt interpreter only); already-compiled code keeps running (soft switch).
+//
+// The harness's startup order is racy against the engine thread: LoadSettings() posts this call
+// while the first WebCoreSessionLoad/WebCoreLoadHtml may already be running on the engine, so the
+// setting can land after the first JSC::VM exists. Turning JIT *off* at that point is harmless
+// (LLInt), but turning it *on* arms baseline-JIT tier-up for code that was compiled and linked
+// against a VM that never created its JIT stubs and never reserved the tier-up path - real-device
+// crashes with pc=0x00000100/0x00040000 called from inside the JIT pool (execute fault, lr in
+// pool). So once any session exists, the switch can only go down, and this records the refusal
+// in the returned (unchanged) state the harness then mirrors into its UI.
+// Independently of that ordering, the whole port keeps tier-up off (g_apoJitDisabledByDefault);
+// the user's toggle is persisted and displayed, it just cannot arm the JIT.
+static void markJitSessionStarted() { g_jitRefuseAfterSession = true; }
+void WebCoreSetJitEnabled(int enabled)
+{
+#if ENABLE(JIT)
+    if (g_jitDiagnosticMode) {
+        ensureWebCoreInitialized();
+        g_apoJitEnabled = JSC::Options::useJIT();
+        jitStageNote("jit: cold-start diagnostic configuration pinned; UI setting ignored");
+        return;
+    }
+#endif
+    g_apoJitEnabled = (enabled != 0);
+#if ENABLE(JIT)
+    // Apotheosis: 可执行池预留失败时 JSC 在 initialize 里已经把 useJIT 关掉并记了
+    // vm.canUseJIT=false;这里绝不能无视它重新打开 - VM::VM 只查 useJIT,池无效时
+    // JITThunks::initialize 会在空 code 指针上 patch(0.2.4.3 真机 crash.txt 实证)。
+    bool poolOk = JSC::ExecutableAllocator::singleton().isValid();
+    // Apotheosis: the port keeps the baseline JIT off (see g_apoJitDisabledByDefault). The
+    // harness still records the user's choice in settings.ini and shows it in the UI, so the
+    // switch keeps "working"; it just does not arm tier-up. Both gates write one stage.txt line
+    // so a tester can see the ask was received.
+    if (enabled && (startsJitDisabled() || (poolOk && g_jitRefuseAfterSession))) {
+        // Apotheosis: refuse the flip (see the comment above). stays off.
+        jitStageNote(startsJitDisabled()
+            ? "jit: enable refused (ARM32 baseline JIT disabled in this port)"
+            : "jit: late enable refused (session already exists)");
+        g_apoJitEnabled = JSC::Options::useJIT() ? true : false;
+        return;
+    }
+    JSC::Options::useJIT() = g_apoJitEnabled && poolOk;
+    JSC::Options::notifyOptionsChanged();
+#endif
+}
+
+int WebCoreGetJitEnabled(void)
+{
+#if ENABLE(JIT)
+    return JSC::Options::useJIT() ? 1 : 0;
+#else
+    return 0;   // LLInt build: nothing to toggle
+#endif
 }
 
 // Apotheosis (page width, 0.1.9.58): set the page-width factor - see the contract in
