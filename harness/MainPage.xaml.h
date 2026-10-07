@@ -266,6 +266,21 @@ namespace Harness {
         void OnLinkMenuScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
         void OnLinkMenuCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
         void OnLinkMenuOpenNewTab(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        // Apotheosis (0.2.5.15): the same card now also serves a plain-text long press. The
+        //   engine gained real copy/cut/paste/selectAll (stubs-pasteboard.cpp + the
+        //   WebCoreCopy*/Paste/SelectAll C ABI); the shell owns the UWP DataPackage hop, because
+        //   DataPackage is UI-thread-only and the engine may never wait on this thread.
+        //   ShowContextMenu(isLink) picks which rows the card shows; these four are its rows.
+        void ShowContextMenu(bool isLink);
+        void OnCtxCopyLink(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnCtxCopy(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnCtxSelectAll(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnCtxShare(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        // Engine <-> UWP clipboard shuttle. Both run on the engine thread (the harness already
+        // serialises every C ABI call there); the DataPackage calls inside them run on the UI
+        // thread, so neither ever blocks the engine.
+        void ClipboardPushToSystem();
+        void ClipboardPullFromSystem();
         // 把内容区显示坐标(DIP)映回引擎像素空间(直呈现下表面被拉伸+设备分辨率缩放),修点击/焦点偏移。
         void MapTapToEngine(double dipX, double dipY, int& outPx, int& outPy);
         // 把位图像素 (px,py) 的点击转发到引擎活会话(WebCoreClickAt),完成后同步地址栏/历史/链接表。

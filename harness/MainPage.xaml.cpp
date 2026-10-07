@@ -2934,8 +2934,12 @@ void MainPage::ForwardClickToEngine(int px, int py, bool longPress, int clickCou
     // Apotheosis (link context menu, 0.1.9.42): filled by the engine when a long press turns out to
     // be over a link. Non-empty means the page was told NOTHING and the UI callback opens the menu.
     auto ctxUrl = std::make_shared<std::wstring>();
+    // Apotheosis (0.2.5.15): filled by the engine when a long press turns out to be over a drag
+    // widget (canvas / touch-action:none) - 1 = the page got the hold, 0 = plain text or an image,
+    // which opens the context card instead. Negative = the probe never ran (no session/busy).
+    auto ctxDragWidget = std::make_shared<int>(-1000);
 
-    WebEngine::instance().post([disp, self, px, py, linkHit, prevUrl, mySeq, longPress, clickCount, ctxUrl]() {
+    WebEngine::instance().post([disp, self, px, py, linkHit, prevUrl, mySeq, longPress, clickCount, ctxUrl, ctxDragWidget]() {
         auto rgba = std::make_shared<std::vector<uint8_t>>(EngineBufferBytes(), 0);
         int rc = -999;
         unsigned hashBefore = WebCoreGetFrameHash();
@@ -2972,12 +2976,27 @@ void MainPage::ForwardClickToEngine(int px, int py, bool longPress, int clickCou
         try {
             if (!ctxUrl->empty())
                 rc = 0;                      // menu case: nothing dispatched, no frame produced
-            else rc = longPress
-                ? WebCoreLongPressAt(px, py, kLongPressEngineHoldMs,
-                                     WEBCORE_LONGPRESS_CONTEXTMENU | WEBCORE_LONGPRESS_DRAG_WIDGET_ONLY,
-                                     rgba->data())
-                : (clickCount >= 2 ? WebCoreClickAtCount(px, py, clickCount, rgba->data())
-                                   : WebCoreClickAt(px, py, rgba->data()));
+            else if (longPress) {
+                // Apotheosis (0.2.5.15): a long press on ordinary text used to fall through to
+                // WebCoreLongPressAt's DRAG_WIDGET_ONLY flag, which returns without dispatching
+                // anything unless the point is a canvas / touch-action:none widget - so a hold on
+                // article text did nothing at all. It now opens the context card (copy / select
+                // all / share), the same way Safari and Chrome do on a phone. Nothing is
+                // dispatched to the page: the card is the shell's, and the engine's copy path is
+                // driven from the card's handlers, so a hold can still never navigate by
+                // accident (the rule the link case already had).
+                int wantsDrag = 0;
+                try { wantsDrag = WebCoreWantsDragAt(px, py); } catch (...) { wantsDrag = -1000; }
+                *ctxDragWidget = wantsDrag;
+                if (wantsDrag == 1)
+                    rc = WebCoreLongPressAt(px, py, kLongPressEngineHoldMs,
+                                            WEBCORE_LONGPRESS_CONTEXTMENU | WEBCORE_LONGPRESS_DRAG_WIDGET_ONLY,
+                                            rgba->data());
+                else
+                    rc = 0;                  // text (or image): the card, not the engine
+            } else
+                rc = (clickCount >= 2 ? WebCoreClickAtCount(px, py, clickCount, rgba->data())
+                                      : WebCoreClickAt(px, py, rgba->data()));
         } catch (...) { rc = -1000; }
         // Apotheosis (crash fix, 0.1.9.49): the viewport this frame was rendered at, read next to
         //   the call that produced it - see PresentSoftwareFrame.
@@ -3015,7 +3034,7 @@ void MainPage::ForwardClickToEngine(int px, int py, bool longPress, int clickCou
         int ctxRcCopy = ctxRc;
         try {
             disp->RunAsync(CoreDispatcherPriority::Normal,
-                ref new DispatchedHandler([self, rgba, fw, fh, titleW, navW, links, rcCopy, changedCopy, editableCopy, linkHit, mySeq, ctxUrl, ctxRcCopy, longPress]() {
+                ref new DispatchedHandler([self, rgba, fw, fh, titleW, navW, links, rcCopy, changedCopy, editableCopy, linkHit, mySeq, ctxUrl, ctxRcCopy, ctxDragWidget, longPress]() {
                     MainPage^ s = self.Get(); if (!s) return;
                     if (s->m_opSeq != mySeq) {
                         // Apotheosis (review fix, 0.1.9.48): the hold this answer belongs to is over,
@@ -3035,16 +3054,28 @@ void MainPage::ForwardClickToEngine(int px, int py, bool longPress, int clickCou
                     if (!ctxUrl->empty()) {
                         s->SetLoading(false);
                         s->TitleText->Text = ref new String(s->m_currentTitle.empty() ? L"EdgeHTML Reborn" : s->m_currentTitle.c_str());
-                        if (s->m_ctxPending) s->ShowLinkMenu(*ctxUrl);
+                        if (s->m_ctxPending) s->ShowContextMenu(true);
                         s->m_ctxPending = false;
                         return;
                     }
                     if (longPress) {
-                        // No link here: the page got the long press it always got. ctxRc is the
-                        // probe's answer (0 = no link, negative = no session / busy / no document),
-                        // which tells "the hold was over plain text" from "the probe never ran".
-                        WriteStage((std::string("ctx none rc=") + std::to_string(ctxRcCopy)).c_str());
+                        // No link here. ctxRc is the probe's answer (0 = no link, negative = no
+                        // session / busy / no document), which tells "the hold was over plain text"
+                        // from "the probe never ran". ctxDragWidget says whether the page took the
+                        // hold as a widget gesture. When neither is true the hold was over
+                        // ordinary text (or an image) and the context card opens instead - it is
+                        // the shell's, so nothing was dispatched and there is no frame to apply.
+                        WriteStage((std::string("ctx none rc=") + std::to_string(ctxRcCopy)
+                                    + " dragWidget=" + std::to_string(*ctxDragWidget)).c_str());
                         s->m_ctxPending = false;
+                        if (*ctxDragWidget == 0) {
+                            // Same early-exit shape as the link case above: the page was never
+                            // touched, so there is no frame, navigation or link table to sync, and
+                            // the title the "Working…" write replaced has to come back.
+                            s->SetLoading(false);
+                            s->TitleText->Text = ref new String(s->m_currentTitle.empty() ? L"EdgeHTML Reborn" : s->m_currentTitle.c_str());
+                            if (s->LinkMenu) s->ShowContextMenu(false);
+                        }
                     }
                     if (rcCopy == 0) {
                         Platform::String^ title = ref new String(titleW->c_str());
@@ -6107,6 +6138,131 @@ void MainPage::OnLinkMenuOpenNewTab(Platform::Object^, RoutedEventArgs^)
     std::wstring url = m_ctxUrl;   // HideLinkMenu clears it
     HideLinkMenu("action");
     OpenUrlInBackgroundTab(url);
+}
+
+// ============================================================================
+// Apotheosis (0.2.5.15): the long-press card serves links AND plain text.
+//
+// Until now the card had exactly one row ("open in new tab") and the header comment
+// said the rest was deliberately out of reach because each needed engine work this
+// port did not have. That engine work landed in the same round: stubs-pasteboard.cpp
+// turned the engine-side clipboard from a no-op into a real buffer and ported
+// Editor::pasteWithPasteboard from the dropped editing/win/EditorWin.cpp, and the
+// driver gained WebCoreCopySelection/CutSelection/Paste/SelectAll plus the
+// WebCoreClipboardGetText/SetText pair that lets the shell move bytes in and out.
+// All that was missing was the menu - which is what this is.
+//
+// WHAT THE SHELL OWNS AND WHY: UWP's DataPackage/Clipboard may only be touched on the
+// UI thread, and the port's one hard rule is that the engine never waits on the UI
+// thread (ANGLE marshals surface work back to the panel dispatcher; a wait deadlocks).
+// So the engine keeps the text in its own buffer and the shell shuttles it:
+//   copy:   post WebCoreCopySelection() -> post WebCoreClipboardGetText() -> SetText
+//   paste:  GetView -> text -> post WebCoreClipboardSetText(text) -> post WebCorePaste()
+// Every hop is an async post onto the engine thread; nothing blocks.
+// ============================================================================
+
+void MainPage::ShowContextMenu(bool isLink)
+{
+    if (!LinkMenu || !LinkMenuCard) return;
+    // Row visibility first: the card measures itself (ShowLinkMenu does the Measure), so a row
+    // that is Collapsed when the card is sized does not make a phantom gap.
+    const bool hasLink = isLink && !m_ctxUrl.empty();
+    if (LinkMenuOpenBtn)  LinkMenuOpenBtn->Visibility  = hasLink ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+    if (CtxCopyLinkBtn)   CtxCopyLinkBtn->Visibility   = hasLink ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+    if (CtxCopyBtn)       CtxCopyBtn->Visibility       = Windows::UI::Xaml::Visibility::Visible;
+    if (CtxSelectAllBtn)  CtxSelectAllBtn->Visibility  = Windows::UI::Xaml::Visibility::Visible;
+    if (CtxShareBtn)      CtxShareBtn->Visibility      = Windows::UI::Xaml::Visibility::Visible;
+    // Labels every open: the card is built from code, so it is outside the kI18n tree walk.
+    if (CtxCopyLinkLabel)   CtxCopyLinkLabel->Text   = L8(L"复制链接", L"Copy link");
+    if (CtxCopyLabel)       CtxCopyLabel->Text       = L8(L"复制", L"Copy");
+    if (CtxSelectAllLabel)  CtxSelectAllLabel->Text  = L8(L"全选", L"Select all");
+    if (CtxShareLabel)      CtxShareLabel->Text      = L8(L"分享", L"Share");
+    // A plain-text hold has no URL to name in the header; the card still wants its target row
+    // for the link case, so hide it rather than showing an empty hostname.
+    if (LinkMenuTarget) LinkMenuTarget->Visibility = hasLink ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+    ShowLinkMenu(m_ctxUrl);   // placement + visibility + the target text
+}
+
+void MainPage::OnCtxCopyLink(Platform::Object^, RoutedEventArgs^)
+{
+    std::wstring url = m_ctxUrl;   // HideLinkMenu clears it
+    HideLinkMenu("copy-link");
+    if (!url.empty()) DoCopyLink();
+}
+
+void MainPage::OnCtxCopy(Platform::Object^, RoutedEventArgs^)
+{
+    HideLinkMenu("copy");
+    // Engine writes the selection into its clipboard buffer; the second post reads it back out
+    // into UWP's DataPackage. Two posts rather than one so the second can see what the first
+    // produced (the ABI is serialized on the engine thread, so the order is guaranteed).
+    WebEngine::instance().post([]() { try { WebCoreCopySelection(); } catch (...) {} });
+    ClipboardPushToSystem();
+    TitleText->Text = L8(L"已复制", L"Copied");
+}
+
+void MainPage::OnCtxSelectAll(Platform::Object^, RoutedEventArgs^)
+{
+    HideLinkMenu("select-all");
+    WebEngine::instance().post([]() { try { WebCoreSelectAll(); } catch (...) {} });
+}
+
+void MainPage::OnCtxShare(Platform::Object^, RoutedEventArgs^)
+{
+    HideLinkMenu("share");
+    DoShare();
+}
+
+// Engine buffer -> UWP DataPackage. Runs on the engine thread up to the read; the DataPackage
+// write itself is marshalled to the UI thread (Clipboard::SetContent is UI-thread-only), and
+// because the hop is async the engine is never asked to wait for it.
+void MainPage::ClipboardPushToSystem()
+{
+    WebEngine::instance().post([]() {
+        // The ABI is a fixed-capacity copy (there is no length query by design: the caller on a
+        // phone browser is a long-press "copy", not a megabyte of text). 8 KB of UTF-8 covers a
+        // selected article paragraph; a longer selection returns kErrBadArgs and is truncated
+        // here rather than silently dropped, so the user still gets something useful.
+        std::string text;
+        try {
+            char buf[8192];
+            const int n = WebCoreClipboardGetText(buf, sizeof(buf));
+            if (n > 0)
+                text.assign(buf, static_cast<size_t>(n));
+            else if (n == static_cast<int>(-1))
+                return;   // empty buffer, nothing to push
+        } catch (...) {}
+        if (text.empty())
+            return;
+        auto w = ref new String(std::wstring(text.begin(), text.end()).c_str());
+        auto dp = ref new Windows::ApplicationModel::DataTransfer::DataPackage();
+        dp->SetText(w);
+        Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(dp);
+    });
+}
+
+// UWP DataPackage -> engine buffer. The read is a UI-thread async hop, then one post back onto
+// the engine thread with the text. GetView() is itself async, so this chain is: UI read ->
+// post WebCoreClipboardSetText -> (caller) post WebCorePaste.
+void MainPage::ClipboardPullFromSystem()
+{
+    auto dp = Windows::ApplicationModel::DataTransfer::Clipboard::GetContent();
+    if (dp == nullptr || !dp->Contains(Windows::ApplicationModel::DataTransfer::StandardDataFormats::Text))
+        return;
+    // C++/CX: no IAsyncOperation::Completed handler - the idiom is create_async(...)->then() on
+    // the PPL task. GetTextAsync() is itself async, so the whole chain is: UI-thread read -> post
+    // WebCoreClipboardSetText -> post WebCorePaste, and the engine is never asked to wait.
+    concurrency::create_task(dp->GetTextAsync()).then([](concurrency::task<String^> t) {
+        String^ value = nullptr;
+        try { value = t.get(); } catch (...) { return; }
+        if (value == nullptr)
+            return;
+        std::wstring w(value->Data());
+        WebEngine::instance().post([w]() {
+            try { WebCoreClipboardSetText(std::string(w.begin(), w.end()).c_str()); } catch (...) {}
+            try { WebCorePaste(); } catch (...) {}
+        });
+    });
 }
 
 // 动作分发:读 Button.Tag。先关面板再执行(避免动作触发的 UI 变化被面板挡住)。

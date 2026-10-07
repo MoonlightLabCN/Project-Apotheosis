@@ -330,6 +330,7 @@ enum : int {
     kErrNoSession    = -12,   // 交互调用时无常驻会话(需先 WebCoreSessionLoad)
     kErrBusy         = -13,   // 已在 pump 中(重入保护)
     kErrFrameGone    = -14,   // 交互后主帧消失(会话已坏)
+    kErrEditingRefused = -15, // 编辑命令被拒:无选中/不可编辑/剪贴板缓冲空(0.2.5.15 复制粘贴)
 };
 
 // Apotheosis: public render surfaces are backed by ARM32 allocations or GPU
@@ -6447,6 +6448,108 @@ void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, in
         }
     }
     WebCorePort::completeFileChooser(id, paths);
+}
+
+// ---- 复制/剪切/粘贴/全选(Apotheosis 2026-10-08)------------------------------
+// 引擎侧剪贴板缓冲访问器,定义在 stubs-pasteboard.cpp（那里 C++ 命名空间是正常的）。
+// 本文件的 C ABI 全在下面的 extern "C" 块里,所以这里只能用 C 链接的原型声明；
+// 写 WTF::String& 的 C++ 访问器在这种上下文里链接不到。
+extern "C" int apoClipboardRead(char* out, int cap);      // 返回字节数;-1=空;-2=空间不足
+extern "C" void apoClipboardWrite(const char* utf8, int len); // len<0 = NUL 结尾
+
+// 引擎链在 WebCore 里本来是通的(execCommand('copy') 能走到
+// Editor::performCutOrCopy),只是 platform/win 那两个文件被 DROP、Pasteboard 全是
+// no-op 桩,所以无处可去。现在 stubs-pasteboard.cpp 把读写接到引擎侧剪贴板缓冲,
+// 这里四个 C ABI 负责驱动活文档;缓冲与系统剪贴板之间的搬运由壳做(UWP 的
+// DataPackage 只能 UI 线程碰,引擎不能等它):
+//   copy:   WebCoreCopySelection()  -> 壳 WebCoreClipboardGetText() -> SetText
+//   paste:  壳 GetView -> text -> WebCoreClipboardSetText(text) -> WebCorePaste()
+//
+// 与其它 C ABI 一样只在引擎线程串行调用(harness 的 WebEngine::post),所以可以直接
+// 判 g_session / g_inPump,和 WebCoreClickAt 同一套约定。
+//
+// 走 Document::execCommand() 而不是直接调 Editor: Editor::performCutOrCopy 是 private,
+// 而 execCommand 是公开入口,页面自己的 document.execCommand('copy') 也走它 —— 同一
+// 条路,同一套 enable/权限/Selection 检查,壳和页面行为完全一致。execCommand 内部
+// Editor::command("copy") -> performCutOrCopy(CopyAction) -> Pasteboard::writePlainText /
+// writeSelection -> stubs-pasteboard.cpp 的引擎侧缓冲。
+static int apoExecEditingCommand(const char* command)
+{
+    if (!g_session || !g_session->mainFrame)
+        return kErrNoSession;
+    if (g_inPump)
+        return kErrBusy;
+    RefPtr<Document> doc = g_session->mainFrame->document();
+    if (!doc)
+        return kErrNoDocument;
+    auto result = doc->execCommand(String::fromUTF8(command), true);
+    if (result.hasException())
+        return kErrBadArgs;
+    return result.releaseReturnValue() ? kOK : kErrEditingRefused;
+}
+
+int WebCoreCopySelection(void)
+{
+    return apoExecEditingCommand("copy");
+}
+
+int WebCoreCutSelection(void)
+{
+    return apoExecEditingCommand("cut");
+}
+
+int WebCorePaste(void)
+{
+    if (!g_session || !g_session->mainFrame)
+        return kErrNoSession;
+    if (g_inPump)
+        return kErrBusy;
+    RefPtr<Document> doc = g_session->mainFrame->document();
+    if (!doc)
+        return kErrNoDocument;
+    // buffer 空(壳还没从系统剪贴板回填)时 paste 会插入空串,先挡掉。
+    char probe[4];
+    if (apoClipboardRead(probe, sizeof(probe)) == -1)
+        return kErrEditingRefused;
+    auto result = doc->execCommand("paste"_s, true);
+    if (result.hasException())
+        return kErrBadArgs;
+    return result.releaseReturnValue() ? kOK : kErrEditingRefused;
+}
+
+int WebCoreSelectAll(void)
+{
+    if (!g_session || !g_session->mainFrame)
+        return kErrNoSession;
+    if (g_inPump)
+        return kErrBusy;
+    RefPtr<Document> doc = g_session->mainFrame->document();
+    if (!doc)
+        return kErrNoDocument;
+    auto result = doc->execCommand("selectAll"_s, true);
+    if (result.hasException())
+        return kErrBadArgs;
+    return result.releaseReturnValue() ? kOK : kErrEditingRefused;
+}
+
+int WebCoreClipboardGetText(char* outUtf8, int cap)
+{
+    if (!outUtf8 || cap <= 0)
+        return kErrBadArgs;
+    const int written = apoClipboardRead(outUtf8, cap);
+    if (written == -1)
+        return -1;              // 空
+    if (written == -2)
+        return kErrBadArgs;     // 调用方要给够空间
+    return written;
+}
+
+int WebCoreClipboardSetText(const char* utf8)
+{
+    if (!utf8)
+        return kErrBadArgs;
+    apoClipboardWrite(utf8, -1);
+    return kOK;
 }
 
 // 回答 confirm()/prompt()。引擎线程此刻 park 在 PortUIBridge 里,这两个入口只碰

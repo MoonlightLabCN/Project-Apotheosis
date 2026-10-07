@@ -32,20 +32,74 @@
 
 #include <wtf/Assertions.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/text/WTFString.h>
 
-#include "Pasteboard.h"        // brings WCDataObject.h, PasteboardContext.h, COMPtr.h (PLATFORM(WIN))
-#include "Editor.h"
-#include "Color.h"
-#include "SimpleRange.h"
+#include <WebCore/Pasteboard.h>        // brings WCDataObject.h, PasteboardContext.h, COMPtr.h (PLATFORM(WIN))
+#include <WebCore/Editor.h>
+#include <WebCore/Color.h>
+#include <WebCore/SimpleRange.h>
+#include <WebCore/DocumentFragment.h>
+#include <WebCore/TextIterator.h>      // plainText(range)
+#include <WebCore/markup.h>            // createFragmentFromText
+#include <WebCore/LocalFrame.h>
+#include <WebCore/LocalFrameInlines.h> // inline LocalFrame::document()/protectedDocument()
+#include <WebCore/Document.h>
+#include <WebCore/FrameDestructionObserverInlines.h> // inline FrameDestructionObserver::frame()/document()
+#include <WebCore/DocumentPage.h>       // inline Document::page()
+
+#include <wtf/text/WTFString.h>
+#include <wtf/StdLibExtras.h>           // std::span
+#include <span>
 
 namespace WebCore {
+
+// ----------------------------------------------------------------------------
+// Apotheosis (2026-10-08): engine-side clipboard buffer.
+//
+// platform/win/PasteboardWin.cpp and WCDataObject.cpp are dropped from
+// PlatformWinUWP.cmake (OLE IDataObject is unavailable under WINAPI_FAMILY_APP), so
+// the ORIGINAL stub made every write/read a no-op and Editor::pasteWithPasteboard
+// an empty function. That left the whole WebCore editing chain dead: copy, cut,
+// paste, execCommand('copy') and navigator.clipboard all reached real code and then
+// fell into a hole.
+//
+// The chain itself is fine - it only ever needs somewhere to PUT the bytes and
+// somewhere to GET them back. This is that somewhere: a plain process-local U8
+// buffer, engine-thread only (every entry point that reaches it is already
+// serialized onto the single engine thread by the C ABI).
+//
+// The SYSTEM clipboard is a separate hop: UWP's DataPackage may only be touched on
+// the UI thread, so the shell drains/fills this buffer through the
+// WebCoreClipboardGetText/SetText C ABI (declared in WebCoreDriver.h) around its own
+// DataPackage calls. The engine therefore never blocks and never waits on the UI
+// thread - the port's one hard rule.
+//
+// Only text is carried. Images/colors/custom-data writes are still no-ops: those
+// need a MIME-carrying clipboard and a picker, and text is what a phone browser's
+// long-press menu actually offers. Everything that reads is honest about being
+// empty rather than inventing data.
+// ----------------------------------------------------------------------------
+static String& apoClipboardText()
+{
+    static String text;
+    return text;
+}
+
+// Out-of-namespace forwarders for ApotheosisClipboard::text()/setText() at the
+// bottom of this file (the driver declares them in the global namespace).
+String& apoClipboardTextForStub() { return apoClipboardText(); }
+void apoSetClipboardTextForStub(const String& value) { apoClipboardText() = value; }
+
+// Defined OUTSIDE namespace WebCore (at the bottom of this file) so the driver's
+// global-namespace forward declaration matches: WebCoreDriver.cpp declares
+// `namespace ApotheosisClipboard { const String& text(); void setText(const String&); }`
+// and calls it from there. Deliberately not extern "C": it returns a WTF::String&.
 
 // ----------------------------------------------------------------------------
 // Pasteboard — base-class construction / factory
 //   Mirror the PLATFORM(WIN) member-init list from PasteboardWin.cpp but skip
 //   finishCreatingPasteboard() (it pulls clipboard-format registration symbols
-//   that are themselves dropped). A driver that never copy/pastes never observes
-//   the uninitialised clipboard state.
+//   that are themselves dropped). The buffer above replaces the OS clipboard.
 // ----------------------------------------------------------------------------
 Pasteboard::Pasteboard(std::unique_ptr<PasteboardContext>&& context)
     : m_context(WTF::move(context))
@@ -102,8 +156,17 @@ bool Pasteboard::canSmartReplace()
     return false;
 }
 
-void Pasteboard::read(PasteboardPlainText&, PlainTextURLReadingPolicy, std::optional<size_t>)
+// ----------------------------------------------------------------------------
+// Pasteboard — read side: answer from the engine-side buffer.
+//   The buffer only ever carries text, so the plain-text reader is the one that
+//   sees data; the web-content and file readers honestly report "nothing" (a page
+//   asking for richer pasteboard content than a phone long-press provides).
+// ----------------------------------------------------------------------------
+void Pasteboard::read(PasteboardPlainText& reader, PlainTextURLReadingPolicy, std::optional<size_t>)
 {
+    // PasteboardPlainText is a plain data struct (String text), not a reader with a
+    // virtual readString() - assign the buffer straight in.
+    reader.text = apoClipboardText();
 }
 
 void Pasteboard::read(PasteboardWebContentReader&, WebContentReadingPolicy, std::optional<size_t>)
@@ -115,21 +178,25 @@ void Pasteboard::read(PasteboardFileReader&, std::optional<size_t>)
 }
 
 // ----------------------------------------------------------------------------
-// Pasteboard — write side (clipboard mutation; never reached during render)
+// Pasteboard — write side. text lands in the buffer (the shell shuttles it to UWP's
+//   DataPackage); the rest keep the no-op because there is no MIME-carrying
+//   clipboard behind them yet.
 // ----------------------------------------------------------------------------
 void Pasteboard::clear()
 {
-    // Apotheosis: Clipboard is not wired to the UWP host yet; keep this a no-op.
+    // Apotheosis: drop the engine-side buffer so a read after a programmatic clear
+    // (a page calling clipboardData.clearData()) is honest.
+    apoClipboardText() = String();
 }
 
 void Pasteboard::clear(const String&)
 {
-    // Apotheosis: graceful no-op until the UWP Clipboard backend is added.
+    apoClipboardText() = String();
 }
 
 void Pasteboard::writeString(const String&, const String&)
 {
-    // Apotheosis: graceful no-op until the UWP Clipboard backend is added.
+    // No type tag in the buffer; the plain-text slot is the only one there is.
 }
 
 void Pasteboard::write(const Color&)
@@ -172,20 +239,49 @@ void Pasteboard::writeMarkup(const String&)
     // Apotheosis: graceful no-op until the UWP Clipboard backend is added.
 }
 
-void Pasteboard::writePlainText(const String&, SmartReplaceOption)
+void Pasteboard::writePlainText(const String& text, SmartReplaceOption)
 {
-    // Apotheosis: graceful no-op until the UWP Clipboard backend is added.
+    // Apotheosis: the one write that actually carries data. Editor::performCutOrCopy
+    // lands here for both copy and cut, and DOM clipboardData.setText() routes
+    // through it too.
+    apoClipboardText() = text;
 }
 
 // PLATFORM(WIN)-only layering-violation writers (FIXME in header).
 void Pasteboard::writeImage(Element&, const URL&, const String&)
 {
-    // Apotheosis: graceful no-op until the UWP Clipboard backend is added.
 }
 
-void Pasteboard::writeSelection(const std::optional<SimpleRange>&, bool, LocalFrame&, ShouldSerializeSelectedTextForDataTransfer)
+void Pasteboard::writeSelection(const std::optional<SimpleRange>& range, bool, LocalFrame&, ShouldSerializeSelectedTextForDataTransfer)
 {
-    // Apotheosis: graceful no-op until the UWP Clipboard backend is added.
+    // Apotheosis: serialise the selected text ourselves (PasteboardWin.cpp, which
+    // would do this, is dropped) so "copy" on a real selection carries the text the
+    // user actually selected instead of nothing.
+    if (!range)
+        return;
+    apoClipboardText() = plainText(*range);
+}
+// ----------------------------------------------------------------------------
+// Pasteboard::documentFragment — PLATFORM(WIN) layering violation. Its only
+//   definition lives in the dropped platform/win/PasteboardWin.cpp (Win32
+//   GetClipboardData/CF_UNICODETEXT), which is why the linker never asked for it:
+//   the whole editing chain was stubbed out below, so nothing called it.
+//   Now that Editor::pasteWithPasteboard drives a real paste, this has to exist.
+//
+//   The engine-side buffer carries text only, so this is the plain-text branch of
+//   the original (fragmentFromCFHTML for HTML is unreachable - there is no
+//   CF_HTML in the buffer). createFragmentFromText() is the shared markup helper,
+//   already compiled into WebCore.lib.
+// ----------------------------------------------------------------------------
+RefPtr<DocumentFragment> Pasteboard::documentFragment(LocalFrame& frame, const SimpleRange& context, bool allowPlainText, bool& chosePlainText)
+{
+    chosePlainText = false;
+    const String& text = apoClipboardText();
+    if (!allowPlainText || text.isEmpty())
+        return nullptr;
+    chosePlainText = true;
+    UNUSED_PARAM(frame);
+    return createFragmentFromText(context, text);
 }
 
 // ----------------------------------------------------------------------------
@@ -201,14 +297,39 @@ ULONG STDMETHODCALLTYPE WCDataObject::Release()
 }
 
 // ----------------------------------------------------------------------------
-// Editor — paste / platform font (EditorWin.cpp dropped). Pure no-ops on Win
-//   (EditorWin's platform*Font are already empty); paste mutates the document
-//   from clipboard contents, which the render path never initiates.
+// Editor — paste / platform font.
+//
+// pasteWithPasteboard: verbatim port of editing/win/EditorWin.cpp:41 (that file is
+//   dropped from PlatformWinUWP.cmake, so it had to be stubbed - and the stub left
+//   the whole paste path dead). The shared machinery it calls
+//   (Pasteboard::documentFragment above, Editor::shouldInsertFragment,
+//   Editor::pasteAsFragment, Editor::quoteFragmentForPasting,
+//   Editor::canSmartReplaceWithPasteboard) is all compiled into WebCore.lib; only
+//   the two platform files were missing.
+//   The Win32 E_NOTIMPL / canSmartReplaceWithPasteboard specifics are gone because
+//   there is no IDataObject here: our Pasteboard IS the backend, so
+//   canSmartReplaceWithPasteboard reports false (Pasteboard::canSmartReplace()).
+//
+// platform*Font stay empty, matching EditorWin.
+//
+// selectedRange() is private to Editor (EditorWin.cpp calls it from inside the
+// class). The public equivalent is the selection's first range, which is exactly
+// what selectedRange() reduces to - so use that here from outside the class.
 // ----------------------------------------------------------------------------
-void Editor::pasteWithPasteboard(Pasteboard*, OptionSet<PasteOption>)
+void Editor::pasteWithPasteboard(Pasteboard* pasteboard, OptionSet<PasteOption> options)
 {
-    // Apotheosis: paste is unavailable until the UWP Clipboard backend is
-    // connected; leave the document unchanged instead of crashing.
+    auto range = document().selection().selection().firstRange();
+    if (!range)
+        return;
+
+    bool chosePlainText;
+    auto fragment = pasteboard->documentFragment(*document().frame(), *range, options.contains(PasteOption::AllowPlainText), chosePlainText);
+
+    if (fragment && options.contains(PasteOption::AsQuotation))
+        quoteFragmentForPasting(*fragment);
+
+    if (fragment && shouldInsertFragment(*fragment, *range, EditorInsertAction::Pasted))
+        pasteAsFragment(fragment.releaseNonNull(), canSmartReplaceWithPasteboard(*pasteboard), chosePlainText, options.contains(PasteOption::IgnoreMailBlockquote) ? MailBlockquoteHandling::IgnoreBlockquote : MailBlockquoteHandling::RespectBlockquote);
 }
 
 void Editor::platformCopyFont()
@@ -220,3 +341,39 @@ void Editor::platformPasteFont()
 }
 
 } // namespace WebCore
+
+// ----------------------------------------------------------------------------
+// C-linkage accessors for the driver's clipboard C ABI (WebCoreClipboardGetText /
+// SetText). The driver's clipboard functions live inside its extern "C" block, so a
+// C++ namespace declaration there does not resolve the way it looks; these are the
+// safe seam - plain extern "C" with C-compatible signatures, defined here where C++
+// is normal.
+//
+// apoClipboardRead copies up to cap bytes of UTF-8 into out and returns the byte
+// length, or -1 when the buffer is empty. apoClipboardWrite replaces the buffer from
+// utf8/len (len < 0 = NUL-terminated).
+// ----------------------------------------------------------------------------
+extern "C" int apoClipboardRead(char* out, int cap)
+{
+    const String& text = WebCore::apoClipboardTextForStub();
+    if (text.isEmpty())
+        return -1;
+    auto utf8 = text.utf8();
+    if (!out || cap <= 0 || static_cast<int>(utf8.length()) >= cap)
+        return -2;
+    std::memcpy(out, utf8.data(), utf8.length());
+    out[utf8.length()] = '\0';
+    return static_cast<int>(utf8.length());
+}
+
+extern "C" void apoClipboardWrite(const char* utf8, int len)
+{
+    if (!utf8)
+        return;
+    if (len < 0)
+        WebCore::apoSetClipboardTextForStub(String::fromUTF8(utf8));
+    else
+        WebCore::apoSetClipboardTextForStub(String::fromUTF8(std::span<const char>(utf8, static_cast<size_t>(len))));
+}
+
+

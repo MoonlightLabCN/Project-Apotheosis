@@ -262,6 +262,27 @@ int WebCoreDragAt(int phase, int x, int y, uint8_t* outBuf);
 #define WEBCORE_LONGPRESS_DRAG_WIDGET_ONLY 4   // do nothing unless (x,y) is a canvas / touch-action:none
 int WebCoreLongPressAt(int x, int y, int holdMs, int flags, uint8_t* outBuf);
 
+// ---- Clipboard (Apotheosis 2026-10-08) --------------------------------------
+// The engine's copy/paste chain was a hard no-op (platform/win/PasteboardWin.cpp
+// and WCDataObject.cpp are dropped: OLE IDataObject is unavailable under
+// WINAPI_FAMILY_APP). The WebCore editing chain itself works - execCommand('copy')
+// reaches Editor::performCutOrCopy - it just had nowhere to go. The stubs now talk
+// to an engine-thread clipboard buffer; the shell shuttles it in/out through these
+// calls because UWP's DataPackage is UI-thread-only. The engine never blocks.
+//
+//   copy:    WebCoreCopySelection()  -> engine writes the buffer
+//            shell: WebCoreClipboardGetText() -> DataPackage::SetText
+//            paste:  shell: DataPackage::GetView -> text
+//                    -> WebCoreClipboardSetText(text)
+//                    -> WebCorePaste()
+// WebCoreClipboardGetText returns the byte length written, or -1 when empty.
+int WebCoreCopySelection(void);
+int WebCoreCutSelection(void);
+int WebCorePaste(void);
+int WebCoreSelectAll(void);
+int WebCoreClipboardGetText(char* outUtf8, int cap);
+int WebCoreClipboardSetText(const char* utf8);
+
 // Apotheosis (pinch on map widgets, 2026-09-06): `notches` ctrl+wheel clicks at (x,y), positive =
 // wheel up = zoom in, one notch = 120 px of delta and one wheel tick (what a real mouse wheel
 // sends). A pinch that starts over a map must become this instead of WebCoreSetPageScale: page zoom

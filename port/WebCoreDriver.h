@@ -283,6 +283,42 @@ int WebCoreDragAt(int phase, int x, int y, uint8_t* outRGBA);
 #define WEBCORE_LONGPRESS_DRAG_WIDGET_ONLY 4   // do nothing unless (x,y) is a canvas / touch-action:none
 int WebCoreLongPressAt(int x, int y, int holdMs, int flags, uint8_t* outRGBA);
 
+// ---- Clipboard (Apotheosis 2026-10-08) --------------------------------------
+// The engine's own copy/paste path used to be a hard no-op (stubs-pasteboard.cpp):
+// platform/win/PasteboardWin.cpp and WCDataObject.cpp are dropped from
+// PlatformWinUWP.cmake (OLE IDataObject is unavailable under WINAPI_FAMILY_APP), so
+// every Pasteboard::write*/read* was an empty stub. The WebCore editing chain itself
+// IS compiled and works - execCommand('copy') reaches Editor::performCutOrCopy,
+// paste reaches Editor::paste - it just had nowhere to go.
+//
+// This adds the "somewhere": an ENGINE-THREAD-LOCAL U8 clipboard buffer that the
+// stubs now talk to. The real system clipboard lives behind UWP's DataPackage,
+// which only the UI thread may touch, so the shell shuttles the buffer in and out
+// through these two calls (from its own thread, before/after it uses DataPackage).
+// The engine never blocks and never waits on the UI thread.
+//
+//   copy:    WebCoreCopySelection()  -> engine writes the buffer
+//            shell: WebCoreClipboardGetText() -> DataPackage::SetText
+//            paste:  shell: DataPackage::GetView -> text
+//                    -> WebCoreClipboardSetText(text)
+//                    -> WebCorePaste()
+//
+// WebCoreCopySelection / WebCorePaste / WebCoreSelectAll drive the live document
+// (Editor::performCutOrCopy / Editor::paste / FrameSelection::selectAllOnDocument);
+// the clipboard buffer itself is drained/filled by the Get/Set pair. Returns 0 on
+// success, negative on the usual driver error codes (no session, busy, ...).
+int WebCoreCopySelection(void);
+int WebCoreCutSelection(void);
+int WebCorePaste(void);
+int WebCoreSelectAll(void);
+
+// Engine-thread clipboard buffer accessors (UTF-8). Both are engine-thread only:
+// the shell reaches them through the C ABI the harness already serializes onto the
+// single engine thread. WebCoreClipboardGetText returns the byte length written, or
+// -1 when the buffer is empty; WebCoreClipboardSetText replaces the buffer.
+int WebCoreClipboardGetText(char* outUtf8, int cap);
+int WebCoreClipboardSetText(const char* utf8);
+
 // Apotheosis (pinch on map widgets, 2026-09-06): `notches` ctrl+wheel clicks at (x,y), positive =
 // wheel up = zoom in, one notch = 120 px of delta and one wheel tick (what a real mouse wheel
 // sends). A pinch that starts over a map must become this instead of WebCoreSetPageScale: page zoom
