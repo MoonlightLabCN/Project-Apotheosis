@@ -29,13 +29,13 @@ namespace WebCorePort {
 
 using namespace WebCore;
 
-RefPtr<PopupMenu> PortChromeClient::createPopupMenu(PopupMenuClient&) const
-{
-    return nullptr;
-}
-
 RefPtr<SearchPopupMenu> PortChromeClient::createSearchPopupMenu(PopupMenuClient&) const
 {
+    // Apotheosis (0.2.5.15): still null - the <datalist> suggestion list is the
+    // remaining gap (see docs/FEATURE-GAPS-2026-10-08.md §1). Unlike <select>
+    // there is no page-visible "nothing happened" breakage here: the input still
+    // takes typed text, it just never offers the list. Leave it refused rather
+    // than half-wired.
     return nullptr;
 }
 
@@ -69,6 +69,21 @@ void PortChromeClient::updateTextIndicator(RefPtr<TextIndicator>&&) const
 void PortChromeClient::runOpenPanel(LocalFrame&, FileChooser& chooser)
 {
     WebCorePort::enqueueFileChooser(chooser);
+}
+
+// Apotheosis (0.2.5.15): <select>. Was `return nullptr`, which meant a tap on a
+// dropdown opened nothing at all - and after the showPopup() null-guard landed
+// (HTMLSelectElement.cpp) it stopped crashing but still did nothing. WebCore's
+// contract is that this returns a PopupMenu it can then call show() on, so the
+// bridge both queues the request and hands back the object (queueSelectPopup).
+// The shell answers over the same async request/response path runOpenPanel uses
+// (UIRequestSelect), with the same staleness rules: a reply that arrives after a
+// navigation is dropped, and PopupMenuClient is weak-observing, so a dead element
+// cannot be touched either way.
+RefPtr<PopupMenu> PortChromeClient::createPopupMenu(PopupMenuClient& client) const
+{
+    uint64_t id = 0;
+    return WebCorePort::queueSelectPopup(client, id);
 }
 
 // window.alert(). Queued as a shell notification; JS continues immediately rather

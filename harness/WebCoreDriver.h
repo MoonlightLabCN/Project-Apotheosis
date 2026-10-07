@@ -517,6 +517,8 @@ int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len);
 // ⚠ 路径必须是引擎进程读得到的:UWP 下即 app 自己的目录,所以 shell 要先把选中的文件
 //   复制进 LocalState 再交给引擎。
 void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
+// Apotheosis (0.2.5.15): answer a <select> popup. listIndex < 0 = cancelled.
+void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex);
 
 // 回答 confirm() 对话框。ok!=0=确定(脚本以 true 继续),0=取消。引擎 park 期间可从 UI 线程
 // 调;过期 id(对话框已超时)是 no-op。返回 1=答案被接收。

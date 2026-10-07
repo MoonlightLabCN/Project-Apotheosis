@@ -281,6 +281,14 @@ namespace Harness {
         // thread, so neither ever blocks the engine.
         void ClipboardPushToSystem();
         void ClipboardPullFromSystem();
+        // Apotheosis (0.2.5.15): <select> popup (UIRequestSelect). Same async request/response
+        // shape as the file chooser: the engine queues, the shell shows, the shell answers with
+        // WebCoreCompleteSelectPopup(id, index).
+        void ShowSelectPopup(unsigned long long id, const std::string& payload);
+        void AnswerSelectPopup(int listIndex);   // -1 = cancelled
+        void OnSelectPopupScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnSelectPopupCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnSelectPopupSelectionChanged(Platform::Object^ sender, Windows::UI::Xaml::Controls::SelectionChangedEventArgs^ e);
         // 把内容区显示坐标(DIP)映回引擎像素空间(直呈现下表面被拉伸+设备分辨率缩放),修点击/焦点偏移。
         void MapTapToEngine(double dipX, double dipY, int& outPx, int& outPy);
         // 把位图像素 (px,py) 的点击转发到引擎活会话(WebCoreClickAt),完成后同步地址栏/历史/链接表。
@@ -626,6 +634,11 @@ namespace Harness {
         // Apotheosis (2026-09-03 崩溃修复): 见 HookGpuPanelForStartup。2s 等待真实面板尺寸的兜底定时器,
         //   与上面 6s 的 m_startupNavTimer 是两层不同的保险(这层等尺寸,那层等"有没有任何触发源")。
         Windows::UI::Xaml::DispatcherTimer^ m_gpuSizeWaitTimer;
+        // Apotheosis (0.2.5.15): the <select> popup that is up (0 = none). Held so a
+        // SelectionChanged the shell itself raises while filling the list does not count as the
+        // user's answer, and so a second request cannot open a second card.
+        unsigned long long m_selectPopupId { 0 };
+        bool m_selectPopupFilling { false };   // suppressing SelectionChanged during fill
         bool m_gpuSizeHandlerWired { false };   // GpuPanel->SizeChanged 是否已经挂过(避免 HookGpuPanelForStartup 重入重复订阅)
         // Apotheosis (landscape/rotation, 0.1.9.41): engine px per panel DIP. Pinned once, in
         //   EnableGpu() (or on the first software measurement), so that the short side of the

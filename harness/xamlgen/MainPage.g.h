@@ -139,6 +139,10 @@ namespace Harness
         private: ::Windows::UI::Xaml::Controls::TextBlock^ CtxSelectAllLabel;
         private: ::Windows::UI::Xaml::Controls::Button^ CtxShareBtn;
         private: ::Windows::UI::Xaml::Controls::TextBlock^ CtxShareLabel;
+        // Apotheosis (0.2.5.15): <select> 下拉弹窗(UIRequestSelect)。
+        private: ::Windows::UI::Xaml::Controls::Grid^ SelectPopup;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ SelectPopupTitle;
+        private: ::Windows::UI::Xaml::Controls::ListView^ SelectPopupList;
         // Apotheosis (2026-09-27): window.prompt() 自绘输入框(MessageDialog 无输入能力)。
         private: ::Windows::UI::Xaml::Controls::Grid^ PromptBox;
         private: ::Windows::UI::Xaml::Controls::Border^ PromptBoxCard;

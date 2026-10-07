@@ -1149,6 +1149,37 @@
             </Border>
         </Grid>
 
+        <!-- ===== <select> 下拉弹窗(Apotheosis 0.2.5.15)=====
+             PortChromeClient::createPopupMenu 原先直接 return nullptr,点了什么都不弹;
+             后来补了 showPopup 判空只是不崩,功能仍然没有。现在走 PortUIBridge 的
+             UIRequestSelect(编号 5,当初就给它留的):壳弹这张卡,选项来自 payload
+             ("<选中行>\t<行文本>..." ,行首 \x01 表示 separator/label/disabled),
+             用户选一行后回 WebCoreCompleteSelectPopup(id, index)。
+             与 FileChooser 完全同一条异步 request/response 路,staleness 规则也在
+             驱动侧(会话代数 + PopupMenuClient 是弱可观察的),所以页面导航掉了之后
+             迟到的答案不会碰到死元素。
+             列表用 ListView(虚拟化),超过卡片高度可滚;选中行初始高亮。 -->
+        <Grid x:Name="SelectPopup" Grid.Row="0" Grid.RowSpan="2" Background="#99000000" Visibility="Collapsed"
+              Tapped="OnSelectPopupScrimTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+            <Border Width="300" Height="380" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{StaticResource Surface}" BorderBrush="{StaticResource Sep}" BorderThickness="1" CornerRadius="12"
+                    Tapped="OnSelectPopupCardTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock x:Name="SelectPopupTitle" Text="" Foreground="{StaticResource TxtHi}" FontSize="15"
+                               Margin="16,14,16,10" TextWrapping="Wrap" MaxHeight="44"/>
+                    <ListView x:Name="SelectPopupList" Grid.Row="1" Margin="8,0,8,8"
+                              Background="Transparent" BorderThickness="0"
+                              Foreground="{StaticResource TxtHi}" FontSize="15"
+                              SelectionChanged="OnSelectPopupSelectionChanged"
+                              IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                </Grid>
+            </Border>
+        </Grid>
+
         <!-- ===== 首启 OOBE:欢迎 + 选语言(English / 中文)。仅全新安装(settings.ini 无 lang)弹出。 ===== -->
         <Grid x:Name="OobePanel" Grid.Row="0" Grid.RowSpan="2" Background="{StaticResource PageBg}" Visibility="Collapsed">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="36,0" MaxWidth="380">

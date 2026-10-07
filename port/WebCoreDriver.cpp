@@ -6450,6 +6450,13 @@ void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, in
     WebCorePort::completeFileChooser(id, paths);
 }
 
+// Apotheosis (0.2.5.15): <select> 的答案回传。listIndex < 0 = 用户取消。
+// 与 WebCoreCompleteFileChooser 同一套约定:引擎线程调用,幂等,陈旧 id 静默丢弃。
+void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex)
+{
+    WebCorePort::completeSelectPopup(id, listIndex);
+}
+
 // ---- 复制/剪切/粘贴/全选(Apotheosis 2026-10-08)------------------------------
 // 引擎侧剪贴板缓冲访问器,定义在 stubs-pasteboard.cpp（那里 C++ 命名空间是正常的）。
 // 本文件的 C ABI 全在下面的 extern "C" 块里,所以这里只能用 C 链接的原型声明；

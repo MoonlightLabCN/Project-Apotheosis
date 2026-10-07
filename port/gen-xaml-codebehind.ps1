@@ -28,6 +28,9 @@ $EVMAP = @{
   'LostFocus'             = @('::Windows::UI::Xaml::UIElement',              '::Windows::UI::Xaml::RoutedEventHandler')
   'Loaded'                = @('::Windows::UI::Xaml::FrameworkElement',       '::Windows::UI::Xaml::RoutedEventHandler')
   'ValueChanged'          = @('::Windows::UI::Xaml::Controls::Slider',       '::Windows::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventHandler')
+  # Apotheosis (0.2.5.15): <select> popup's ListView - the user picking a row is the answer, so
+  #   this one is load-bearing (unlike the purely decorative events above).
+  'SelectionChanged'      = @('::Windows::UI::Xaml::Controls::ListView',     '::Windows::UI::Xaml::Controls::SelectionChangedEventHandler')
 }
 $EVENTS = $EVMAP.Keys
 

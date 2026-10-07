@@ -51,6 +51,8 @@
 
 namespace WebCore {
 class FileChooser;
+class PopupMenu;
+class PopupMenuClient;
 }
 
 namespace WebCorePort {
@@ -61,8 +63,10 @@ enum UIRequestKind : int {
     UIRequestAlert       = 2,
     UIRequestConfirm     = 3,
     UIRequestPrompt      = 4,
+    // Apotheosis (0.2.5.15): <select> was reserved and is now live.
+    UIRequestSelect      = 5,
     // Reserved; keep the numbering stable, the shell switches on it:
-    //   5 = select popup, 6 = color, 7 = date.
+    //   6 = color, 7 = date.
     UIRequestNewWindow   = 8,
 };
 
@@ -75,6 +79,21 @@ void bumpSessionGeneration();
 // object outlives the round trip (the element behind it may not — that is what
 // FileChooser::invalidate() is for).
 uint64_t enqueueFileChooser(WebCore::FileChooser&);
+
+// Apotheosis (0.2.5.15): <select>. Queue a dropdown request; returns its id. The
+// Ref on PopupMenuClient is what keeps the client object alive across the round
+// trip (the interface itself is AbstractRefCountedAndCanMakeWeakPtr). Payload:
+// "<selectedIndex>\t<text>\t<text>...", where a row prefixed with \x01 is a
+// separator / label / disabled entry and the rest is plain item text.
+uint64_t enqueueSelectPopup(WebCore::PopupMenuClient&);
+
+// The one call PortChromeClient::createPopupMenu makes: queue the request AND hand
+// back the PopupMenu WebCore will call show()/hide() on (see PortSelectPopupMenu).
+RefPtr<WebCore::PopupMenu> queueSelectPopup(WebCore::PopupMenuClient& client, uint64_t& outId);
+
+// Apotheosis (0.2.5.15): the page closed its own popup, or the element went away.
+// Drops the request and tells the client it is hidden. No-op for an unknown id.
+void cancelSelectPopup(uint64_t id);
 
 // Queue a message the shell should show and then forget about. No reply.
 uint64_t enqueueAlert(const std::string& utf8Message);
@@ -137,6 +156,12 @@ void setUIRequestWakeCallback(UIRequestWakeCallback callback, void* context);
 // Deliver a file-chooser result. An empty list means the user cancelled. Silently
 // ignores unknown/stale ids — a cancelled navigation legitimately produces them.
 void completeFileChooser(uint64_t id, const std::vector<std::string>& utf8Paths);
+
+// Apotheosis (0.2.5.15): deliver a <select> answer. listIndex < 0 = the user
+// cancelled (or the popup was torn down); >= 0 = the row they picked, which is
+// handed to PopupMenuClient::valueChanged on the engine thread. Unknown/stale ids
+// are silently ignored for the same reason as the file chooser.
+void completeSelectPopup(uint64_t id, int listIndex);
 
 // Drop everything still pending (session teardown). Cancels each outstanding
 // FileChooser so the page's <input type=file> does not sit "waiting" forever.

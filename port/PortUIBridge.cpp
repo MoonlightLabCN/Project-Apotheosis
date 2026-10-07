@@ -5,7 +5,11 @@
 #include "PortUIBridge.h"
 
 #include <WebCore/FileChooser.h>
+#include <WebCore/PopupMenu.h>
+#include <WebCore/PopupMenuClient.h>
+#include <WebCore/LocalFrameView.h>
 #include <wtf/MainThread.h>
+#include <wtf/RefPtr.h>
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
 #include <wtf/Vector.h>
@@ -29,6 +33,11 @@ struct PendingRequest {
     uint64_t generation { 0 };
     std::string payload;
     RefPtr<FileChooser> chooser;   // FileChooser only
+    // Apotheosis (0.2.5.15): the <select> counterpart. WeakPtr-capable by the
+    // interface itself (AbstractRefCountedAndCanMakeWeakPtr), so this stays valid
+    // to test: RefPtr keeps the object alive, and the element dying does not
+    // dangle - it just means a later valueChanged() is a no-op.
+    RefPtr<PopupMenuClient> client;
 };
 
 // The one parked dialog. Only one can exist at a time: the engine thread is
@@ -189,6 +198,180 @@ uint64_t enqueueAlert(const std::string& utf8Message)
     queued().push_back(WTF::move(request));
     return id;
 }
+
+// Apotheosis (0.2.5.15): <select> popup. The shell shows a native list and answers
+// with an index, which comes back through completeSelectPopup() ->
+// PopupMenuClient::valueChanged(). Every rule the file chooser already follows
+// applies: bounded queue, generation check, and the client is a weak pointer
+// (AbstractRefCountedAndCanMakeWeakPtr), so a dead <select> cannot be touched.
+//
+// Payload: "<selectedIndex>\t<text>\t<text>\t..." (UTF-8, NUL-free). A phone
+// dropdown is tens of entries at most; the cap is a layout guard on the shell
+// card, not a semantic limit, and it is applied here so a pathological
+// <select> with ten thousand options cannot blow up the payload buffer.
+uint64_t enqueueSelectPopup(PopupMenuClient& client)
+{
+    ASSERT(isMainThread());
+
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+
+    while (queued().size() >= maxQueued) {
+        queued().pop_front();   // no chooser-style cancel: the shell never saw it
+    }
+
+    PendingRequest request;
+    request.id = g_nextRequestId++;
+    request.kind = UIRequestSelect;
+    request.generation = g_sessionGeneration;
+    request.client = &client;
+
+    const int count = client.listSize();
+    int selected = -1;
+    // The shell needs to know which row starts highlighted. listSize() is the
+    // number of ROWS (options + optgroup labels + separators), not options.
+    for (int i = 0; i < count; ++i) {
+        if (client.itemIsSelected(i)) { selected = i; break; }
+    }
+
+    constexpr int kMaxRows = 200;   // enough for any real dropdown on a phone
+    request.payload = std::to_string(selected < 0 ? -1 : selected);
+    for (int i = 0; i < count && i < kMaxRows; ++i) {
+        // appendTabSeparated takes a WTF String; the row tags are ASCII literals and
+        // the text arrives as one already, so this is the only conversion point.
+        const String text = client.itemText(i);
+        if (client.itemIsSeparator(i))
+            appendTabSeparated(request.payload, String::fromUTF8("\x01separator"));
+        else if (client.itemIsLabel(i))
+            appendTabSeparated(request.payload, makeString("\x01label\t"_s, text));
+        else if (client.itemIsEnabled(i))
+            appendTabSeparated(request.payload, text);
+        else
+            appendTabSeparated(request.payload, makeString("\x01disabled\t"_s, text));
+    }
+
+    uint64_t id = request.id;
+    queued().push_back(WTF::move(request));
+    return id;
+}
+
+// -1 = the user cancelled; >= 0 = the row they picked.
+void completeSelectPopup(uint64_t id, int listIndex)
+{
+    ASSERT(isMainThread());
+
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+
+    for (auto it = inFlight().begin(); it != inFlight().end(); ++it) {
+        if (it->id != id)
+            continue;
+
+        PendingRequest request = WTF::move(*it);
+        inFlight().erase(it);
+
+        RefPtr client = request.client;
+        if (!client)
+            return;
+        // The user answered, but for a page that is no longer here.
+        if (request.generation != g_sessionGeneration) {
+            client->popupDidHide();
+            return;
+        }
+        if (listIndex < 0) {
+            client->popupDidHide();
+            return;
+        }
+
+        client->valueChanged(static_cast<unsigned>(listIndex));
+        return;
+    }
+    // Unknown id: a reply for a request already dropped as stale. Not an error.
+}
+
+// Apotheosis (0.2.5.15): the PopupMenu WebCore gets back from createPopupMenu().
+// It exists because HTMLSelectElement::showPopup() calls show() on whatever the
+// ChromeClient returned, so the old "return nullptr" meant a tap on a dropdown
+// could do nothing at all. The real request is enqueued by queueSelectPopup()
+// below (called from createPopupMenu) and the shell shows the card; the user's
+// answer arrives later via completeSelectPopup().
+//
+// m_client is a WeakPtr on purpose: queueSelectPopup also parks a Ref in the
+// pending request, so the client is alive for as long as the request is queued.
+class PortSelectPopupMenu final : public PopupMenu {
+public:
+    explicit PortSelectPopupMenu(uint64_t requestId)
+        : m_requestId(requestId)
+    {
+    }
+
+private:
+    void show(const IntRect&, LocalFrameView&, int) final
+    {
+        // Deliberately empty: the request was already queued by queueSelectPopup()
+        // and the shell is showing the card. Enqueueing here instead would
+        // double-queue every popup.
+    }
+
+    void hide() final
+    {
+        // The page closed its own popup. Ask the bridge to cancel it so the card
+        // does not outlive the element that opened it.
+        WebCorePort::cancelSelectPopup(m_requestId);
+    }
+
+    void updateFromElement() final
+    {
+    }
+
+    void disconnectClient() final
+    {
+        m_requestId = 0;
+    }
+
+    uint64_t m_requestId;
+};
+
+// The single entry PortChromeClient::createPopupMenu calls: queue the request and
+// hand WebCore the object it will call show() on. Returns nullptr only if the
+// queue is closed.
+RefPtr<PopupMenu> queueSelectPopup(PopupMenuClient& client, uint64_t& outId)
+{
+    outId = enqueueSelectPopup(client);
+    return adoptRef(*new PortSelectPopupMenu(outId));
+}
+
+// The page closed its own popup (or the element went away). Drop the request so
+// the shell's card does not outlive it, and tell the client it is hidden.
+void cancelSelectPopup(uint64_t id)
+{
+    if (!id)
+        return;
+    ASSERT(isMainThread());
+
+    std::lock_guard<std::mutex> lock(g_queueMutex);
+
+    auto hideAndDrop = [](PendingRequest& request) {
+        if (RefPtr client = request.client)
+            client->popupDidHide();
+        return true;
+    };
+
+    for (auto it = queued().begin(); it != queued().end(); ++it) {
+        if (it->id != id)
+            continue;
+        hideAndDrop(*it);
+        queued().erase(it);
+        return;
+    }
+    for (auto it = inFlight().begin(); it != inFlight().end(); ++it) {
+        if (it->id != id)
+            continue;
+        hideAndDrop(*it);
+        inFlight().erase(it);
+        return;
+    }
+    // Unknown id: already answered. Not an error.
+}
+
 
 uint64_t enqueueNewWindow(const std::string& utf8Url)
 {
@@ -392,11 +575,17 @@ void clearPendingUIRequests()
     for (auto& request : queued()) {
         if (RefPtr chooser = request.chooser)
             chooser->cancelFileChoosing();
+        // Apotheosis (0.2.5.15): a <select> whose popup the shell never showed
+        // must be told it is over, or the element stays in its open state.
+        if (RefPtr client = request.client)
+            client->popupDidHide();
     }
     queued().clear();
     for (auto& request : inFlight()) {
         if (RefPtr chooser = request.chooser)
             chooser->cancelFileChoosing();
+        if (RefPtr client = request.client)
+            client->popupDidHide();
     }
     inFlight().clear();
     // A dialog that timed out while the page went away: nobody is coming to

@@ -6213,6 +6213,136 @@ void MainPage::OnCtxShare(Platform::Object^, RoutedEventArgs^)
     DoShare();
 }
 
+// ============================================================================
+// Apotheosis (0.2.5.15): <select> popup.
+//
+// PortChromeClient::createPopupMenu() used to return nullptr, so tapping a
+// dropdown did nothing at all; the showPopup() null-guard stopped it crashing but
+// still did nothing. The engine now queues the request instead (UIRequestSelect,
+// kind 5, reserved for exactly this from the beginning) and the shell answers it
+// over the same async bridge the file chooser uses.
+//
+// Payload from the driver: "<selected row>\t<row text>\t<row text>..." where a row
+// starting with \x01 is "\x01separator" / "\x01label\t<text>" / "\x01disabled\t<text>"
+// and anything else is plain enabled item text.
+// ============================================================================
+
+void MainPage::ShowSelectPopup(unsigned long long id, const std::string& payload)
+{
+    if (!SelectPopup || !SelectPopupList) return;
+    // Split on tabs. The first field is the row to start highlighted.
+    std::vector<std::string> fields;
+    {
+        size_t start = 0;
+        while (true) {
+            size_t tab = payload.find('\t', start);
+            if (tab == std::string::npos) { fields.push_back(payload.substr(start)); break; }
+            fields.push_back(payload.substr(start, tab - start));
+            start = tab + 1;
+        }
+    }
+    if (fields.empty())
+        return;
+    int selectedRow = -1;
+    try { selectedRow = std::stoi(fields[0]); } catch (...) { selectedRow = -1; }
+
+    m_selectPopupId = id;
+    m_selectPopupFilling = true;   // our own writes must not look like an answer
+    SelectPopupList->Items->Clear();
+    for (size_t i = 1; i < fields.size(); ++i) {
+        const std::string& row = fields[i];
+        String^ text = nullptr;
+        bool enabled = true;
+        if (row.rfind("\x01separator", 0) == 0) {
+            // A separator, not an item: render a rule so the grouping survives.
+            auto sep = ref new Windows::UI::Xaml::Controls::ListBoxItem();
+            sep->Content = ref new String(L"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014");
+            sep->IsEnabled = false;
+            sep->Tag = nullptr;   // matches the disabled-row contract above
+            SelectPopupList->Items->Append(sep);
+            continue;
+        }
+        if (row.rfind("\x01label\t", 0) == 0) {
+            text = ref new String(Utf8ToWide(row.substr(7)).c_str());
+            enabled = false;
+        } else if (row.rfind("\x01disabled\t", 0) == 0) {
+            text = ref new String(Utf8ToWide(row.substr(10)).c_str());
+            enabled = false;
+        } else {
+            text = ref new String(Utf8ToWide(row).c_str());
+        }
+        auto item = ref new Windows::UI::Xaml::Controls::ListBoxItem();
+        item->Content = text;
+        // A disabled row selects-look-alike but is inert: the answer is dropped in
+        // OnSelectPopupSelectionChanged (Tag==nullptr) rather than sent to the engine.
+        // Tag is Object^; a String is the simplest honest marker (and C++/CX has no
+        // implicit Boolean boxing).
+        item->Tag = enabled ? ref new String(L"enabled") : nullptr;
+        if (selectedRow == static_cast<int>(i) - 1)
+            SelectPopupList->SelectedItem = item;
+        SelectPopupList->Items->Append(item);
+    }
+    if (SelectPopupTitle)
+        SelectPopupTitle->Text = L8(L"选择一项", L"Choose an option");
+    m_selectPopupFilling = false;
+    SelectPopup->Visibility = Windows::UI::Xaml::Visibility::Visible;
+    WriteStage((std::string("select popup rows=") + std::to_string(fields.size() - 1)
+                + " selected=" + std::to_string(selectedRow)).c_str());
+}
+
+// The user picked a row (or tapped away: index -1). Answered on the engine thread
+// like every other C ABI, so the page is updated there.
+void MainPage::AnswerSelectPopup(int listIndex)
+{
+    unsigned long long id = m_selectPopupId;
+    if (SelectPopup) SelectPopup->Visibility = Windows::UI::Xaml::Visibility::Collapsed;
+    if (SelectPopupList) SelectPopupList->SelectedItem = nullptr;
+    m_selectPopupId = 0;
+    if (id == 0)
+        return;                      // already answered / nothing up
+    WebEngine::instance().post([id, listIndex]() {
+        try { WebCoreCompleteSelectPopup(id, listIndex); } catch (...) {}
+    });
+    WriteStage((std::string("select answer idx=") + std::to_string(listIndex)).c_str());
+}
+
+void MainPage::OnSelectPopupScrimTap(Platform::Object^, Windows::UI::Xaml::Input::TappedRoutedEventArgs^)
+{
+    AnswerSelectPopup(-1);   // tapping outside = cancel
+}
+
+void MainPage::OnSelectPopupCardTap(Platform::Object^, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e)
+{
+    e->Handled = true;       // the card itself is not "outside"
+}
+
+void MainPage::OnSelectPopupSelectionChanged(Platform::Object^, Windows::UI::Xaml::Controls::SelectionChangedEventArgs^ e)
+{
+    if (m_selectPopupFilling || m_selectPopupId == 0)
+        return;
+    auto list = SelectPopupList;
+    if (!list)
+        return;
+    auto item = dynamic_cast<Windows::UI::Xaml::Controls::ListBoxItem^>(list->SelectedItem);
+    if (!item)
+        return;
+    // The row's index in the list IS the engine's listIndex (the driver sends rows
+    // in engine order, and every row - separator, label, disabled, item - gets one
+    // entry here), so the index maps straight across.
+    int index = -1;
+    for (unsigned i = 0; i < list->Items->Size; ++i) {
+        if (list->Items->GetAt(i) == static_cast<Platform::Object^>(item)) { index = static_cast<int>(i); break; }
+    }
+    if (index < 0)
+        return;
+    // Disabled rows keep Tag==nullptr (see ShowSelectPopup): they cannot be chosen.
+    if (item->Tag == nullptr) {
+        list->SelectedItem = nullptr;
+        return;
+    }
+    AnswerSelectPopup(index);
+}
+
 // Engine buffer -> UWP DataPackage. Runs on the engine thread up to the read; the DataPackage
 // write itself is marshalled to the UI thread (Clipboard::SetContent is UI-thread-only), and
 // because the hop is async the engine is never asked to wait for it.
@@ -6833,6 +6963,8 @@ void MainPage::OnEngineUIRequest(int kind, unsigned long long id, const std::str
         ShowFileChooser(id, payload);
     else if (kind == 2)
         ShowScriptAlert(payload);
+    else if (kind == 5)
+        ShowSelectPopup(id, payload);   // Apotheosis (0.2.5.15): <select>
     else if (kind == 8)
         OpenUrlInNewTab(payload);
 }

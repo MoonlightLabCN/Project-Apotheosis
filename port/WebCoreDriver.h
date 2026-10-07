@@ -540,6 +540,13 @@ unsigned WebCoreGetFrameHash();                       // pixel hash of the last 
 //       No reply expected: the shell owns the tab model. Note the new tab has no
 //       opener — see PortChromeClient.h for why this port cannot hand JS a live
 //       WindowProxy for a second, simultaneously-running Page.
+//   5 = <select> popup (Apotheosis 0.2.5.15). payload =
+//       "<selected row>\t<row text>\t<row text>...", where a row starting with \x01
+//       is "<x01>separator" / "<x01>label\t<text>" / "<x01>disabled\t<text>" and
+//       anything else is plain enabled item text. The shell MUST eventually answer
+//       with WebCoreCompleteSelectPopup(id, index), where index < 0 means the user
+//       cancelled. Rows are capped at 200 by the driver (a layout guard on the
+//       shell card, not a semantic limit).
 int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
 
 // UI-thread twin of WebCoreTakeUIRequest, used by the confirm/prompt wake path
@@ -553,6 +560,11 @@ int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len);
 // The paths must be readable by the engine process: on UWP that means files the
 // app itself owns, so the shell copies picked files into LocalState first.
 void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
+
+// Apotheosis (0.2.5.15): answer a <select> popup. listIndex < 0 = the user
+// cancelled; >= 0 = the row they picked, handed to PopupMenuClient::valueChanged()
+// on the engine thread. Engine thread only; a stale id is dropped.
+void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex);
 
 // Answer a confirm() dialog. ok != 0 = OK (script continues with true), 0 =
 // Cancel. May be called from the UI thread while the engine is parked; a stale id
