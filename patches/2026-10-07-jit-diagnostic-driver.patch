@@ -1,0 +1,160 @@
+diff --git a/port/WebCoreDriver.cpp b/port/WebCoreDriver.cpp
+index 55125e8..d69f46e 100644
+--- a/port/WebCoreDriver.cpp
++++ b/port/WebCoreDriver.cpp
+@@ -518,6 +518,10 @@ static bool g_apoJitEnabled = true;   // Apotheosis: JIT toggle mirror, default
+ // both with the runtime switch on and off). So the port keeps JIT off unless someone explicitly
+ // flips this to false and validates the baseline JIT on the device.
+ static bool g_apoJitDisabledByDefault = true;
++// Apotheosis: explicit, cold-start-only diagnostic opt-in from LocalState/jitdiag.txt.
++// 0 = shipping policy, 1 = JIT thunks without baseline, 2 = JIT with baseline.
++static int g_jitDiagnosticMode = 0;
++static bool g_jitDiagnosticOptionsPinned = false;
+ // Apotheosis: set once the first Page/VM has been created (any of the session-building C ABI
+ // entry points). While clear, WebCoreSetJitEnabled() may turn the JIT on or off freely; once set,
+ // only "off" is accepted - see the comment on WebCoreSetJitEnabled(). A late true would arm
+@@ -555,14 +559,22 @@ bool ensureWebCoreInitialized()
+         // Apotheosis: 不要动池大小 - 0.2.4.4/0.2.5.x 上 JSC_jitMemoryReservationSize=8MB 反而
+         //   与池建不起来相关(0.2.4.1 默认 32MB 时池正常)。恢复默认,只留门禁+诊断。
+         wkWinUWPSetJitPoolDiagSink(&jitPoolSinkWrite);   // Apotheosis: JSC 建池决策写进 stage.txt
++        if (g_jitDiagnosticMode) {
++            _putenv_s("JSC_useJIT", "true");
++            _putenv_s("JSC_useBaselineJIT", g_jitDiagnosticMode == 2 ? "true" : "false");
++        }
+         JSC::initialize();                       // JSC heap/threading/options
+         // Apotheosis: pin the shipping JIT state here, before anything else can create a JSC::VM.
+         // jitEnabledByDefault() returns true on this port, so without this the process starts with
+         // Options::useJIT()==true until the harness's (racy) WebCoreSetJitEnabled post lands; a VM
+         // built in that window arms the unproven ARM32 baseline JIT. startsJitDisabled() below is the
+         // same decision the runtime switch applies.
+-        JSC::Options::useJIT() = !startsJitDisabled();
++        JSC::Options::useJIT() = g_jitDiagnosticMode
++            ? JSC::ExecutableAllocator::singleton().isValid() : !startsJitDisabled();
++        if (g_jitDiagnosticMode)
++            JSC::Options::useBaselineJIT() = g_jitDiagnosticMode == 2;
+         JSC::Options::notifyOptionsChanged();
++        g_jitDiagnosticOptionsPinned = true;
+         // Apotheosis: jitPoolDiagLine moved to session create (stage path not set yet here)
+         WTF::initializeMainThread();             // pins this thread as the WebKit main thread + RunLoop::main
+         WebCore::initializeCommonAtomStrings();  // interns "auto", "all", content types, etc.
+@@ -1173,6 +1185,38 @@ static DWORD crashLogModuleSize(HMODULE module)
+     return nt->OptionalHeader.SizeOfImage;
+ }
+ 
++// Apotheosis: bounded raw evidence, avoiding heap allocation in the VEH. Only read
++// committed readable memory, stopping at page/region boundaries and never touching guards.
++static void crashLogBytes(FILE* fp, const char* label, uintptr_t address, size_t bytes)
++{
++    std::fprintf(fp, "memory %s address=0x%08lx requested=%u\n", label,
++        static_cast<unsigned long>(address), static_cast<unsigned>(bytes));
++    std::fflush(fp);
++    while (bytes) {
++        MEMORY_BASIC_INFORMATION mbi = { };
++        if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi)))
++            break;
++        DWORD protection = mbi.Protect & 0xff;
++        bool readable = protection == PAGE_READONLY || protection == PAGE_READWRITE
++            || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READ
++            || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
++        if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || !readable)
++            break;
++        uintptr_t end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
++        if (end <= address)
++            break;
++        size_t n = std::min<size_t>(16, std::min<size_t>(bytes, end - address));
++        std::fprintf(fp, "bytes 0x%08lx:", static_cast<unsigned long>(address));
++        auto* data = reinterpret_cast<const volatile unsigned char*>(address);
++        for (size_t i = 0; i < n; ++i)
++            std::fprintf(fp, " %02x", static_cast<unsigned>(data[i]));
++        std::fputc('\n', fp);
++        address += n;
++        bytes -= n;
++    }
++    std::fflush(fp);
++}
++
+ // The one writer. `ctxOrNull` is the vectored handler's CONTEXT when we have one.
+ static void crashLogWrite(const char* reason, const CONTEXT* ctxOrNull)
+ {
+@@ -1210,6 +1254,34 @@ static void crashLogWrite(const char* reason, const CONTEXT* ctxOrNull)
+             static_cast<unsigned long>(ctxOrNull->Pc), static_cast<unsigned long>(ctxOrNull->Lr),
+             static_cast<unsigned long>(ctxOrNull->Sp), static_cast<unsigned long>(ctxOrNull->R0),
+             static_cast<unsigned long>(ctxOrNull->R1));
++        std::fprintf(fp, "registers: r2=%08lx r3=%08lx r4=%08lx r5=%08lx r6=%08lx r7=%08lx r8=%08lx r9=%08lx r10=%08lx r11=%08lx r12=%08lx cpsr=%08lx\n",
++            ctxOrNull->R2, ctxOrNull->R3, ctxOrNull->R4, ctxOrNull->R5, ctxOrNull->R6,
++            ctxOrNull->R7, ctxOrNull->R8, ctxOrNull->R9, ctxOrNull->R10, ctxOrNull->R11,
++            ctxOrNull->R12, ctxOrNull->Cpsr);
++#if ENABLE(JIT)
++        std::fprintf(fp, "jit-context: mode=%d useJIT=%d baseline=%d pool=[%p,%p)\n",
++            g_jitDiagnosticMode, JSC::Options::useJIT() ? 1 : 0,
++            JSC::Options::useBaselineJIT() ? 1 : 0,
++            g_jscConfig.startExecutableMemory, g_jscConfig.endExecutableMemory);
++#endif
++        std::fflush(fp);
++        if (g_jitDiagnosticMode) {
++            uintptr_t lr = ctxOrNull->Lr & ~static_cast<uintptr_t>(1);
++            crashLogBytes(fp, "lr-code", lr >= 256 ? lr - 256 : lr, 384);
++            crashLogBytes(fp, "exception-stack", ctxOrNull->Sp, 512);
++            crashLogBytes(fp, "r0-data", ctxOrNull->R0, 128);
++            crashLogBytes(fp, "r2-data", ctxOrNull->R2, 256);
++            crashLogBytes(fp, "r3-data", ctxOrNull->R3, 128);
++            crashLogBytes(fp, "r4-data", ctxOrNull->R4, 128);
++            crashLogBytes(fp, "r5-data", ctxOrNull->R5, 128);
++            crashLogBytes(fp, "r6-data", ctxOrNull->R6, 128);
++            crashLogBytes(fp, "r7-frame", ctxOrNull->R7, 128);
++            crashLogBytes(fp, "r8-property-cache", ctxOrNull->R8, 128);
++            crashLogBytes(fp, "r9-handler", ctxOrNull->R9, 128);
++            crashLogBytes(fp, "r10-metadata", ctxOrNull->R10, 128);
++            crashLogBytes(fp, "r11-data", ctxOrNull->R11, 128);
++            crashLogBytes(fp, "r12-data", ctxOrNull->R12, 128);
++        }
+     }
+ #else
+     (void)ctxOrNull;
+@@ -1497,6 +1569,11 @@ static void jitPoolDiagLine()
+         JSC::Options::useJIT() ? 1 : 0, g_jscConfig.vm.canUseJIT ? 1 : 0,
+         g_jscConfig.startExecutableMemory, g_jscConfig.endExecutableMemory,
+         probeStart);
++    if (g_jitDiagnosticMode) {
++        size_t used = std::strlen(buf);
++        std::snprintf(buf + used, sizeof(buf) - used, " diagnosticMode=%d baseline=%d pid=%lu",
++            g_jitDiagnosticMode, JSC::Options::useBaselineJIT() ? 1 : 0, GetCurrentProcessId());
++    }
+ #else
+     char buf[96];
+     std::snprintf(buf, sizeof buf, "jit-diag LLInt build (no JIT)");
+@@ -4311,6 +4388,19 @@ void WebCoreSetCrashLogPath(const char* path)
+         // Apotheosis (M4 load timeline): stage.txt lives in the same LocalState directory.
+         g_stagePath = (slash == std::string::npos) ? std::string("stage.txt")
+             : crashPath.substr(0, slash + 1) + "stage.txt";
++        // Apotheosis: read exactly once before engine initialization; runtime settings cannot
++        // change this diagnostic configuration. Removing jitdiag.txt restores shipping policy.
++        if (!g_jitDiagnosticOptionsPinned) {
++            std::string diagnosticPath = (slash == std::string::npos) ? std::string("jitdiag.txt")
++                : crashPath.substr(0, slash + 1) + "jitdiag.txt";
++            FILE* diagnostic = nullptr;
++            if (fopen_s(&diagnostic, diagnosticPath.c_str(), "rb") == 0 && diagnostic) {
++                int mode = std::fgetc(diagnostic);
++                if (mode == '1' || mode == '2')
++                    g_jitDiagnosticMode = mode - '0';
++                std::fclose(diagnostic);
++            }
++        }
+         FILE* probe = nullptr;
+         if (fopen_s(&probe, g_consolePath.c_str(), "rb") == 0 && probe) {
+             g_consoleFileExisted = true;   // opt-in: console.txt already exists on disk
+@@ -6940,6 +7030,14 @@ void WebCoreSetSpeculativePrefetch(int enabled)
+ static void markJitSessionStarted() { g_jitRefuseAfterSession = true; }
+ void WebCoreSetJitEnabled(int enabled)
+ {
++#if ENABLE(JIT)
++    if (g_jitDiagnosticMode) {
++        ensureWebCoreInitialized();
++        g_apoJitEnabled = JSC::Options::useJIT();
++        jitStageNote("jit: cold-start diagnostic configuration pinned; UI setting ignored");
++        return;
++    }
++#endif
+     g_apoJitEnabled = (enabled != 0);
+ #if ENABLE(JIT)
+     // Apotheosis: 可执行池预留失败时 JSC 在 initialize 里已经把 useJIT 关掉并记了

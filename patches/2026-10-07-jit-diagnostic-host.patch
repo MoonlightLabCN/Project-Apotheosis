@@ -1,0 +1,33 @@
+diff --git a/harness/MainPage.xaml.cpp b/harness/MainPage.xaml.cpp
+index e740248..90146c2 100644
+--- a/harness/MainPage.xaml.cpp
++++ b/harness/MainPage.xaml.cpp
+@@ -147,13 +153,15 @@ static void SetupRuntimeEnv()
+         // 里 CreateFileW 那一项被编成了空函数指针,并用 SQLite 自己的 xSetSystemCall 补上了
+         // (port/PortSQLiteAppContainer.*);补不齐时引擎自动退回纯内存态,不会崩。
+         // 实际走了哪条路(持久 or 内存)看 WebCoreGetStorageDiag()。
++        // Apotheosis: profile setup initializes JSC; pin cold-start diagnostics before it.
++        WebCoreSetCrashLogPath((localDir + "\\crash.txt").c_str());
+         WebCoreSetProfilePath((localDir + "\\profile").c_str());
+ 
+         // Apotheosis: crash log. Always on (not opt-in like perf.txt): a crash with no
+         // WER dump — which is every fast-fail/trap termination on Windows 10 Mobile — is
+         // exactly the case we cannot reproduce on the build machine. The engine appends
+         // reason + stack frames to LocalState\crash.txt; pull it with WDP after a crash.
+-        WebCoreSetCrashLogPath((localDir + "\\crash.txt").c_str());
++        // Crash logging is armed above, before any engine initialization.
+ 
+         // Apotheosis (M4): per-phase timing. Device-side opt-in exactly like imedebug.txt —
+         // only when the tester dropped LocalState\perf.txt (via WDP, effective after restart)
+diff --git a/harness/Package.appxmanifest b/harness/Package.appxmanifest
+--- a/harness/Package.appxmanifest
++++ b/harness/Package.appxmanifest
+@@ -7,7 +7,7 @@
+ 
+   <Identity Name="EdgeHTMLReborn.Harness"
+             Publisher="CN=EdgeHTMLReborn"
+-            Version="0.2.5.11"
++            Version="0.2.5.14"
+             ProcessorArchitecture="arm" />
+ 
+   <mp:PhoneIdentity PhoneProductId="b3a9e5c2-1d4f-4a7b-9c8e-0f1a2b3c4d5e" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>

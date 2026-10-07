@@ -402,3 +402,7 @@ Grouped by area; the subject line is the reason in short form.
 
 This is the source artifact requested in
 [Issue #3](https://github.com/MoonlightLabCN/Project-Apotheosis/issues/3).
+
+## 2026-10-07 ARM32 PutByVal follow-up
+
+The isolated r9/DataIC register-conflict fix and this investigation's diagnostic increments are archived in [patches/README-JIT-2026-10-07.md](patches/README-JIT-2026-10-07.md). This follow-up has not been folded into the complete patch above. JSC compilation passed; repaired-device validation remains pending. See the [root-cause evidence](docs/JIT-ARM32-R9-ROOT-CAUSE-2026-10-07.md).

@@ -1,0 +1,21 @@
+diff --git a/Source/JavaScriptCore/jit/BaselineJITRegisters.h b/Source/JavaScriptCore/jit/BaselineJITRegisters.h
+index 8545b8bd4f..c6e249c9cf 100644
+--- a/Source/JavaScriptCore/jit/BaselineJITRegisters.h
++++ b/Source/JavaScriptCore/jit/BaselineJITRegisters.h
+@@ -260,7 +260,16 @@ namespace PutByVal {
+     static constexpr JSValueRegs propertyJSR { preferredArgumentJSR<SlowOperation, 1>() };
+     static constexpr JSValueRegs valueJSR { preferredArgumentJSR<SlowOperation, 2>() };
+     static constexpr GPRReg propertyCacheGPR { preferredArgumentGPR<SlowOperation, 3>() };
++#if defined(WK_WINUWP) && CPU(ARM_THUMB2)
++    // Apotheosis: the preferred eighth argument word is r9, also handlerGPR.
++    // DataIC dispatch overwrites it with InlineCacheHandler*, so the slow path
++    // otherwise writes ArrayProfile modes over the handler's call target (+12).
++    // Borrow r10 instead; both the caller and slow thunk already restore metadata.
++    static constexpr GPRReg profileGPR { GPRInfo::metadataTableRegister };
++    static_assert(noOverlap(baseJSR, propertyJSR, valueJSR, propertyCacheGPR, profileGPR, GPRInfo::handlerGPR), "DataIC dispatch must preserve every PutByVal argument");
++#else
+     static constexpr GPRReg profileGPR { preferredArgumentGPR<SlowOperation, 4>() };
++#endif
+ #if USE(JSVALUE64)
+     static constexpr auto scratchRegisters = allocatedScratchRegisters<GPRInfo, baseJSR, propertyJSR, valueJSR, propertyCacheGPR, profileGPR, GPRInfo::handlerGPR>;
+     static constexpr GPRReg scratch1GPR { scratchRegisters[0] };
