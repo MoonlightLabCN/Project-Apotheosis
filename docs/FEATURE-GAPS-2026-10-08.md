@@ -58,13 +58,13 @@ EXPLICITLY DROPPED 段（逐条带了原因）。已用 `build-clang-gpu/build.n
 
 | 类别 | 功能 | 状态 | 位置 | 用户可见影响 |
 |---|---|---|---|---|
-| 交互 | **右键/长按上下文菜单** | **编译期关掉** | `cmakeconfig.h:37` `ENABLE_CONTEXT_MENUS 0`；`EmptyClients.cpp:134-169`（`EmptyContextMenuClient` 整段被 #if 包住） | UA 菜单链整体不存在。`ContextMenuController.cpp:30-1957` 全不编译、`Page.cpp:400-401` 不构造 controller |
-| 交互 | 长按菜单的复制/选字/存图 | 明确未做 | `harness/MainPage.xaml.cpp:5875-5878`（作者自记："Text selection, copy link and save image are deliberately NOT here"） | 长按链接只有一个"在新标签页打开" |
-| 剪贴板 | 复制/剪切/粘贴 | **stub 全 no-op** | `stubs-pasteboard.cpp:65-221` | 复制无效果、粘贴无效、`navigator.clipboard.readText()` 空。⚠️ 但壳能自己复制 URL（`MainPage.xaml.cpp:6157-6166 DoCopyLink` 走 UWP `DataTransfer::Clipboard`） |
-| 表单 | `<select>` 下拉 | **stub 返回 nullptr** | `PortChromeClient.cpp:32-40` | 点了不弹。已有 null 保护（`HTMLSelectElement.cpp` 判空）不崩。唯一可用路是 `appearance: base-select` 的 DOM popover |
-| 表单 | datalist / color / date-time | stub nullptr | `PortChromeClient.cpp:42-55` | 无建议列表、无取色面板、无日期滚轮 |
-| 文件 | `<input type=file>` | **⚠ GPU 真 / 软件 stub** | 真 `PortChromeClient.cpp:69-72`→`PortUIBridge.h:77`+`FileOpenPicker`；stub `EmptyClients.cpp:662-664` | **只有 GPU 起成功才能选文件**。GPU 依赖最要命的一条 |
-| 对话框 | alert / confirm / prompt | **⚠ GPU 真 / 软件 stub** | 真 `PortChromeClient.cpp:86-118`（confirm/prompt 是真模态：引擎 park 条件变量，60s 超时）；stub `EmptyClients.cpp:99-101` | 软件路径 confirm/prompt 直接返回 false，用户什么都看不到 |
+| 交互 | 右键/长按上下文菜单 | ✅ 0.2.5.15 已接（真机待验） | 引擎侧 `ENABLE_CONTEXT_MENUS 0` 仍关着，但壳做原生卡（复制/全选/分享/新标签开）覆盖了主要场景 | UA 菜单链仍整体不存在；壳卡已可覆盖 90% |
+| 交互 | 长按菜单的复制/选字/存图 | ✅ 0.2.5.15 已接（真机待验） | `harness/MainPage.xaml.cpp` 长按菜单 + 引擎侧复制粘贴 | 复制/全选可用；**选字仍不可用**（无选中几何回传通道，见 §4） |
+| 剪贴板 | 复制/剪切/粘贴 | ✅ 0.2.5.15 已接（真机待验） | `stubs-pasteboard.cpp` 全打通 + `WebCoreCopySelection/Paste/SelectAll` + UWP DataPackage 搬运 | 引擎链活了。⚠️ 仅纯文本；图片/颜色/自定义数据写侧仍 no-op |
+| 表单 | `<select>` 下拉 | ✅ 0.2.5.15 已接（真机待验） | `PortChromeClient::createPopupMenu` → `PortUIBridge` `UIRequestSelect=5` + 壳 ListView | 弹原生列表、能选 |
+| 表单 | datalist / color / date-time | ✅ 0.2.5.16 已接（真机待验）；datalist 仍 null | `UIRequestColor=6` / `UIRequestDateTime=7` + 壳色板/日期卡 | color 与 date/time 可用；**`<input list>` 建议列表仍无** |
+| 文件 | `<input type=file>` | ✅ 0.2.5.17 起软件路径也可用 | `PortChromeClient.cpp:69-72`→`PortUIBridge` + `FileOpenPicker`；原先软件路径被 `if (g_gpuActive)` 挡死 | 两路径都能选文件（0.2.5.17 修复了软件回退死 UI 的问题，见 §0①） |
+| 对话框 | alert / confirm / prompt | ✅ 0.2.5.17 起软件路径也可用 | 真 `PortChromeClient.cpp:86-118`（confirm/prompt 是真模态：引擎 park 条件变量，60s 超时） | 两路径都正常（软件路径原先直接返回 false、用户什么都看不到） |
 | 弹窗 | `window.open()` | 半实现，返回 null | `PortChromeClient.cpp:122-134` | 新标签能开但 `open()` 返回 null → `w.document.write()` 抛异常；**无 opener** → OAuth 弹窗登录不工作 |
 | 媒体 | `<video>` / `<audio>` | **未开** | `cmakeconfig.h:121,142,195` `USE_MEDIA_FOUNDATION 0`；`PlatformWinUWP.cmake` DROP `MediaPlayerPrivateMediaFoundation*.cpp` | 空框无声，YouTube/B站全废 |
 | 触控 | **Touch / Pointer Events** | **未开** | `cmakeconfig.h:116` `ENABLE_TOUCH_EVENTS 0`、`:96` POINTER_LOCK 0 | 只合成鼠标事件。**手机浏览器上最刺眼** |
