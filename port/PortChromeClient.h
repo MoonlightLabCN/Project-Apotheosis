@@ -40,6 +40,35 @@ void consoleLogAppend(const char* levelStr, const char* sourceID, unsigned lineN
 // thread: the callback contract is "post to a queue, do not call back into the engine".
 void presentRequested();
 
+// Apotheosis (0.2.5.17, software-fallback fix): is the COMPOSITING path live?
+//
+// WHY THIS EXISTS: PortChromeClient used to be installed only when g_gpuActive was true, which
+// meant that on the software fallback (GPU failed to come up, or the user turned it off) the
+// whole page ran on WebCore's upstream EmptyChromeClient - and with it every picker and every
+// JS dialog silently died, because EmptyChromeClient's versions are all empty stubs. alert
+// showed nothing, confirm/prompt returned false instantly, <input type=file> did nothing, and
+// <select>/color/date popups could not open at all.
+//
+// Installing the client unconditionally fixes that, and it is safe because the two jobs it does
+// are separable:
+//   · the UI work (pickers, dialogs, file chooser) is entirely request/response through
+//     PortUIBridge - it never touches GL, EGL, ANGLE or TextureMapper;
+//   · the compositing work (attachRootGraphicsLayer / triggerRenderingUpdate /
+//     setNeedsOneShotDrawingSynchronization / scheduleRenderingUpdate) is the part that needs a
+//     live compositing path, and it is what this flag gates.
+//
+// So the client is always installed, and these hooks stay inert until the driver reports that
+// compositing actually came up. That keeps the software fallback's present behavior
+// byte-identical to what it was with EmptyChromeClient (no second, redundant present driver),
+// which is why it is safe to do on a path the 0.1.7.1 crash lesson made us protective of.
+// The flag is set by the driver: buildSession() reflects the current g_gpuActive, and
+// WebCoreGpuInit() upgrades a live software session the moment compositing succeeds.
+//
+// Engine thread only for the setter; the getter is called from the hooks, which are all
+// engine-thread too.
+void setCompositingPathActive(bool);
+bool compositingPathActive();
+
 class PortChromeClient final : public WebCore::ChromeClient {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(PortChromeClient);
 public:
@@ -234,8 +263,15 @@ private:
     // goes through here so the harness wake-up can never drift out of sync with m_needsPresent.
     // Engine thread in practice (WebCore calls all of these on it); presentRequested() itself is
     // thread-safe. Costs one atomic exchange on the first request after a composite, nothing after.
+    //
+    // Apotheosis (0.2.5.17): inert while the compositing path is not live. The client is now
+    // installed on the software fallback too (so pickers and dialogs work there), and without
+    // this the compositing hooks would add a second present driver to a path that has always been
+    // driven by the driver's own tick. See setCompositingPathActive() above.
     void requestPresent()
     {
+        if (!compositingPathActive())
+            return;
         m_needsPresent = true;
         presentRequested();
     }

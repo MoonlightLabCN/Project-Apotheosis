@@ -30,6 +30,22 @@ namespace WebCorePort {
 
 using namespace WebCore;
 
+// Apotheosis (0.2.5.17, software-fallback fix): see the long comment on
+// setCompositingPathActive() in PortChromeClient.h. Written only from the engine thread
+// (buildSession / WebCoreGpuInit), read from the compositing hooks which are also
+// engine-thread, so a plain bool is enough - no atomics, no lock.
+static bool g_compositingPathActive = false;
+
+void setCompositingPathActive(bool active)
+{
+    g_compositingPathActive = active;
+}
+
+bool compositingPathActive()
+{
+    return g_compositingPathActive;
+}
+
 RefPtr<SearchPopupMenu> PortChromeClient::createSearchPopupMenu(PopupMenuClient&) const
 {
     // Apotheosis (0.2.5.15): still null - the <datalist> suggestion list is the

@@ -3857,15 +3857,23 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     // see PortWebSocket.h.
     pageConfiguration.socketProvider = WebCorePort::PortSocketProvider::create();
 
-    // GPU 合成:仅当 GPU(GL 上下文 + TextureMapper)已初始化才用真 ChromeClient(PortChromeClient,
-    // 它在 attachRootGraphicsLayer 捕获根 GraphicsLayer)+ 下面开合成。GPU 未起时保持
-    // pageConfigurationWithEmptyClients 设的 EmptyChromeClient + 关合成 = 纯软件 cairo 路径(零回归)。
-    // ⚠ 0.1.7.1 真机闪退教训:无条件开合成但 M1 还没 GL/TextureMapper 后端,网络页一加载就在
-    //   合成更新/PlatformDisplay 路径 fail-fast(before-load 后进程消失、无 after-load、连 dump/WER 都没有)。
-    if (g_gpuActive) {
+    // GPU 合成:合成开关(下面 setAcceleratedCompositingEnabled / setForceCompositingMode 两行)
+    // 仍然严格 gate 在 g_gpuActive 上 —— GPU 未起时保持零合成,纯软件 cairo 路径不变。
+    //
+    // Apotheosis (0.2.5.17, 软件回退修复):ChromeClient 本身**不再**按 g_gpuActive 取舍。
+    // 原来这里 `if (g_gpuActive)` 装配 PortChromeClient,于是 GPU 起不来时整个页面跑上游
+    // EmptyChromeClient —— 而它的 alert/confirm/prompt/runOpenPanel/createPopupMenu/
+    // createColorChooser/createDateTimeChooser 全是空实现,于是软件回退路径上**文件选择、
+    // JS 对话框、select/color/date 弹窗统统静默失效**(FEATURE-GAPS §0① 记的结构性问题)。
+    // PortChromeClient 的 UI 工作全部走 PortUIBridge 异步请求,不碰 GL/EGL/ANGLE;需要真合成
+    // 的只有那几个合成钩子,已由 PortChromeClient::requestPresent() 经
+    // setCompositingPathActive(g_gpuActive) gate 掉 —— 软件路径的 present 行为与原先用
+    // EmptyChromeClient 时逐字节一致(仍是驱动自己的 tick 在驱动),所以零回归。
+    {
         auto chrome = WTF::makeUniqueRefWithoutRefCountedCheck<WebCorePort::PortChromeClient>();
         g_session->chrome = chrome.ptr();             // Page 持有 UniqueRef,裸指针随 Page 存活
         pageConfiguration.chromeClient = WTF::move(chrome);
+        WebCorePort::setCompositingPathActive(g_gpuActive);
     }
 
     DriverLoadState* loadPtr = &g_session->load;   // 稳定:g_session 在建会话期间不 reset
@@ -7311,6 +7319,12 @@ int WebCoreGpuInit(void* nativeWindow, int w, int h)
     g_gpuH = h;
     g_gpuPresentMode = (nativeWindow != nullptr);   // 有窗口表面 → 直呈现;否则离屏 readback
     g_gpuActive = true;
+    // Apotheosis (0.2.5.17): a session that was built on the software fallback already has a
+    // PortChromeClient (it is installed unconditionally now, for its pickers and dialogs), but
+    // that client's compositing hooks were inert. Arm them here so a GPU init that lands on a
+    // LIVE session starts presenting immediately instead of waiting for the next navigation.
+    // buildSession() also sets this, so a fresh session reflects g_gpuActive either way.
+    WebCorePort::setCompositingPathActive(true);
     return kOK;
 }
 

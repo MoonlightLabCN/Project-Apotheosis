@@ -6,18 +6,35 @@
 
 ## 0. 四个结构性前提（决定怎么看后面的表）
 
-**① `PortChromeClient` 只在 GPU 成功后才装上。** `port/WebCoreDriver.cpp:3864-3868`：
+**① `PortChromeClient` 原来只在 GPU 成功后才装上 —— 0.2.5.17 已修。**
+`port/WebCoreDriver.cpp` buildSession 原来是：
 ```cpp
-if (g_gpuActive) {
+if (g_gpuActive) {                      // ← 这一行把 UI 一起挡死了
     auto chrome = ...makeUniqueRefWithoutRefCountedCheck<WebCorePort::PortChromeClient>();
     pageConfiguration.chromeClient = WTF::move(chrome);
 }
 ```
-`g_gpuActive` 仅在 `WebCoreGpuInit()` 成功后置 true（初值 false @`:685`，置 true @`:7189`）。
+`g_gpuActive` 仅在 `WebCoreGpuInit()` 成功后置 true（初值 false，成功后置 true）。
 **GPU 起不来 → 整个页面跑在 WebCore 上游 `EmptyChromeClient` 上**，此时 alert/confirm/prompt/
 文件选择器全部变成纯空 stub（`EmptyClients.cpp:99-101`、`:662-664`）。harness 明确保留了这条
-软件回退路（`harness/MainPage.xaml.cpp:7989`"GpuInit 失败 → 同一次导航照旧走 Cairo 软件路径"）。
-→ **表里所有标"GPU 路径真实现"的功能，在软件回退路径上实际是死的。**
+软件回退路（`harness/MainPage.xaml.cpp`"GpuInit 失败 → 同一次导航照旧走 Cairo 软件路径"）。
+
+> **0.2.5.17 修复**：ChromeClient 改为**无条件装配**，把 gate 从"整个 client"下沉到"需要真合成
+> 的那几个钩子"（`PortChromeClient::requestPresent()` 经新的
+> `setCompositingPathActive(g_gpuActive)` 控制；`WebCoreGpuInit` 成功时也会置位，
+> 让已建好的软件会话立刻开始呈现）。
+> 之所以安全：PortChromeClient 的 UI 工作全走 PortUIBridge 异步请求，**不碰 GL/EGL/ANGLE**；
+> 而合成开关（`setAcceleratedCompositingEnabled` / `setForceCompositingMode`）本来就已经单独
+> gate 在 `g_gpuActive` 上，原来这层 chromeClient 门是多余的。
+> 逐项核对过与 `EmptyChromeClient` 的**合成侧**差异，全部等价：
+> `scheduleRenderingUpdate()` 上游默认就是 `false`（PortChromeClient 也返回 false）；
+> `attachRootGraphicsLayer` 只在开合成时才被调（软件路径收到 null 或不调）；
+> `triggerRenderingUpdate` / `setNeedsOneShotDrawingSynchronization` /
+> `didFinishLoadingImageForElement` 都收口在 `requestPresent()`，gate 后就是空操作。
+> `allowsAcceleratedCompositing()` / `allowedCompositingTriggers()` / `graphicsLayerFactory()` /
+> `isEmptyChromeClient()` 与上游默认**逐值相同**。→ 软件路径的 present 行为逐字节不变，
+> 这是在 0.1.7.1 闪退教训之后敢动这条路径的前提。
+> **待真机验证**：软件回退下 alert / confirm / prompt / 文件选择 / select / color / date 可用。
 
 **② `PortChromeClient` 直接继承 `ChromeClient`**（不是 `EmptyChromeClient` 子类），自己实现全部
 纯虚函数；真正还在用 `EmptyChromeClient` 默认实现的是软件/一次性渲染路径（`WebCoreRenderHtml`
@@ -142,13 +159,17 @@ look-up 预览用的，不是选择手柄）。WebCore 本身没有"选择手柄
 
 ## 4. 建议优先补的（按投入产出）
 
-1. **让软件回退路径也用 `PortChromeClient`**（`WebCoreDriver.cpp:3864` 那行 `if (g_gpuActive)`
-   是唯一门）。一行门同时救活：文件选择器 + JS 对话框（alert/confirm/prompt）。
-2. **`<select>` 下拉**：`PortUIBridge.h:65` 已预留 `UIRequestSelect=5`，壳做 XAML ListView 弹卡；
-   FileChooser 的 request/response + staleness 模式已经趟通，可照抄。
-3. **剪贴板写侧接 UWP `DataTransfer::Clipboard`**（壳 `DoCopyLink` 已证明可用），读侧同理；
-   再补 `WebCoreCopySelection`/`WebCorePaste`/`WebCoreSelectAll` C ABI（**两份
-   `WebCoreDriver.h` 必须同步**）。这是手机上最常用的操作。
+> 本节的 1–3 已于 2026-10-08 全部完成并提交（见 `docs/HANDOFF-2026-10-08.md`）；
+> 保留原文是为了记录"为什么当初是这些顺序"。
+
+1. ~~**让软件回退路径也用 `PortChromeClient`**~~ → **0.2.5.17 已完成**（gate 下沉到
+   合成钩子，见 §0①）。一行门同时救活：文件选择器 + JS 对话框（alert/confirm/prompt）。
+2. ~~**`<select>` 下拉**~~ → **0.2.5.15 已完成**（`UIRequestSelect=5`，壳做 XAML ListView 弹卡，
+   照 FileChooser 的 request/response + staleness 模式）。同轮还做了 `<input type=color>`
+    (kind 6) 与 `<input type=date/time>` (kind 7, 0.2.5.16)。
+3. ~~**剪贴板写侧接 UWP `DataTransfer::Clipboard`**~~ → **0.2.5.15 已完成**
+   （stubs-pasteboard.cpp 全打通 + `WebCoreCopySelection`/`WebCorePaste`/
+   `WebCoreSelectAll`，长按菜单出复制/全选/分享）。
 4. **真机验证 Service Worker 崩溃风险**（§1 那条 `RELEASE_ASSERT`）。
 5. **`DisplayRefreshMonitor` 给一个 60Hz 假 monitor**（现在 rAF 走一次性 Timer，帧率不稳），
    比接真 vsync 便宜得多。
