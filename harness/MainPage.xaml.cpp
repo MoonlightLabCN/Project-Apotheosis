@@ -3300,23 +3300,25 @@ void MainPage::ApplyPrefetchSetting()
 //   With the driver's refusal the harness reads the engine state back after the post settles.
 void MainPage::ApplyJitSetting()
 {
-    int en = m_jitEnabled ? 1 : 0;
-    WebEngine::instance().post([this, en]() {
-        try {
-            WebCoreSetJitEnabled(en);
-            // The driver owns the decision: on this port it refuses to arm the baseline JIT
-            // (unvalidated on ARM32) and logs a stage.txt line. Read the real state back so the
-            // switch and settings.ini stop claiming a JIT that is not running.
-            int real = WebCoreGetJitEnabled();
-            if (real != en) {
-                m_jitEnabled = (real != 0);
-                // UI thread only: the switch just mirrors memory; a settings-page reopen
-                // would do this too, but do it at once so the user sees the true state.
-                Dispatcher->RunAsync(CoreDispatcherPriority::Normal,
-                    ref new DispatchedHandler([this]() { if (SetJitSwitch) SetJitSwitch->IsOn = m_jitEnabled; }));
-            }
-        } catch (...) {}
-    });
+    // JIT mode is a cold-start policy. The engine reads LocalState/jitdiag.txt once
+    // before JSC::initialize(); changing the settings page must not pretend that a
+    // live VM can safely switch baseline tier-up underneath running JavaScript.
+    if (m_jitMode < 0) m_jitMode = 0; else if (m_jitMode > 2) m_jitMode = 2;
+    m_jitEnabled = m_jitMode != 0;
+    // jitdiag.txt is intentionally a cold-start file: WebCore reads it before
+    // JSC::initialize(). Persist the selected mode now; the current VM keeps its
+    // already-pinned policy until the app is fully restarted.
+    try {
+        std::wstring dir = LocalStateDir();
+        if (!dir.empty()) {
+            std::ofstream f(WideToUtf8(dir + L"\\jitdiag.txt"), std::ios::binary | std::ios::trunc);
+            if (f) f << m_jitMode << "\n";
+        }
+    } catch (...) { }
+    if (SetJitModeCombo)
+        SetJitModeCombo->SelectedIndex = m_jitMode;
+    if (SetJitSwitch)
+        SetJitSwitch->IsOn = m_jitEnabled;
 }
 
 // Apotheosis (0.2.6 性能诊断): 开关 = 引擎 perf.csv 计时 + 每次导航一行 browse-log.txt。
@@ -6795,7 +6797,8 @@ void MainPage::LoadSettings()
             else if (k == "ua") m_setUaDesktop = (atoi(v.c_str()) != 0);
             else if (k == "zoom") m_defaultZoom = atoi(v.c_str());
             else if (k == "gpudefault") m_gpuDefault = (atoi(v.c_str()) != 0);
-            else if (k == "jit") m_jitEnabled = (atoi(v.c_str()) != 0);
+            else if (k == "jit") { int mode = atoi(v.c_str()); m_jitMode = (mode >= 0 && mode <= 2) ? mode : (mode ? 1 : 0); m_jitEnabled = m_jitMode != 0; }
+            else if (k == "jitmode") { int mode = atoi(v.c_str()); if (mode >= 0 && mode <= 2) m_jitMode = mode; m_jitEnabled = m_jitMode != 0; }
             else if (k == "ua_custom") m_uaCustom = Utf8ToWide(v);
             else if (k == "updatecheck") m_updateAuto = (atoi(v.c_str()) != 0);
             else if (k == "prefetch") m_prefetch = atoi(v.c_str());
@@ -6826,7 +6829,8 @@ void MainPage::SaveSettings()
     s += "ua=" + std::to_string(m_setUaDesktop ? 1 : 0) + "\n";
     s += "zoom=" + std::to_string(m_defaultZoom) + "\n";
     s += "gpudefault=" + std::to_string(m_gpuDefault ? 1 : 0) + "\n";
-    s += "jit=" + std::to_string(m_jitEnabled ? 1 : 0) + "\n";
+    s += "jit=" + std::to_string(m_jitMode) + "\n";
+    s += "jitmode=" + std::to_string(m_jitMode) + "\n";
     s += "ua_custom=" + WideToUtf8(m_uaCustom) + "\n";
     s += "updatecheck=" + std::to_string(m_updateAuto ? 1 : 0) + "\n";
     s += "prefetch=" + std::to_string(m_prefetch) + "\n";
@@ -6854,6 +6858,7 @@ void MainPage::ShowSettings()
     if (SetZoomSlider) SetZoomSlider->Value = m_defaultZoom;
     if (SetZoomLabel) SetZoomLabel->Text = ref new String((std::to_wstring(m_defaultZoom) + L"%").c_str());
     if (SetGpuSwitch) SetGpuSwitch->IsOn = m_gpuDefault;
+    if (SetJitModeCombo) SetJitModeCombo->SelectedIndex = m_jitMode;
     if (SetJitSwitch) SetJitSwitch->IsOn = m_jitEnabled;
     if (SetUpdateSwitch) SetUpdateSwitch->IsOn = m_updateAuto;
     if (SetPrefetchCombo) SetPrefetchCombo->SelectedIndex = m_prefetch;
@@ -6910,7 +6915,9 @@ void MainPage::HideSettings()
     if (SetUaSwitch) m_setUaDesktop = SetUaSwitch->IsOn;
     if (SetZoomSlider) m_defaultZoom = (int)(SetZoomSlider->Value + 0.5);
     if (SetGpuSwitch) m_gpuDefault = SetGpuSwitch->IsOn;
-    if (SetJitSwitch) m_jitEnabled = SetJitSwitch->IsOn;
+    if (SetJitModeCombo && SetJitModeCombo->SelectedIndex >= 0) m_jitMode = SetJitModeCombo->SelectedIndex;
+    if (m_jitMode < 0) m_jitMode = 0; else if (m_jitMode > 2) m_jitMode = 2;
+    m_jitEnabled = m_jitMode != 0;
     if (SetUpdateSwitch) m_updateAuto = SetUpdateSwitch->IsOn;
     if (SetPrefetchCombo && SetPrefetchCombo->SelectedIndex >= 0) m_prefetch = SetPrefetchCombo->SelectedIndex;
     if (SetPageWidthCombo && SetPageWidthCombo->SelectedIndex >= 0) m_pageWidth = SetPageWidthCombo->SelectedIndex;

@@ -956,7 +956,13 @@
                     <!-- Apotheosis (JIT toggle): 实验性特性区。JIT 已内建于引擎(ENABLE_JIT=ON),
                          这里给运行期开关,与 GPU 一样可关回安全路径;settings.ini "jit",默认开。 -->
                     <TextBlock Text="EXPERIMENTAL" Style="{StaticResource SetSection}"/>
-                    <ToggleSwitch x:Name="SetJitSwitch" Header="JIT 编译加速(实验性)" Foreground="{StaticResource TxtHi}" Margin="0,0,0,2"/>
+                    <ComboBox x:Name="SetJitModeCombo" Header="JIT 模式(需重启生效)" HorizontalAlignment="Stretch">
+                         <ComboBoxItem Content="0 — 关闭 JIT / LLInt"/>
+                         <ComboBoxItem Content="1 — JIT thunk，关闭 Baseline(推荐)"/>
+                         <ComboBoxItem Content="2 — JIT + Baseline(实验性)"/>
+                     </ComboBox>
+                     <ToggleSwitch x:Name="SetJitSwitch" Header="JIT 编译加速(兼容旧设置)" Foreground="{StaticResource TxtHi}" Margin="0,0,0,2" Visibility="Collapsed"/>
+                     <TextBlock Text="0=纯 LLInt；1=JIT thunk 不做 Baseline；2=开启 Baseline tier-up。修改后完全退出并重启应用。" Style="{StaticResource SetHint}"/>
                     <TextBlock Text="把 JavaScript 编译成本机代码执行,网页脚本明显更快;已知个别站点会崩,遇崩溃关掉" Style="{StaticResource SetHint}"/>
 
                     <TextBlock Text="PRIVACY" Style="{StaticResource SetSection}" Foreground="{StaticResource Warm}"/>

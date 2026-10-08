@@ -74,6 +74,7 @@ namespace Harness
         private: ::Windows::UI::Xaml::Controls::Slider^ SetZoomSlider;
         private: ::Windows::UI::Xaml::Controls::ToggleSwitch^ SetGpuSwitch;
         private: ::Windows::UI::Xaml::Controls::ToggleSwitch^ SetJitSwitch;
+        private: ::Windows::UI::Xaml::Controls::ComboBox^ SetJitModeCombo;
         private: ::Windows::UI::Xaml::Controls::ComboBox^ SetClarityCombo;
         private: ::Windows::UI::Xaml::Controls::ToggleSwitch^ SetPerfLogSwitch;
         private: ::Windows::UI::Xaml::Controls::ToggleSwitch^ SetUpdateSwitch;

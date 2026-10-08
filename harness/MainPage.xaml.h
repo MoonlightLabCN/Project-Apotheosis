@@ -637,7 +637,8 @@ namespace Harness {
         bool m_gpuOn { false };       // GPU 合成是否已开(一次性;引擎侧 g_gpuActive 无 teardown,重启回软件)
         bool m_gpuPresent { false };  // GPU 直呈现模式(合成直接画到 GpuPanel,省 readback+blit)
         bool m_gpuDefault { true };   // 默认启用 GPU(设置可关;启动后首个网络页加载完自动开)
-        bool m_jitEnabled { false };   // Apotheosis: EXPERIMENTAL,默认关(0.2.5.6 真机 github.com 崩过);settings.ini jit
+        int m_jitMode { 1 };           // 0=off, 1=JIT thunk/no Baseline, 2=JIT+Baseline; cold-start jitdiag.txt
+        bool m_jitEnabled { true };    // compatibility mirror: m_jitMode != 0; legacy settings.ini jit
         bool m_perfLog { false };         // 性能诊断记录(每次导航写 browse-log.txt);settings.ini perflog    // EXPERIMENTAL JIT 开关,默认开(引擎基线);settings.ini jit
         bool m_gpuAutoTried { false };// 本次会话已自动尝试过开 GPU(不重复)
         // Apotheosis (M4): 首次网络导航被推迟到 GpuInit 之后时,URL 暂存在这里(空=没有待发导航)。
