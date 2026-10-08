@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $P = 'E:\Apotheosis\port'
 
 $srcs = @(
-  'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PortNetworkStorageSession','PortChromeClient','PortWebSocket','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle',
+  'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PortNetworkStorageSession','PortChromeClient','PortWebSocket','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle','PortAudioOutput','PortMediaAudio',
   'webcore-driver-stubs','stubs-crypto','stubs-pasteboard','stubs-network','stubs-ax','stubs-other','stubs-loader'
 )
 foreach ($s in $srcs) {
@@ -27,6 +27,11 @@ $libs = @(
   'jpeg.lib','libpng16.lib','libwebp.lib','libwebpdemux.lib','libsharpyuv.lib'
   'libxml2.lib','sqlite3.lib','z.lib','bz2.lib','brotlidec.lib','brotlicommon.lib'
   'icuuc.lib','icuin.lib','icudt.lib','WindowsApp.lib'
+  # Apotheosis (media-mf): the MF_MT_*/MFMediaType_*/MFVideoFormat_*/MFAudioFormat_* symbols
+  # are EXTERN_GUID *data* and live in mfuuid.lib; the MF entry points themselves come from
+  # WindowsApp.lib. Listing mfplat/mfreadwrite too costs nothing and makes a missing MF
+  # dependency fail here rather than in the harness link.
+  'mfuuid.lib','mfplat.lib','mfreadwrite.lib'
   # stubs-network.cpp 的 NetworkStateNotifier::updateStateWithoutNotifying 不再恒 true,
   # 改用 InternetGetConnectedState 查真实在线态(wininet 在 App partition,清单已带 internetClient)。
   'wininet.lib'

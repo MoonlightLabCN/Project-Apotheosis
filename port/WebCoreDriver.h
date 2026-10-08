@@ -609,6 +609,29 @@ int WebCoreFindString(const char* utf8, int matchCase, int wrap, uint8_t* outRGB
 int WebCoreFindNext(int forward, uint8_t* outRGBA);   // next/prev with last query (no re-mark); 1=hit, 0=none, neg=error
 int WebCoreFindClear(uint8_t* outRGBA);               // clear find highlight + selection
 
+// ---- media audio (media-mf) ----
+// Apotheosis: pull decoded audio for the harness's device worker. WebCore's WinUWP media
+// backend decodes <video>/<audio> audio into a bounded queue owned by the driver
+// (port/PortMediaAudio.cpp); the harness owns the actual device client, because obtaining
+// one in an App Container needs WinRT activation and that belongs to the C++/CX side.
+//
+// `out` receives up to `frames` interleaved float32 frames using the channel count from
+// WebCoreMediaAudioChannels(); whatever the queue cannot supply is zero-filled and
+// *underran is set to 1 (an underrun is normal at start and after a seek). Safe from any
+// thread and never blocks on the decode thread. Returns the frames actually available.
+int WebCoreMediaAudioTake(float* out, int frames, int* underran);
+
+// Format of the stream currently configured; 0/0 until the first stream is opened. The
+// harness builds (and rebuilds) its device client from these, so it must re-read them
+// when they change - two videos in a row need not share a sample rate.
+int WebCoreMediaAudioSampleRate(void);
+int WebCoreMediaAudioChannels(void);
+
+// One-line media summary for stage.txt: queue depth, PCM pushed/consumed/dropped, video
+// frames decoded/presented, the negotiated video subtypes and the last Media Foundation
+// failure. Always NUL-terminates (pass a buffer of at least 256 bytes). Any thread.
+void WebCoreMediaDiagnostics(char* out, int outBytes);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

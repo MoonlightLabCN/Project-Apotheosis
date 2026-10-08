@@ -7,6 +7,7 @@
 #include "JitProbe.h"
 #include "GpuInitGuard.h"   // Apotheosis: SEH 壳包 WebCoreGpuInit(老驱动初始化崩溃 → 错误码)
 #include "GpuProbe.h"
+#include "MediaAudio.h"     // Apotheosis (media-mf): 媒体音频设备(AudioGraph,UI 线程)
 
 #include <robuffer.h>
 #include <wrl.h>
@@ -5106,6 +5107,9 @@ void MainPage::StartLiveMode()
     Windows::Foundation::TimeSpan fb; fb.Duration = 2000000LL;   // 200ms
     m_fallbackTimer->Interval = fb;
     m_fallbackTimer->Start();
+    // Apotheosis (media-mf): 媒体音频设备随实时模式起停。EnsureStarted 只在引擎报告的流格式
+    // 变化时才真正建图(首帧/换视频),所以每帧调用也只是比较两个整数。UI 线程。
+    Harness::MediaAudio::EnsureStarted();
     // 交互/导航之后立刻出一帧,限流仍然生效。
     m_wakePending = true;
     ScheduleWakeComposite();
@@ -5115,6 +5119,8 @@ void MainPage::StopLiveMode()
     if (m_fallbackTimer) m_fallbackTimer->Stop();
     if (m_wakeTimer) m_wakeTimer->Stop();
     m_wakePending = false;
+    // Apotheosis (media-mf): 停实时模式 = 没有页面在跑了,音频设备一并停(下一会话会重建)。
+    Harness::MediaAudio::Stop();
 }
 
 // 引擎说"有东西要呈现"(UI 线程,PresentWakeThunk 转投而来)。只做限流 + 排帧,绝不碰引擎。
@@ -5122,6 +5128,10 @@ void MainPage::OnPresentWake()
 {
     m_fallbackStaticTicks = 0;   // 有活动 → 兜底 tick 回到快节奏(OnFallbackTick 里定档)
     m_wakePending = true;
+    // Apotheosis (media-mf): 这里是音频设备真正的挂点。StartLiveMode 只在会话开始时跑一次,
+    // 而媒体流的格式往往那时还没配置好(用户点播放才 load()),所以只在 StartLiveMode 里调
+    // EnsureStarted 会永远早退、永远没声音。每次唤醒调一次:格式没变就是两次整数比较 + 早退。
+    Harness::MediaAudio::EnsureStarted();
     ScheduleWakeComposite();
 }
 

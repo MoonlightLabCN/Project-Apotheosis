@@ -545,4 +545,18 @@ int WebCoreFindNext(int forward, uint8_t* outBuf);
 // 清除查找高亮/选区,重绘。返回 0 成功。
 int WebCoreFindClear(uint8_t* outBuf);
 
+// ---- 媒体音频 media-mf(Apotheosis 2026-10-09) ----
+// 引擎侧解码出的音频放在驱动自己的有界队列里(port/PortMediaAudio.cpp);设备客户端由壳持有 ——
+// App Container 里拿 IAudioClient 要走 WinRT 激活,那是 C++/CX 侧的事。
+// out 收 frames 帧交错 float32(声道数取 WebCoreMediaAudioChannels());队列不足的部分补零并把
+// *underran 置 1(起始与 seek 后的 underrun 是正常的)。任意线程可调,绝不阻塞解码线程。
+// 返回实际可用的帧数。
+int WebCoreMediaAudioTake(float* out, int frames, int* underran);
+// 当前配置流格式;首个流打开前为 0/0。壳据此建(并在变化时重建)设备客户端。
+int WebCoreMediaAudioSampleRate(void);
+int WebCoreMediaAudioChannels(void);
+// stage.txt 用的一行媒体摘要(队列深度、PCM 推入/消费/丢弃、视频解码/呈现帧数、协商到的视频子类型、
+// 最后一次 Media Foundation 失败)。总是 NUL 结尾(缓冲至少 256 字节)。任意线程可调。
+void WebCoreMediaDiagnostics(char* out, int outBytes);
+
 }

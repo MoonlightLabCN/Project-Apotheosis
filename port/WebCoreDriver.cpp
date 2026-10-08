@@ -179,6 +179,7 @@ unsigned wkWinUWPTexmapVisibleHoles();
 #include "PortChromeClient.h"            // WebCorePort::PortChromeClient(开合成,捕获根图层)
 #include "PortUIBridge.h"                // 0.1.9:异步 engine→shell UI 请求队列(文件选择/alert)
 #include "PortWebSocket.h"              // WebCorePort::PortSocketProvider(WebSocket,见该头文件)
+#include "PortMediaAudio.h"            // media-mf: 把音频 sink 装进 WebCore 的 WinUWP 媒体后端
 #include <WebCore/LayoutMilestone.h>     // Apotheosis (M4 load timeline): DidFirstVisuallyNonEmptyLayout
 #include <WebCore/Page.h>                // WebCore::Page
 #include <WebCore/Settings.h>            // Page::settings()
@@ -596,6 +597,11 @@ bool ensureWebCoreInitialized()
         // SQLite win32 VFS 里 CreateFileW 那一项是空函数指针(打开真实文件必崩,2026-07-03 真机
         // dump 的根因),这里用 SQLite 公开的 xSetSystemCall 把它补上。详见 PortSQLiteAppContainer.h。
         WebCorePort::installSQLiteAppContainerSyscalls();
+        // Apotheosis (media-mf): install the media audio sink before any page can create a
+        // <video>. WebCore's WinUWP backend pushes decoded PCM into it and the harness
+        // drains it through WebCoreMediaAudioTake(); with no sink installed video still
+        // plays and the audio path is simply inert. Idempotent.
+        WebCorePort::installMediaAudioSink();
         // Apotheosis: 预开进程级 cookie jar(持久 SQLite;路径由 harness 在引擎线程更早的 SetupRuntimeEnv
         // 里经 WebCoreSetCookieJarPath 显式注入,见 PortNetworkStorageSession.cpp)+ 设接受策略
         // OnlyFromMainDocumentDomain(各端口惯例,挡第三方子资源 Set-Cookie)。打不开由 CookieJarDB::open()
@@ -2182,6 +2188,16 @@ static void perfWriteStageTimeline(const PerfRow& r)
         r.offTimer < 0 ? 0.0 : r.offTimer, r.offDispatch < 0 ? 0.0 : r.offDispatch,
         r.offDispatchN < 0 ? 0 : r.offDispatchN, r.offOther < 0 ? 0.0 : r.offOther,
         r.styleN, r.layoutN, r.timerN, kLoadTimerAlignMs);
+    // Apotheosis (media-mf): one "media ..." line per navigation. Written unconditionally,
+    // including when nothing played, because "readers=0" is itself the answer to "did the
+    // media backend even get asked?" - which is exactly the failure this line exists to
+    // make visible (a <video> that never loads looks identical to one that was never
+    // reachable).
+    {
+        char media[256];
+        WebCorePort::appendMediaDiagnostics(media, sizeof media);
+        std::fprintf(fp, "%s\n", media);
+    }
     std::fclose(fp);
 }
 

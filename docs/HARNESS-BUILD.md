@@ -194,6 +194,7 @@ Use `tools\Deploy-Robust.ps1` when the phone's Wi-Fi connection is unstable. GPU
 | `App.g.hpp` or `MainPage.g.hpp` missing | Official codegen did not finish, or generated files were cleaned | Run `build-harness.ps1 -Clean`; do not manually copy generated files. |
 | Linker cannot find `WebCoreDriver-gpu.lib` | Driver was not relinked or the expected GPU build output is absent | Run `port\link-driver-gpu.ps1`, then rebuild harness. |
 | Appx lacks a runtime DLL | A new native dependency is missing from `Harness.vcxproj` deployment items | Add its DLL with `DeploymentContent=true`, then rebuild and inspect the appx. |
+| `MSB6001: "CL.exe" 的命令行开关无效 ... 字典中的关键字:"NO_PROXY" 所添加的关键字:"no_proxy"` | The process environment holds the *same* variable twice with different casing (e.g. `HTTP_PROXY` **and** `http_proxy`, `NO_PROXY` **and** `no_proxy`). MSBuild's `CL` task copies the environment into a case-**sensitive** dictionary and throws on the second spelling. Neither PowerShell's env provider nor `cmd`'s `set VAR=` can remove just one casing, because both look variables up case-insensitively. | Launch the build with an explicitly de-duplicated environment instead of inheriting one: build a `ProcessStartInfo`, `Environment.Clear()`, then add one spelling per name (case-insensitive `Sort-Object -Unique` over `[System.Environment]::GetEnvironmentVariables().Keys`) before starting `build-harness.ps1`. |
 
 ## Maintenance Rules
 
