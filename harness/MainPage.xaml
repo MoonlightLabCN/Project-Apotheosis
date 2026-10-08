@@ -1180,6 +1180,71 @@
             </Border>
         </Grid>
 
+        <!-- ===== <input type=color> 取色卡(Apotheosis 0.2.5.16)=====
+             PortChromeClient::createColorChooser 原先 return nullptr。这里给一个 Win10 风的
+             网格色板 + 当前色预览,点色块即选、确定回 WebCoreCompleteColorChooser(id, css)。
+             "取消"(或点遮罩)回 null css —— 那等价 didEndChooser,页面保留原值。 -->
+        <Grid x:Name="ColorChooser" Grid.Row="0" Grid.RowSpan="2" Background="#99000000" Visibility="Collapsed"
+              Tapped="OnColorChooserScrimTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+            <Border Width="300" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{StaticResource Surface}" BorderBrush="{StaticResource Sep}" BorderThickness="1" CornerRadius="12"
+                    Tapped="OnColorChooserCardTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+                <StackPanel Margin="16">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                        <Border x:Name="ColorChooserPreview" Width="40" Height="40" CornerRadius="6" Margin="0,0,12,0"
+                                Background="#FF000000" BorderBrush="{StaticResource Sep}" BorderThickness="1"/>
+                        <TextBlock x:Name="ColorChooserLabel" Text="选择颜色" Foreground="{StaticResource TxtHi}" FontSize="15"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <!-- 6x7 色板:常用色 + 常见灰阶。每格 Tag 存 "#rrggbb",点它就改预览。 -->
+                    <Border Background="{StaticResource Inset}" CornerRadius="8" Padding="8" Margin="0,0,0,14">
+                        <Grid x:Name="ColorChooserGrid"/>
+                    </Border>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="ColorChooserOkBtn" Content="确定" Click="OnColorChooserOk"
+                                Background="{StaticResource Accent}" BorderThickness="0" Foreground="{StaticResource PageBg}"
+                                Padding="16,6" Margin="0,0,8,0" IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                        <Button x:Name="ColorChooserCancelBtn" Content="取消" Click="OnColorChooserCancel"
+                                Background="Transparent" BorderBrush="{StaticResource Sep}" BorderThickness="1"
+                                Foreground="{StaticResource TxtLo}" Padding="16,6" IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- ===== <input type=date/time> 选择卡(Apotheosis 0.2.5.16)=====
+             createDateTimeChooser 原先 return nullptr。这里按 payload 的 input type 切出
+             日期/时间/两者三块;值由壳**原样**回传(WebCore 会校验),所以这里不做本地化
+             重排 —— 文档里明确记了这条:"do not reformat"。
+             取消(或遮罩)回 null value = didEndChooser。 -->
+        <Grid x:Name="DateTimeChooser" Grid.Row="0" Grid.RowSpan="2" Background="#99000000" Visibility="Collapsed"
+              Tapped="OnDateTimeChooserScrimTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+            <Border Width="300" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{StaticResource Surface}" BorderBrush="{StaticResource Sep}" BorderThickness="1" CornerRadius="12"
+                    Tapped="OnDateTimeChooserCardTap" IsHoldingEnabled="False" IsDoubleTapEnabled="False">
+                <StackPanel Margin="16">
+                    <TextBlock x:Name="DateTimeChooserLabel" Text="选择" Foreground="{StaticResource TxtHi}" FontSize="15"
+                               Margin="0,0,0,12"/>
+                    <TextBlock x:Name="DateTimeDateLabel" Text="日期" Foreground="{StaticResource TxtLo}" FontSize="12" Margin="0,0,0,4"/>
+                    <TextBox x:Name="DateTimeDateBox" Text="" PlaceholderText="yyyy-mm-dd" Background="{StaticResource Inset}"
+                             BorderBrush="{StaticResource Sep}" Foreground="{StaticResource TxtHi}" FontSize="15" Margin="0,0,0,10"
+                             IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                    <TextBlock x:Name="DateTimeTimeLabel" Text="时间" Foreground="{StaticResource TxtLo}" FontSize="12" Margin="0,0,0,4"/>
+                    <TextBox x:Name="DateTimeTimeBox" Text="" PlaceholderText="hh:mm" Background="{StaticResource Inset}"
+                             BorderBrush="{StaticResource Sep}" Foreground="{StaticResource TxtHi}" FontSize="15" Margin="0,0,0,14"
+                             IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="DateTimeChooserOkBtn" Content="确定" Click="OnDateTimeChooserOk"
+                                Background="{StaticResource Accent}" BorderThickness="0" Foreground="{StaticResource PageBg}"
+                                Padding="16,6" Margin="0,0,8,0" IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                        <Button x:Name="DateTimeChooserCancelBtn" Content="取消" Click="OnDateTimeChooserCancel"
+                                Background="Transparent" BorderBrush="{StaticResource Sep}" BorderThickness="1"
+                                Foreground="{StaticResource TxtLo}" Padding="16,6" IsHoldingEnabled="False" IsDoubleTapEnabled="False"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
         <!-- ===== 首启 OOBE:欢迎 + 选语言(English / 中文)。仅全新安装(settings.ini 无 lang)弹出。 ===== -->
         <Grid x:Name="OobePanel" Grid.Row="0" Grid.RowSpan="2" Background="{StaticResource PageBg}" Visibility="Collapsed">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="36,0" MaxWidth="380">

@@ -519,6 +519,11 @@ int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len);
 void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
 // Apotheosis (0.2.5.15): answer a <select> popup. listIndex < 0 = cancelled.
 void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex);
+// Apotheosis (0.2.5.16): <input type=color> / <input type=date/time> choosers.
+// A null css/value means the user cancelled. The date value is passed back
+// VERBATIM (WebCore validates it) - do not reformat it.
+void WebCoreCompleteColorChooser(unsigned long long id, const char* cssUtf8);
+void WebCoreCompleteDateTimeChooser(unsigned long long id, const char* valueUtf8);
 
 // 回答 confirm() 对话框。ok!=0=确定(脚本以 true 继续),0=取消。引擎 park 期间可从 UI 线程
 // 调;过期 id(对话框已超时)是 no-op。返回 1=答案被接收。

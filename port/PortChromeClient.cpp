@@ -1,10 +1,11 @@
 /*
  * PortChromeClient.cpp — out-of-line method bodies for WebCorePort::PortChromeClient.
  *
- * Bodies mirror WebCore's EmptyChromeClient (EmptyClients.cpp). The
- * popup-menu factories return nullptr (EmptyChromeClient returns a file-local
- * EmptyPopupMenu/EmptySearchPopupMenu; nullptr is a valid no-op here since the
- * headless port never shows native popups).
+ * Bodies mirror WebCore's EmptyChromeClient (EmptyClients.cpp). The picker factories
+ * (<select>, colour, date/time) do NOT mirror it: EmptyChromeClient hands back a
+ * file-local no-op object, which on a phone means the user gets nothing at all and
+ * no visible feedback. They go through PortUIBridge instead, so the shell can show
+ * a real control - see PortUIBridge.h for the async rules.
  */
 
 #include "config.h"
@@ -39,17 +40,31 @@ RefPtr<SearchPopupMenu> PortChromeClient::createSearchPopupMenu(PopupMenuClient&
     return nullptr;
 }
 
-RefPtr<ColorChooser> PortChromeClient::createColorChooser(ColorChooserClient&, const Color&)
+// Apotheosis (0.2.5.16): <input type=color>. Same shape as the <select> popup:
+// WebCore hands us a ColorChooserClient and expects a ColorChooser back, then
+// calls setSelectedColor() on it. reattachColorChooser() carries a new value
+// when the element's value changes underneath us, so that is where the request
+// goes out; endChooser() tears it down.
+//
+// Was `return nullptr`: before the 0.2.5.15 showPopup-style guards, a null return
+// here was simply "no picker", and the page's own fallback (if any) took over.
+// With the picker wired it is a real feature - a phone has no OS colour wheel to
+// fall back to.
+RefPtr<ColorChooser> PortChromeClient::createColorChooser(ColorChooserClient& client, const Color& current)
 {
-    return nullptr;
+    return WebCorePort::queueColorChooser(client, current);
+}
+
+// Apotheosis (0.2.5.16): <input type=date/time/...>. The WebCore contract is
+// DateTimeChooser::showChooser(params), so the object we return has to carry the
+// parameters through to the shell; unlike the colour picker the request is
+// raised by showChooser(), not at factory time (the parameters are not known then).
+RefPtr<DateTimeChooser> PortChromeClient::createDateTimeChooser(DateTimeChooserClient& client)
+{
+    return WebCorePort::queueDateTimeChooser(client);
 }
 
 RefPtr<DataListSuggestionPicker> PortChromeClient::createDataListSuggestionPicker(DataListSuggestionsClient&)
-{
-    return nullptr;
-}
-
-RefPtr<DateTimeChooser> PortChromeClient::createDateTimeChooser(DateTimeChooserClient&)
 {
     return nullptr;
 }

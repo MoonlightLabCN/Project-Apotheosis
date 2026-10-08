@@ -143,6 +143,21 @@ namespace Harness
         private: ::Windows::UI::Xaml::Controls::Grid^ SelectPopup;
         private: ::Windows::UI::Xaml::Controls::TextBlock^ SelectPopupTitle;
         private: ::Windows::UI::Xaml::Controls::ListView^ SelectPopupList;
+        // Apotheosis (0.2.5.16): <input type=color> / <input type=date/time> choosers。
+        private: ::Windows::UI::Xaml::Controls::Grid^ ColorChooser;
+        private: ::Windows::UI::Xaml::Controls::Border^ ColorChooserPreview;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ ColorChooserLabel;
+        private: ::Windows::UI::Xaml::Controls::Grid^ ColorChooserGrid;
+        private: ::Windows::UI::Xaml::Controls::Button^ ColorChooserOkBtn;
+        private: ::Windows::UI::Xaml::Controls::Button^ ColorChooserCancelBtn;
+        private: ::Windows::UI::Xaml::Controls::Grid^ DateTimeChooser;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ DateTimeChooserLabel;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ DateTimeDateLabel;
+        private: ::Windows::UI::Xaml::Controls::TextBox^ DateTimeDateBox;
+        private: ::Windows::UI::Xaml::Controls::TextBlock^ DateTimeTimeLabel;
+        private: ::Windows::UI::Xaml::Controls::TextBox^ DateTimeTimeBox;
+        private: ::Windows::UI::Xaml::Controls::Button^ DateTimeChooserOkBtn;
+        private: ::Windows::UI::Xaml::Controls::Button^ DateTimeChooserCancelBtn;
         // Apotheosis (2026-09-27): window.prompt() 自绘输入框(MessageDialog 无输入能力)。
         private: ::Windows::UI::Xaml::Controls::Grid^ PromptBox;
         private: ::Windows::UI::Xaml::Controls::Border^ PromptBoxCard;

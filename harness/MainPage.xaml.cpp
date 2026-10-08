@@ -63,6 +63,43 @@ static std::string ToUtf8(Platform::String^ s)
 }
 static std::wstring ToWide(const char* s) { return s ? Utf8ToWide(std::string(s)) : std::wstring{}; }
 
+// Apotheosis (0.2.5.16): "#rgb"/"#rrggbb"/"#rrggbbaa" (what WebCore's
+// serializationForHTML produces, and therefore what both choosers carry) into a
+// WPF colour. XamlReader/Binding-side helpers are unavailable in this hand-rolled
+// toolchain, so parse it by hand; an unparsable string is transparent-black, which
+// the preview shows as "no colour selected" rather than throwing.
+static Windows::UI::Color ParseWpfColor(const std::wstring& hex)
+{
+    using namespace Windows::UI;
+    uint8_t rgba[4] = { 0, 0, 0, 255 };
+    size_t digits = 0;
+    if (hex.size() >= 2 && hex[0] == L'#') {
+        digits = hex.size() - 1;
+        if (digits == 3 || digits == 6 || digits == 8) {
+            auto value = [](wchar_t c) -> int {
+                if (c >= L'0' && c <= L'9') return c - L'0';
+                if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+                if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+                return -1;
+            };
+            bool ok = true;
+            for (size_t i = 0; i < digits && ok; ++i) {
+                const int v = value(hex[1 + i]);
+                if (v < 0) { ok = false; break; }
+                const size_t channel = (digits == 3) ? i : i / 2;
+                rgba[channel] = (digits == 3) ? static_cast<uint8_t>(v * 17)
+                                              : static_cast<uint8_t>(rgba[channel] * 16 + v);
+            }
+            if (!ok)
+                digits = 0;
+        } else
+            digits = 0;
+    }
+    Windows::UI::Color c;
+    c.A = rgba[3]; c.R = rgba[0]; c.G = rgba[1]; c.B = rgba[2];
+    return c;
+}
+
 static std::wstring LocalStateDir()
 {
     using namespace Windows::Storage;
@@ -6183,6 +6220,254 @@ void MainPage::ShowContextMenu(bool isLink)
     ShowLinkMenu(m_ctxUrl);   // placement + visibility + the target text
 }
 
+// ============================================================================
+// Apotheosis (0.2.5.16): <input type=color> / <input type=date/time> choosers.
+//
+// The engine's factories (PortChromeClient::createColorChooser /
+// createDateTimeChooser) used to return nullptr; they now go through PortUIBridge
+// with the same async request/response shape the file chooser and <select> popup
+// use (kind 6 = colour, 7 = date/time - the numbering was reserved from the
+// start, see port/PortUIBridge.h).
+//
+// DATE PAYLOADS ARE PASSED BACK VERBATIM. WebCore validates the value against
+// the input type, so the shell must not localize or reformat it - reformatting is
+// how a "2026-10-8" gets rejected on the way back and silently dropped.
+// ============================================================================
+
+// The card's palette: a Win10-ish sweep plus greys. Kept as data so a future
+// "recent colours" row has somewhere to live.
+static const wchar_t* kColorSwatches[] = {
+    L"#FF0000", L"#FF7F00", L"#FFFF00", L"#00FF00", L"#0000FF", L"#4B0082", L"#9400D3",
+    L"#F5A623", L"#F8E71C", L"#7ED321", L"#50E3C2", L"#4A90E2", L"#9013FE", L"#D0021B",
+    L"#FFFFFF", L"#E0E0E0", L"#C0C0C0", L"#909090", L"#606060", L"#303030", L"#000000", L"",
+};
+
+void MainPage::ShowColorChooser(unsigned long long id, const std::string& payload)
+{
+    if (!ColorChooser || !ColorChooserGrid) return;
+
+    // Split "<current>\t<suggested>\t..."; a payload starting with \x02current is
+    // a REFRESH from reattach/setSelectedColor (the page changed the value while
+    // the card is up), so it carries only the new current and must not reopen or
+    // rebuild - just move the preview.
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (true) {
+        size_t tab = payload.find('\t', start);
+        if (tab == std::string::npos) { fields.push_back(payload.substr(start)); break; }
+        fields.push_back(payload.substr(start, tab - start));
+        start = tab + 1;
+    }
+    if (fields.empty())
+        return;
+
+    const bool isRefresh = (fields[0].rfind("\x02current\t", 0) == 0);
+    const std::string current = isRefresh ? fields[0].substr(10) : fields[0];
+
+    m_colorChooserId = id;
+    m_colorChooserCurrent = Utf8ToWide(current.empty() ? "#000000" : current);
+    if (ColorChooserPreview && !m_colorChooserCurrent.empty())
+        ColorChooserPreview->Background = ref new Windows::UI::Xaml::Media::SolidColorBrush(ParseWpfColor(m_colorChooserCurrent));
+
+    if (isRefresh)
+        return;   // already showing; only the preview moved
+
+    // Build the grid once per open (a chooser is cheap and the palette is fixed,
+    // so reusing a card's children would only risk stale Tags after a theme swap).
+    ColorChooserGrid->Children->Clear();
+    ColorChooserGrid->RowDefinitions->Clear();
+    ColorChooserGrid->ColumnDefinitions->Clear();
+    for (int c = 0; c < 7; ++c) {
+        auto col = ref new Windows::UI::Xaml::Controls::ColumnDefinition();
+        col->Width = Windows::UI::Xaml::GridLength(1.0, Windows::UI::Xaml::GridUnitType::Star);
+        ColorChooserGrid->ColumnDefinitions->Append(col);
+    }
+    for (int r = 0; kColorSwatches[r][0] != L'\0'; r += 7) {
+        auto row = ref new Windows::UI::Xaml::Controls::RowDefinition();
+        row->Height = Windows::UI::Xaml::GridLength::Auto;
+        ColorChooserGrid->RowDefinitions->Append(row);
+    }
+    int index = 0;
+    for (int i = 0; kColorSwatches[i][0] != L'\0'; ++i, ++index) {
+        const int row = index / 7, column = index % 7;
+        auto swatch = ref new Windows::UI::Xaml::Controls::Button();
+        swatch->Tag = ref new String(kColorSwatches[i]);   // "#rrggbb"
+        swatch->Background = ref new Windows::UI::Xaml::Media::SolidColorBrush(ParseWpfColor(kColorSwatches[i]));
+        swatch->BorderThickness = Windows::UI::Xaml::Thickness(1);
+        swatch->BorderBrush = ref new Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Colors::Transparent);
+        swatch->Margin = Windows::UI::Xaml::Thickness(2);
+        swatch->Padding = Windows::UI::Xaml::Thickness(0);
+        swatch->MinHeight = 30;
+        swatch->Click += ref new Windows::UI::Xaml::RoutedEventHandler(this, &MainPage::OnColorSwatchClick);
+        swatch->IsHoldingEnabled = false;
+        swatch->IsDoubleTapEnabled = false;
+        swatch->SetValue(Windows::UI::Xaml::Controls::Grid::RowProperty, row);
+        swatch->SetValue(Windows::UI::Xaml::Controls::Grid::ColumnProperty, column);
+        ColorChooserGrid->Children->Append(swatch);
+    }
+
+    if (ColorChooserLabel) ColorChooserLabel->Text = L8(L"选择颜色", L"Choose a colour");
+    ColorChooser->Visibility = Windows::UI::Xaml::Visibility::Visible;
+    WriteStage((std::string("color chooser current=") + current).c_str());
+}
+
+// The value is sent back VERBATIM by WebCore's contract... which applies to the
+// date/time chooser. Colours are parsed by Color(), so "#rrggbb" is safe here.
+void MainPage::AnswerColorChooser(const char* cssUtf8)
+{
+    unsigned long long id = m_colorChooserId;
+    m_colorChooserId = 0;
+    if (ColorChooser) ColorChooser->Visibility = Windows::UI::Xaml::Visibility::Collapsed;
+    if (id == 0)
+        return;
+    // A null pointer means cancelled (the page keeps its old colour), and an empty
+    // string means the same thing on the engine side - so one bool, captured by
+    // value, carries the distinction instead of re-reading the parameter inside the
+    // lambda (which cannot capture it: explicit-capture lambdas, and the out-param
+    // would be captured by reference into a post that outlives this frame).
+    const bool cancelled = (cssUtf8 == nullptr);
+    const std::string text = cancelled ? std::string() : std::string(cssUtf8);
+    WebEngine::instance().post([id, cancelled, text]() {
+        try { WebCoreCompleteColorChooser(id, cancelled ? nullptr : text.c_str()); } catch (...) {}
+    });
+}
+
+void MainPage::OnColorSwatchClick(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^)
+{
+    auto btn = dynamic_cast<Windows::UI::Xaml::Controls::Button^>(sender);
+    if (!btn) return;
+    auto tag = dynamic_cast<Platform::String^>(btn->Tag);
+    if (!tag) return;
+    // Clicking a swatch moves the preview only; OK commits. That is the Win10
+    // colour-picker rhythm (pick, confirm) rather than pick-and-commit.
+    m_colorChooserCurrent = std::wstring(tag->Data());
+    if (ColorChooserPreview)
+        ColorChooserPreview->Background = ref new Windows::UI::Xaml::Media::SolidColorBrush(ParseWpfColor(m_colorChooserCurrent));
+}
+
+void MainPage::OnColorChooserOk(Platform::Object^, Windows::UI::Xaml::RoutedEventArgs^)
+{
+    if (m_colorChooserCurrent.empty()) { AnswerColorChooser(nullptr); return; }
+    const std::string css = WideToUtf8(m_colorChooserCurrent);
+    AnswerColorChooser(css.c_str());
+}
+
+void MainPage::OnColorChooserCancel(Platform::Object^, Windows::UI::Xaml::RoutedEventArgs^)
+{
+    AnswerColorChooser(nullptr);
+}
+
+void MainPage::OnColorChooserScrimTap(Platform::Object^, Windows::UI::Xaml::Input::TappedRoutedEventArgs^)
+{
+    AnswerColorChooser(nullptr);
+}
+
+void MainPage::OnColorChooserCardTap(Platform::Object^, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e)
+{
+    e->Handled = true;
+}
+
+void MainPage::ShowDateTimeChooser(unsigned long long id, const std::string& payload)
+{
+    if (!DateTimeChooser) return;
+    // "<type>\t<current>\t<min ms>\t<max ms>"; min/max are epoch milliseconds and 0
+    // means unset. Type decides which boxes show: "date" keeps only the date box,
+    // "time" only the time box, "date-time"/"datetime-local" both.
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (true) {
+        size_t tab = payload.find('\t', start);
+        if (tab == std::string::npos) { fields.push_back(payload.substr(start)); break; }
+        fields.push_back(payload.substr(start, tab - start));
+        start = tab + 1;
+    }
+    if (fields.empty())
+        return;
+
+    const std::wstring type = Utf8ToWide(fields[0]);
+    const std::wstring current = fields.size() > 1 ? Utf8ToWide(fields[1]) : L"";
+    // "date" -> date box only, "time" -> time box only, "date-time"/"datetime-local"
+    // -> both. Only "time" is date-less, so hasDate-without-hasTime is the date-only
+    // case and hasTime is the time case.
+    const bool hasTime = type.find(L"time") != std::wstring::npos;
+    const bool wantsDate = type.find(L"date") != std::wstring::npos;
+    const bool wantsTime = hasTime;
+
+    m_dateChooserId = id;
+    m_dateChooserType = ref new String(type.c_str());
+
+    if (DateTimeDateLabel) DateTimeDateLabel->Visibility = wantsDate ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+    if (DateTimeDateBox) {
+        DateTimeDateBox->Visibility = wantsDate ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+        DateTimeDateBox->Text = ref new String(current.substr(0, 10).c_str());
+    }
+    if (DateTimeTimeLabel) DateTimeTimeLabel->Visibility = wantsTime ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+    if (DateTimeTimeBox) {
+        DateTimeTimeBox->Visibility = wantsTime ? Windows::UI::Xaml::Visibility::Visible : Windows::UI::Xaml::Visibility::Collapsed;
+        DateTimeTimeBox->Text = ref new String(current.size() > 11 ? current.substr(11).c_str() : L"");
+    }
+    if (DateTimeChooserLabel) DateTimeChooserLabel->Text = L8(L"选择日期和时间", L"Choose date and time");
+
+    DateTimeChooser->Visibility = Windows::UI::Xaml::Visibility::Visible;
+    WriteStage((std::string("date chooser type=") + fields[0]).c_str());
+}
+
+void MainPage::AnswerDateTimeChooser(const char* valueUtf8)
+{
+    unsigned long long id = m_dateChooserId;
+    m_dateChooserId = 0;
+    if (DateTimeChooser) DateTimeChooser->Visibility = Windows::UI::Xaml::Visibility::Collapsed;
+    if (id == 0)
+        return;
+    const bool cancelled = (valueUtf8 == nullptr);
+    const std::string text = cancelled ? std::string() : std::string(valueUtf8);
+    WebEngine::instance().post([id, cancelled, text]() {
+        try { WebCoreCompleteDateTimeChooser(id, cancelled ? nullptr : text.c_str()); } catch (...) {}
+    });
+}
+
+void MainPage::OnDateTimeChooserOk(Platform::Object^, Windows::UI::Xaml::RoutedEventArgs^)
+{
+    // Reassemble as "<yyyy-mm-dd>[T<hh:mm>]" in the same shape the boxes were
+    // split from. VERBATIM to the engine: no localization, no null-guessing here -
+    // WebCore validates it and an invalid value is simply not applied.
+    std::wstring date, time;
+    if (DateTimeDateBox && DateTimeDateBox->Visibility == Windows::UI::Xaml::Visibility::Visible) {
+        auto t = dynamic_cast<Platform::String^>(DateTimeDateBox->Text);
+        if (t) date = std::wstring(t->Data());
+    }
+    if (DateTimeTimeBox && DateTimeTimeBox->Visibility == Windows::UI::Xaml::Visibility::Visible) {
+        auto t = dynamic_cast<Platform::String^>(DateTimeTimeBox->Text);
+        if (t) time = std::wstring(t->Data());
+    }
+    const bool wantsDate = !date.empty() || (DateTimeDateBox
+        && DateTimeDateBox->Visibility == Windows::UI::Xaml::Visibility::Visible);
+    const bool wantsTime = !time.empty() || (DateTimeTimeBox
+        && DateTimeTimeBox->Visibility == Windows::UI::Xaml::Visibility::Visible);
+    if (!wantsDate && !wantsTime) { AnswerDateTimeChooser(nullptr); return; }
+
+    std::wstring value;
+    if (wantsDate) value += date;
+    if (wantsTime) { if (wantsDate) value += L"T"; value += time; }
+    const std::string utf8 = WideToUtf8(value);
+    AnswerDateTimeChooser(utf8.c_str());
+}
+
+void MainPage::OnDateTimeChooserCancel(Platform::Object^, Windows::UI::Xaml::RoutedEventArgs^)
+{
+    AnswerDateTimeChooser(nullptr);
+}
+
+void MainPage::OnDateTimeChooserScrimTap(Platform::Object^, Windows::UI::Xaml::Input::TappedRoutedEventArgs^)
+{
+    AnswerDateTimeChooser(nullptr);
+}
+
+void MainPage::OnDateTimeChooserCardTap(Platform::Object^, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e)
+{
+    e->Handled = true;
+}
+
 void MainPage::OnCtxCopyLink(Platform::Object^, RoutedEventArgs^)
 {
     std::wstring url = m_ctxUrl;   // HideLinkMenu clears it
@@ -6965,6 +7250,10 @@ void MainPage::OnEngineUIRequest(int kind, unsigned long long id, const std::str
         ShowScriptAlert(payload);
     else if (kind == 5)
         ShowSelectPopup(id, payload);   // Apotheosis (0.2.5.15): <select>
+    else if (kind == 6)
+        ShowColorChooser(id, payload);   // Apotheosis (0.2.5.16): <input type=color>
+    else if (kind == 7)
+        ShowDateTimeChooser(id, payload);   // Apotheosis (0.2.5.16): <input type=date/time>
     else if (kind == 8)
         OpenUrlInNewTab(payload);
 }

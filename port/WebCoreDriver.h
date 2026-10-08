@@ -547,6 +547,18 @@ unsigned WebCoreGetFrameHash();                       // pixel hash of the last 
 //       with WebCoreCompleteSelectPopup(id, index), where index < 0 means the user
 //       cancelled. Rows are capped at 200 by the driver (a layout guard on the
 //       shell card, not a semantic limit).
+//   6 = <input type=color> (Apotheosis 0.2.5.16). payload =
+//       "<#rrggbb|#rrggbbaa>\t<suggested>\t..." OR, when the page changed the value
+//       while the chooser was open, "\x02current\t<#rrggbb|#rrggbbaa>" - the same
+//       request id, so the shell updates the card it already shows instead of
+//       opening a second one. Answer with WebCoreCompleteColorChooser(id, css);
+//       a null css means the user cancelled.
+//   7 = <input type=date/time/date-time> (Apotheosis 0.2.5.16). payload =
+//       "<input type>\t<current value>\t<min ms>\t<max ms>" where min/max are epoch
+//       milliseconds (0 = unset) and the shell should bound its own control by
+//       them. Answer with WebCoreCompleteDateTimeChooser(id, value) - the value is
+//       passed back VERBATIM because WebCore validates it, so do not reformat.
+//       A null value means the user cancelled.
 int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
 
 // UI-thread twin of WebCoreTakeUIRequest, used by the confirm/prompt wake path
@@ -565,6 +577,17 @@ void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, in
 // cancelled; >= 0 = the row they picked, handed to PopupMenuClient::valueChanged()
 // on the engine thread. Engine thread only; a stale id is dropped.
 void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex);
+
+// Apotheosis (0.2.5.16): answer an <input type=color> chooser. `cssUtf8` is a CSS
+// colour string ("#rgb"/"#rrggbb"/"#rrggbbaa"); a null pointer means the user
+// cancelled and the page keeps its old value. A stale id is dropped.
+void WebCoreCompleteColorChooser(unsigned long long id, const char* cssUtf8);
+
+// Apotheosis (0.2.5.16): answer an <input type=date/time> chooser. `valueUtf8` is
+// the value string for that input type ("yyyy-mm-dd", "yyyy-mm-ddThh:mm", ...),
+// passed back VERBATIM - WebCore validates it, so the shell must not reformat.
+// A null pointer means the user cancelled. A stale id is dropped.
+void WebCoreCompleteDateTimeChooser(unsigned long long id, const char* valueUtf8);
 
 // Answer a confirm() dialog. ok != 0 = OK (script continues with true), 0 =
 // Cancel. May be called from the UI thread while the engine is parked; a stale id

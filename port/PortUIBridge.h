@@ -53,6 +53,11 @@ namespace WebCore {
 class FileChooser;
 class PopupMenu;
 class PopupMenuClient;
+class ColorChooser;
+class ColorChooserClient;
+class DateTimeChooser;
+class DateTimeChooserClient;
+class Color;
 }
 
 namespace WebCorePort {
@@ -65,8 +70,11 @@ enum UIRequestKind : int {
     UIRequestPrompt      = 4,
     // Apotheosis (0.2.5.15): <select> was reserved and is now live.
     UIRequestSelect      = 5,
+    // Apotheosis (0.2.5.16): <input type=color> and <input type=date/time>.
+    UIRequestColor       = 6,
+    UIRequestDateTime    = 7,
     // Reserved; keep the numbering stable, the shell switches on it:
-    //   6 = color, 7 = date.
+    //   (8 is taken: new window)
     UIRequestNewWindow   = 8,
 };
 
@@ -94,6 +102,23 @@ RefPtr<WebCore::PopupMenu> queueSelectPopup(WebCore::PopupMenuClient& client, ui
 // Apotheosis (0.2.5.15): the page closed its own popup, or the element went away.
 // Drops the request and tells the client it is hidden. No-op for an unknown id.
 void cancelSelectPopup(uint64_t id);
+
+// Apotheosis (0.2.5.16): <input type=color> and <input type=date/time>.
+// Colour queues at factory time (the current value is already known); date does
+// not (WebCore's showChooser(params) is where the parameters arrive), so its
+// factory just hands back the object. Both answer "cancelled" as a null pointer.
+//
+// Color payload:      "<#rrggbb(aa)>\t<suggested>\t<suggested>..." or, for a
+//                     mid-chooser refresh from reattach/setSelectedColor,
+//                     "\x02current\t<#rrggbb(aa)>".
+// DateTime payload:   "<input type>\t<current value>\t<min ms>\t<max ms>" where
+//                     min/max are epoch milliseconds and 0 means unset.
+RefPtr<WebCore::ColorChooser> queueColorChooser(WebCore::ColorChooserClient&, const WebCore::Color& current);
+RefPtr<WebCore::DateTimeChooser> queueDateTimeChooser(WebCore::DateTimeChooserClient&);
+void completeColorChooser(uint64_t id, const char* cssUtf8);
+void completeDateTimeChooser(uint64_t id, const char* valueUtf8);
+void cancelColorChooser(uint64_t id);
+void cancelDateTimeChooser(uint64_t id);
 
 // Queue a message the shell should show and then forget about. No reply.
 uint64_t enqueueAlert(const std::string& utf8Message);

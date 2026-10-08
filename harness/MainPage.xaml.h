@@ -289,6 +289,23 @@ namespace Harness {
         void OnSelectPopupScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
         void OnSelectPopupCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
         void OnSelectPopupSelectionChanged(Platform::Object^ sender, Windows::UI::Xaml::Controls::SelectionChangedEventArgs^ e);
+        // Apotheosis (0.2.5.16): <input type=color> and <input type=date/time>.
+        // Colour payload: "<#rrggbb>\t<suggested>..." or "\x02current\t<#rrggbb>" when the
+        // page changed the value while the picker is open (same id => refresh, not reopen).
+        // DateTime payload: "<input type>\t<current>\t<min ms>\t<max ms>", min/max 0 = unset.
+        void ShowColorChooser(unsigned long long id, const std::string& payload);
+        void ShowDateTimeChooser(unsigned long long id, const std::string& payload);
+        void AnswerColorChooser(const char* cssUtf8);          // null = cancelled
+        void AnswerDateTimeChooser(const char* valueUtf8);     // null = cancelled
+        void OnColorChooserScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnColorChooserCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnColorSwatchClick(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnColorChooserOk(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnColorChooserCancel(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnDateTimeChooserScrimTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnDateTimeChooserCardTap(Platform::Object^ sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs^ e);
+        void OnDateTimeChooserOk(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+        void OnDateTimeChooserCancel(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
         // 把内容区显示坐标(DIP)映回引擎像素空间(直呈现下表面被拉伸+设备分辨率缩放),修点击/焦点偏移。
         void MapTapToEngine(double dipX, double dipY, int& outPx, int& outPy);
         // 把位图像素 (px,py) 的点击转发到引擎活会话(WebCoreClickAt),完成后同步地址栏/历史/链接表。
@@ -639,6 +656,11 @@ namespace Harness {
         // user's answer, and so a second request cannot open a second card.
         unsigned long long m_selectPopupId { 0 };
         bool m_selectPopupFilling { false };   // suppressing SelectionChanged during fill
+        // Apotheosis (0.2.5.16): the choosers. Same purpose as m_selectPopupId above.
+        unsigned long long m_colorChooserId { 0 };
+        std::wstring m_colorChooserCurrent;    // "#rrggbb" currently shown
+        unsigned long long m_dateChooserId { 0 };
+        Platform::String^ m_dateChooserType { nullptr };   // "date"/"time"/"date-time"/...
         bool m_gpuSizeHandlerWired { false };   // GpuPanel->SizeChanged 是否已经挂过(避免 HookGpuPanelForStartup 重入重复订阅)
         // Apotheosis (landscape/rotation, 0.1.9.41): engine px per panel DIP. Pinned once, in
         //   EnableGpu() (or on the first software measurement), so that the short side of the

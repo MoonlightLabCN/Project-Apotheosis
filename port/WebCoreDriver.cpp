@@ -6457,6 +6457,20 @@ void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex)
     WebCorePort::completeSelectPopup(id, listIndex);
 }
 
+// Apotheosis (0.2.5.16): <input type=color> 的答案回传。cssUtf8 为 null =
+// 用户取消(等价 didEndChooser),此时页面保留原值。引擎线程调,幂等。
+void WebCoreCompleteColorChooser(unsigned long long id, const char* cssUtf8)
+{
+    WebCorePort::completeColorChooser(id, cssUtf8);
+}
+
+// Apotheosis (0.2.5.16): <input type=date/time> 的答案回传。valueUtf8 为 null =
+// 用户取消。值由壳原样回传(WebCore 会校验),所以壳**不要**自己重排格式。
+void WebCoreCompleteDateTimeChooser(unsigned long long id, const char* valueUtf8)
+{
+    WebCorePort::completeDateTimeChooser(id, valueUtf8);
+}
+
 // ---- 复制/剪切/粘贴/全选(Apotheosis 2026-10-08)------------------------------
 // 引擎侧剪贴板缓冲访问器,定义在 stubs-pasteboard.cpp（那里 C++ 命名空间是正常的）。
 // 本文件的 C ABI 全在下面的 extern "C" 块里,所以这里只能用 C 链接的原型声明；
