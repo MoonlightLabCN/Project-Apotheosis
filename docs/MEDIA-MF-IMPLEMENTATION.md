@@ -141,6 +141,20 @@ The earlier claim in this document that it "does not flush for these pages" was 
 early is what made it look empty. `stage.txt` is buffered the same way, which is why its `media ...`
 line had not landed when the round was read.
 
+### Warning for the next round: the `media` line is gated on a settle that media itself can prevent
+
+The `media readers=... out=...` row is appended from `perfWriteStageTimeline`, i.e. **only when the
+navigation settles**. But `HTMLMediaElement::selectMediaResource()` starts with
+`setShouldDelayLoadEvent(true)` and only releases the load event once the media has data (or errors) —
+so on a page whose only content is a `<video>`, the navigation can stay "loading" and the diagnostic
+row may *never* be written, no matter how long you wait. Repeated pulls after the device round showed
+`before-load .../probe.html` and a fresh `jit-diag`, and still no `timeline`/`media` line, with the
+mp4 demonstrably fetched.
+
+Treat that as a diagnostic-design bug, not as "the engine did nothing" (the LAN server log already
+proves the engine engaged). Before the next round, make the media row independent of settle: write it
+on a timer, and/or at teardown/suspend alongside the console flush.
+
 ## Root cause of "video renders as an empty control and .play() does nothing"
 
 Found on device, 2026-10-09, and it is **not** in WebKit: the port turned media off itself.
