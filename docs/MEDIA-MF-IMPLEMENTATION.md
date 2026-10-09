@@ -49,7 +49,73 @@ MSBuild.exe harness\Harness.vcxproj /p:Configuration=Release /p:Platform=ARM `
 if the environment holds a variable twice under different casings.)
 
 
+## Root cause of "video renders as an empty control and .play() does nothing"
+
+Found on device, 2026-10-09, and it is **not** in WebKit: the port turned media off itself.
+
+`port/WebCoreDriver.cpp` created its pages with
+
+```cpp
+page->settings().setMediaEnabled(false);   // three sites, under #if ENABLE(VIDEO)
+```
+
+With `mediaEnabled()` false, the generated `HTMLElementFactory` returns an
+`HTMLUnknownElement` for `<video>`/`<audio>`/`<track>`:
+
+```cpp
+    if (!document.settings().mediaEnabled())
+        return HTMLUnknownElement::create(tagName, document);
+    return HTMLVideoElement::create(tagName, document, createdByParser);
+```
+
+So the element was never an `HTMLMediaElement`: no `MediaPlayer` was ever created, the source was
+never fetched (the server log stayed empty for the `.mp4`), `currentTime`/`readyState`/`load` did
+not exist, and `play()` was a no-op on a plain element — which is exactly the historical symptom
+"the tag renders as an empty control and `.play()` does not even throw". `ENABLE_VIDEO=1` in the
+engine was necessary but nowhere near sufficient; the port also had to *ask* for media.
+
+Fixed: `setMediaEnabled(true)` in `buildSession()` (the path real browsing takes:
+`WebCoreSessionLoad` → `buildSession`) and in `WebCoreLoadUrl()`. Deliberately left false in
+`WebCoreRenderHtml()`, the one-shot no-script snapshot renderer the shell uses for its own
+home/error pages.
+
+### How it was found (worth reusing)
+
+The device's `console.txt` mirroring produced **nothing** for the probe pages while their timers
+demonstrably ran, so the instrument was rebuilt: the page reports by requesting a uniquely named
+resource from a LAN HTTP server, and the **server's request log is the ground truth** (see
+`tools/Test-MediaServer.ps1`, which logs the full request target). That turned "no output" into a
+complete self-report:
+
+```
+video=HTMLUnknownElement  audio=HTMLUnknownElement  track=HTMLUnknownElement
+source=HTMLSourceElement  canvas=HTMLCanvasElement  div=HTMLDivElement
+```
+
+`source` is the discriminator: in the generated factory it has **no** `mediaEnabled()` check, only
+`#if ENABLE(VIDEO)`. So `source` → `HTMLSourceElement` proved the media cases were compiled in,
+and `video` → `HTMLUnknownElement` proved the failure was the runtime setting. A stale-object
+theory was ruled out first by timestamps (`HTMLElementFactory.cpp` is dated 2026-09-26, but
+`UnifiedSource-root-1.cpp.obj` and `Settings.cpp.obj` were both rebuilt on 10-09 after the
+`cmakeconfig.h` flip).
+
+### Two device facts that cost time
+
+* **`data:` URLs cannot be navigated top-frame.** WebKit refuses: `Not allowed to navigate top
+  frame to data URL`, and the load dies on the watchdog with `firstbyte=-`. Serve test pages over
+  HTTP instead.
+* **`http://<lan-ip>:port` works fine** from the device (no HTTPS/cert needed for this), which also
+  removes internet reachability as a variable when testing `<video>`.
+
+### Why Bilibili still will not play
+
+Its player is MSE/DASH: it needs `MediaSource`, and `window.MediaSource` is `undefined` here
+(`ENABLE_MEDIA_SOURCE=0`). Observed: the page loads cleanly (fp≈2.3 s, 30/30 subresources) and the
+media engine is never asked for anything (`readers=0`). That is the deferred second round, not a
+regression.
+
 ## Key finding: there is no compile wall
+
 
 `ENABLE_VIDEO=1` with `USE_MEDIA_FOUNDATION=0` builds the **entire** WebCore media stack
 (MediaPlayer/HTMLMediaElement/MediaControlsHost/MediaElementSession/PlatformMediaSessionManager)
@@ -129,22 +195,65 @@ cmd /c E:\Apotheosis\port\probe-media-compile.bat
 
 Only run the full ninja once the probes are clean.
 
-## What still has to happen
+## Device round runbook (the fix is built, not yet installed)
 
-1. **Device round for picture.** Local mp4, `<video controls>`. Unknown: whether
-   `MFStartup`/`MFCreateSourceReaderFromURL`/the Video Processor MFT are all permitted
-   inside the App Container. If the transform fails, set `MF_SOURCE_READER_DISABLE_DXVA = TRUE`
-   in `openSourceReader()` (one line, already commented in place) to force software decode.
-2. **Device round for sound.** `ensureMediaFoundationStarted` + AudioGraph creation are both
-   unproven on 15254.
-3. **A/V sync is wall-clock, not audio-slaved.** `PortAudioOutput::consumedFrames()` is plumbed
-   through the sink and unused; the media clock is `play()`/`seek()`-anchored wall time. Once
-   audio is audible, re-anchor `clockNowLocked()` to the device's consumed frames.
-4. **No controls.** `modern-media-controls` is still dropped; the plan is a harness XAML overlay
+State: **0.2.5.19 is built and waiting** at
+`harness\AppPackages\Harness\Harness_0.2.5.19_ARM_Test\Harness_0.2.5.19_ARM.appx`. It contains the
+`setMediaEnabled(true)` fix. 0.2.5.18 (the pre-fix build) is what the phone still has.
+
+```powershell
+# 1. (re)start the LAN test server; put any small H.264/AAC mp4 at _mediatest\test.mp4
+pwsh -File E:\Apotheosis\tools\Test-MediaServer.ps1 -Port 8099 -Root E:\Apotheosis\port\_mediatest
+# 2. install; -NoProxy matters, and this machine's env has duplicate *_PROXY spellings
+pwsh -File E:\Apotheosis\tools\install-only.ps1 -Ip 192.168.3.159 -Ver 0.2.5.19
+# 3. point the app at the self-reporting page and restart it (testurl.txt is read at startup)
+#    POST file testurl.txt = http://192.168.3.108:8099/probe.html   (see the WDP calls below)
+#    then DELETE + POST /api/taskmanager/app
+# 4. read the evidence: the server request log, and LocalState\stage.txt
+```
+
+What to expect once the fix is live:
+
+| Evidence | Meaning |
+|---|---|
+| device self-report `v.ctor=HTMLVideoElement`, `v.instHVE=1`, `v.ty-currentTime=number` | the element is a real media element again (this is the fix landing) |
+| server log shows `GET /test.mp4` with a `Range:` header | WebKit's loader and/or MF's own SourceReader fetched the media |
+| `stage.txt` `media readers=1 … out=0x16` | `MFCreateSourceReaderFromURL` ran and the Video Processor handed back RGB32 |
+| `frames=<n>/<m>` with m growing | frames decoded and presented |
+| `pcm=<pushed>/<consumed>/<dropped> q=…` | the harness AudioGraph is draining the PCM ring |
+
+If `readers=1` but no `test.mp4` request appears, MF's own HTTP fetch is the thing that failed
+(it does not use WebKit's loader) — check `err=`/`at=` in the media line. If the Video Processor
+cannot engage in the App Container, set `MF_SOURCE_READER_DISABLE_DXVA = TRUE` in
+`openSourceReader()` (one line, already commented in place) to force software decode.
+
+### Deployment lessons (cost most of the time in this round)
+
+* **A same-version reinstall is a silent no-op.** `install-only.ps1` skips when the PFN is already
+  installed, and even a direct `POST /api/app/packagemanager/package` answers **202 "accepted"**
+  while the phone keeps running the old binaries. Bump `Package.appxmanifest` (0.2.5.18 → 0.2.5.19
+  here) and reinstall; verify by talking to the running app, not by the deploy status.
+* **WDP dies when the phone's screen sleeps.** The network stays up (the device answers ARP) while
+  TCP 443 stops listening, so it looks like a network drop but is not; a deploy of 54 MB to a locked
+  phone will strand exactly like this.
+* `tools/Deploy-WhenUp.ps1` cannot be used as-is: it hardcodes `192.168.3.51` and ignores its `-Ip`,
+  it calls `Deploy-Robust.ps1`, and it does not disable the proxy.
+
+## Still open after that
+
+1. **Picture + sound on device** (above). Unknown: whether `MFStartup`,
+   `MFCreateSourceReaderFromURL` and the Video Processor MFT are all permitted inside the App
+   Container, and whether AudioGraph can be created on 15254.
+2. **A/V sync is wall-clock, not audio-slaved.** `PortAudioOutput::consumedFrames()` is plumbed
+   through the sink and unused; the media clock is `play()`/`seek()`-anchored wall time. Once audio
+   is audible, re-anchor `clockNowLocked()` to the device's consumed frames.
+3. **No controls.** `modern-media-controls` is still dropped; the plan is a harness XAML overlay
    (the long-press menu card is the same pattern), not the Shadow DOM controls.
-5. **MSE / Web Audio / WebRTC untouched** — `parameters.platformType != FileOrHLS` is rejected
-   outright in `supportsType()` so the element fails fast instead of hanging.
-6. `docs/FEATURE-GAPS-2026-10-08.md` §5 should be updated with whatever the device says.
+4. **MSE / Web Audio / WebRTC untouched** — `parameters.platformType != FileOrHLS` is rejected
+   outright in `supportsType()` so the element fails fast instead of hanging. MSE is what Bilibili
+   and every DASH/HLS player needs, and it is the reason `readers=0` on those pages is expected
+   rather than a bug.
+5. `docs/FEATURE-GAPS-2026-10-08.md` §5 should be updated with whatever the device says.
 
 ## Diagnostic surface (for the device round)
 

@@ -3972,7 +3972,13 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     page->settings().setLocalStorageEnabled(true);
     page->settings().setSessionStorageEnabled(true);
 #if ENABLE(VIDEO)
-    page->settings().setMediaEnabled(false);
+    // Apotheosis (media-mf): TRUE, and this line is load-bearing. With mediaEnabled() false the
+    // generated HTMLElementFactory returns HTMLUnknownElement for <video>/<audio>/<track>, so the
+    // element never becomes an HTMLMediaElement, never creates a MediaPlayer, never fetches its
+    // source - and .play() silently does nothing. It has to be true for the port's own media
+    // backend (MediaPlayerPrivateWinUWP) to ever be reached. This is the browsing path:
+    // WebCoreSessionLoad -> buildSession.
+    page->settings().setMediaEnabled(true);
     page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
     page->setIsVisible(true);
@@ -4830,6 +4836,9 @@ int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA)
     page->settings().setShouldAllowUserInstalledFonts(false);
     page->settings().setSpeculationRulesPrefetchEnabled(g_apoSpecPrefetch);   // Apotheosis: privacy, see g_apoSpecPrefetch
 #if ENABLE(VIDEO)
+    // Deliberately still false: this is the one-shot local-HTML snapshot renderer (no script), used
+    // for the shell's own home/error pages, which have no media in them. Media elements are enabled
+    // in buildSession(), which is the path real browsing takes.
     page->settings().setMediaEnabled(false);
     page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
@@ -5036,7 +5045,9 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
     page->settings().setShouldAllowUserInstalledFonts(false);
     page->settings().setSpeculationRulesPrefetchEnabled(g_apoSpecPrefetch);   // Apotheosis: privacy, see g_apoSpecPrefetch
 #if ENABLE(VIDEO)
-    page->settings().setMediaEnabled(false);
+    // Script is on here, so this is a page that can contain media; leaving it off would make
+    // <video> an HTMLUnknownElement for anyone who loads a media URL through this entry point.
+    page->settings().setMediaEnabled(true);
     page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
     wkApplyPageWidthFactor(page.get());   // Apotheosis: device scale factor, before the first layout
