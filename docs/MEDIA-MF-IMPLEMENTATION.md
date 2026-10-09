@@ -106,22 +106,32 @@ runs *on the decode thread*, exactly as the stack shows.
 
 ### The fix to make (deliberately not rushed)
 
-The invariant needed is "**the object cannot be destroyed while the decode thread is alive**", which
-means the keep-alive must be taken on the main thread *before* the thread starts and released *after*
-the join — never by the thread itself:
+The invariant needed is "**the decode thread never manipulates this object's refcount**". Note what
+does *not* work, because the obvious ideas each have a hole:
 
-1. Add a member `RefPtr<MediaPlayerPrivateWinUWP> m_threadKeepAlive;` and set it to `*this` in
-   `startDecodeThreadIfNeeded()` **before** `Thread::create`.
-2. `stopDecodeThread()`: signal stop, `waitForCompletion()`, clear `m_decodeThread`, and only then
-   clear `m_threadKeepAlive`. Every caller that can drop the last reference
-   (`~MediaPlayerPrivateWinUWP`, `cancelLoad`) must hold a local
-   `Ref<MediaPlayerPrivateWinUWP> protectedThis { *this }` across the call, so the final release does
-   not destroy the object while a member function is still touching `this`.
-3. With that in place the decode thread may keep its temporary self-refs: the count can no longer
-   reach 0 while it runs.
+* *Main-thread keep-alive* (`m_threadKeepAlive = *this` before `Thread::create`, released after the
+  join): it does stop the race, but if the external owner drops its ref first the object stays alive
+  with nobody left to release the keep-alive → **leak**, and the destructor (which is what joins the
+  thread) may never run.
+* *Decode thread holds a long-lived self-ref*: the count then only reaches 0 on the decode thread, so
+  the destruction happens there and `stopDecodeThread()` would **join the thread from inside itself**.
 
-Do **not** "fix" it by letting the decode thread hold a long-lived self-ref: that merely moves the
-destruction onto the decode thread, where `stopDecodeThread()` would then join itself.
+The correct shape is a **weak** reference for everything the decode thread posts:
+
+1. Make the class use `ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<MediaPlayerPrivateWinUWP>`
+   instead of plain `RefCounted<...>` (this is the same base `WTF::Thread` itself uses, and it is what
+   provides a control block that survives the object).
+2. `notify*`/`postFailure` post lambdas that capture a **`ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP>`**,
+   and the lambda takes a strong ref on the main thread (`if (RefPtr player = weakPtr.get()) ...`) and
+   no-ops if the object is already gone. Taking a weak→strong ref is safe even after the object died,
+   which is exactly the property needed; a plain `RefPtr` capture on the decode thread is not.
+3. The destructor keeps joining the decode thread, and the join is now safe: while it runs, the thread
+   can no longer ref/deref the object, it only touches state members — which the join already
+   guarantees are not yet destroyed (the destructor body runs before member destruction).
+
+The earlier session note in this document said `CanMakeThreadSafeWeakPtr` does not exist; the base to
+use in this WTF version is `ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr` (visible in the crash
+symbol itself), so the weak design is available.
 
 ### Also learned: console.txt is buffered, not broken
 
