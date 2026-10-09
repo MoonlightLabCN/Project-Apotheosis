@@ -52,6 +52,10 @@ EXPLICITLY DROPPED 段（逐条带了原因）。已用 `build-clang-gpu/build.n
 `DisplayRefreshMonitorWin.cpp`、`FullScreen*.cpp`、`MediaPlayerPrivateMediaFoundation*.cpp`、
 `accessibility/win/AX*Win.cpp`、`MainThreadSharedTimerWin.cpp`。
 
+⚠️ 上表的 `MediaPlayerPrivateMediaFoundation*.cpp` 被 DROP **不等于没有媒体播放器**：2026-10-09 起
+新增了自写的 `MediaPlayerPrivateWinUWP.cpp`（MF `SourceReader` 路线），并已列进 `PlatformWinUWP.cmake`
+的编译源。别按「媒体被删了」去读这一条，见 §5。
+
 ---
 
 ## 1. 主表（按用户最容易碰到排序）
@@ -66,7 +70,7 @@ EXPLICITLY DROPPED 段（逐条带了原因）。已用 `build-clang-gpu/build.n
 | 文件 | `<input type=file>` | ✅ 0.2.5.17 起软件路径也可用 | `PortChromeClient.cpp:69-72`→`PortUIBridge` + `FileOpenPicker`；原先软件路径被 `if (g_gpuActive)` 挡死 | 两路径都能选文件（0.2.5.17 修复了软件回退死 UI 的问题，见 §0①） |
 | 对话框 | alert / confirm / prompt | ✅ 0.2.5.17 起软件路径也可用 | 真 `PortChromeClient.cpp:86-118`（confirm/prompt 是真模态：引擎 park 条件变量，60s 超时） | 两路径都正常（软件路径原先直接返回 false、用户什么都看不到） |
 | 弹窗 | `window.open()` | 半实现，返回 null | `PortChromeClient.cpp:122-134` | 新标签能开但 `open()` 返回 null → `w.document.write()` 抛异常；**无 opener** → OAuth 弹窗登录不工作 |
-| 媒体 | `<video>` / `<audio>` | **未开** | `cmakeconfig.h:121,142,195` `USE_MEDIA_FOUNDATION 0`；`PlatformWinUWP.cmake` DROP `MediaPlayerPrivateMediaFoundation*.cpp` | 空框无声，YouTube/B站全废 |
+| 媒体 | `<video>` / `<audio>` | 🔶 引擎侧已落地，**真机待验** | `ENABLE_VIDEO=1`（开发线）+ `MediaPlayerPrivateWinUWP.cpp`（MF SourceReader→RGB32）+ 壳侧 AudioGraph；⚠️ 根因曾是我们自己 `settings.mediaEnabled(false)`，见 §5 | 元素现在是真 `HTMLVideoElement` 了（原先一直是 `HTMLUnknownElement`）。画面/声音**尚未在真机证实**；MSE/DASH（B站/抖音）仍不播，因 `ENABLE_MEDIA_SOURCE=0` |
 | 触控 | **Touch / Pointer Events** | **未开** | `cmakeconfig.h:116` `ENABLE_TOUCH_EVENTS 0`、`:96` POINTER_LOCK 0 | 只合成鼠标事件。**手机浏览器上最刺眼** |
 | 3D | WebGL / WebGPU / WebXR | 未开 | `cmakeconfig.h:134-140` | ANGLE 只服务合成，不开放给 WebGL |
 | 通信 | WebRTC / getUserMedia / 录制 | 未开 | `cmakeconfig.h:69,71,78,145` | 无任何音视频通话 |
@@ -82,16 +86,20 @@ EXPLICITLY DROPPED 段（逐条带了原因）。已用 `build-clang-gpu/build.n
 | 插件 | NPAPI/Flash | 无 | `EmptyClients.cpp:528-532`、`:721-724` | 无外部插件内容 |
 
 ### 编译期关掉的完整 ENABLE_* 清单（`cmakeconfig.h`）
-`VIDEO · WEB_AUDIO · MEDIA_SOURCE · MEDIA_STREAM · MEDIA_CAPTURE · MEDIA_RECORDER ·
+`WEB_AUDIO · MEDIA_SOURCE · MEDIA_STREAM · MEDIA_CAPTURE · MEDIA_RECORDER ·
 WEB_RTC · ENCRYPTED_MEDIA · NOTIFICATIONS · GEOLOCATION · FULLSCREEN_API · CONTEXT_MENUS ·
 DRAG_SUPPORT · TOUCH_EVENTS · POINTER_LOCK · WEBGL · WEBGPU · WEBXR · WEBASSEMBLY ·
 SPEECH_SYNTHESIS · SPELLCHECK · GAMEPAD · DEVICE_ORIENTATION · ORIENTATION_EVENTS · XSLT ·
 MATHML · WEB_AUTHN · PAYMENT_REQUEST · APPLICATION_MANIFEST · MEDIA_SESSION · PDFJS/PDFKIT ·
 REMOTE_INSPECTOR · WEB_CODECS · MHTML · DARK_MODE_CSS · TEXT_AUTOSIZING · ASYNC_SCROLLING ·
 CACHE_PARTITIONING · VARIATION_FONTS`
-开着：`SMOOTH_SCROLLING · USER_MESSAGE_HANDLERS · JAVASCRIPT_SHELL · JIT(gpu/jit) ·
-USE_CAIRO · USE_ANGLE · USE_TEXTURE_MAPPER · USE_CURL · USE_OPENSSL · USE_FREETYPE/FONTCONFIG/
-HARFBUZZ · USE_THEME_ADWAITA`
+开着：`VIDEO（2026-10-09 起，开发线 build-clang-gpu）· SMOOTH_SCROLLING · USER_MESSAGE_HANDLERS ·
+JAVASCRIPT_SHELL · JIT(gpu/jit) · USE_CAIRO · USE_ANGLE · USE_TEXTURE_MAPPER · USE_CURL ·
+USE_OPENSSL · USE_FREETYPE/FONTCONFIG/HARFBUZZ · USE_THEME_ADWAITA`
+
+⚠️ 清单对应 `build-clang-gpu`（开发线）。`build-clang-webcore` / `build-clang-jit` 两个目录的
+`ENABLE_VIDEO` 仍是关的；`ENABLE_VIDEO` 是 CMake **默认值**，翻转后必须显式 reconfigure
+（`-DENABLE_VIDEO=ON`）才生效——`WEBKIT_OPTION_DEFAULT_PORT_VALUE` 不会改已有的 `CMakeCache.txt`。
 
 ---
 
@@ -178,20 +186,65 @@ look-up 预览用的，不是选择手柄）。WebCore 本身没有"选择手柄
 
 ---
 
-## 5. 视频 / 音频 / 硬解可行性（当前状态）
+## 5. 视频 / 音频 / 硬解（2026-10-09 实测更新）
 
-`ENABLE_VIDEO=0` / `ENABLE_WEB_AUDIO=0` / `USE_MEDIA_FOUNDATION=0`，且
-`MediaPlayerPrivateMediaFoundation*.cpp` 与 `modern-media-controls` 资源被 DROP → `<video>` /
-`<audio>` 渲染成空框、无画面无声，`.play()` 不报错但不出内容。
+### 先纠偏：这一节的旧前提是错的
 
-**要真放视频，需要：**
-1. `ENABLE_VIDEO=1` + `USE_MEDIA_FOUNDATION=1`（Win10M 自带 Media Foundation，是硬解的正路，
-   比自接 ffmpeg 现实得多）；
-2. 从零写 `MediaPlayerPrivateInterface` 实现：MF source resolver → `MFT` 解码 transform
-   （Lumia 950 的 Adreno 420 走 DXVA2 硬解 H.264）+ 一个 EFX/video 处理器或直接
-   `EVRAsyncCallback`/`SimpleVideoWindow` 呈现到我们的 surface；
-3. 音频输出：`IAudioClient`（WASAPI）或 XAudio2；可以先只解不出声验证链路；
-4. Media Controls UI 需要 `modern-media-controls` 资源（被 DROP 了，要恢复）。
+本节原先写「`ENABLE_VIDEO=0` … → `<video>` 渲染成空框、`.play()` 不报错但不出内容」。**症状描述对了，归因错了。**
+真机实测（2026-10-09）确认：`<video>` 之所以是空框，主因不在编译开关，而在**移植驱动自己**：
 
-**工作量判断：这是"单独一轮"的工程**，建议先做"一个 `<video>` 测试页放本地 mp4，能出画面+出声"
-的最小闭环，别和崩溃修复搅在一起。App Container 下 MF 硬解 transform 可用性需实测。
+```cpp
+// port/WebCoreDriver.cpp 建页时
+page->settings().setMediaEnabled(false);
+```
+
+生成的 `WebCore/DerivedSources/HTMLElementFactory.cpp` 里正是这一句决定元素类型：
+
+```cpp
+if (!document.settings().mediaEnabled())
+    return HTMLUnknownElement::create(tagName, document);
+return HTMLVideoElement::create(tagName, document, createdByParser);
+```
+
+所以 `<video>` 一直是 **`HTMLUnknownElement`** —— 不是媒体元素：从不创建 `MediaPlayer`、从不取流，
+`currentTime`/`readyState`/`load` 都不存在，`.play()` 在普通元素上是空操作。**`ENABLE_VIDEO=1` 是必要条件但远远不够，port 还必须主动把这个 setting 打开。**
+
+设备自报的判别证据（`source` 只受 `#if ENABLE(VIDEO)` 门控、**不查**该 setting，是天然判别器）：
+
+```
+video=HTMLUnknownElement   audio=HTMLUnknownElement   track=HTMLUnknownElement
+source=HTMLSourceElement   canvas=HTMLCanvasElement    win.HTMLVideoElement=function
+```
+
+`source` 正常 ⇒ 媒体分支确实编进去了 ⇒ 失败点是**运行期 setting**。已修（提交 `78437c4`，分支 `media-mf`），
+随 0.2.5.19 打包。
+
+### 当前实际状态
+
+| 项 | 状态 |
+|---|---|
+| `ENABLE_VIDEO` | **ON**（开发线 `build-clang-gpu`；`port/configure-gpu.ps1` 显式 `-DENABLE_VIDEO=ON`） |
+| `MediaPlayerPrivateInterface` 实现 | **已写**：`platform/graphics/win/MediaPlayerPrivateWinUWP.cpp`（MF `MFCreateSourceReaderFromURL` + `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING` → RGB32 → CPU BGRA → 复用既有 `drawNativeImage` 呈现路径） |
+| `settings.mediaEnabled` | **已修 true**（`buildSession` / `WebCoreLoadUrl`；`WebCoreRenderHtml` 离屏快照路径刻意保持 false） |
+| 音频输出 | 已在引擎侧留出浮点 PCM 环 + `WinUWPMediaAudioSink` 接口，壳侧 `harness/MediaAudio.cpp` 用 AudioGraph 消费（`IMemoryBufferByteAccess` 填 `AudioFrame`） |
+| Media Controls UI | 仍未做（`modern-media-controls` 依旧 DROP）→ 计划是壳侧 XAML 浮层，不恢复 Shadow DOM 控件 |
+| **画面 + 声音（真机）** | **待验证** —— 0.2.5.19 已打包但未装上（装 54MB 途中手机息屏，WDP 被省电杀掉）。见 `docs/MEDIA-MF-IMPLEMENTATION.md` 的 runbook |
+| 硬解 DXVA2 | 走 MF Video Processor，App Container 内可用性**待实测**；`openSourceReader()` 里留了 `MF_SOURCE_READER_DISABLE_DXVA = TRUE` 一行开关可退回软解 |
+
+### 明确不在范围（别再当成"缺口"来修）
+
+- **MSE/DASH/HLS：`ENABLE_MEDIA_SOURCE=0`**，实测 `window.MediaSource === undefined`。这直接决定
+  **B 站/抖音这类页面不会播**：它们全是 MSE/DASH 播放器。实测数据——B 站视频页加载**完全正常**
+  （`firstbyte=161 commit=654 fp=2298 load=4072`、`subres=30/30`、无 JS 报错），只是引擎从未被请求
+  （`stage.txt` → `media readers=0 frames=0/0`）。**这是预期行为，不是回归。** 要支持它得单开一轮做 MSE。
+- **Web Audio**（`ENABLE_WEB_AUDIO=0`）：与 `<video>` 出声无关（壳侧走原生 AudioGraph），暂不动。
+- **WebRTC**：不做。
+- 媒体加载**只能走渐进式 `FileOrHLS`**：`MediaPlayerPrivateWinUWP::supportsType()` 对其余
+  `platformType` 直接返回 `IsNotSupported`，让元素快速失败而不是挂住。
+
+### 历史遗留的可行性判断（多数已落地）
+
+原先列的 4 条里，1（开开关）与 2 的前半（写 `MediaPlayerPrivateInterface`）已完成；3 的音频输出走的是
+AudioGraph 而非 WASAPI/XAudio2；4（controls）仍未做。现在**真正的未知数只剩一个**：App Container 里
+`MFStartup` / `MFCreateSourceReaderFromURL` / Video Processor MFT 是否都被允许 —— 这正是设备回合要回答的。
+
