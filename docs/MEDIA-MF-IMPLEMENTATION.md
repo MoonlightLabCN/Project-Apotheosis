@@ -16,12 +16,14 @@ Branch: `media-mf`
 | C ABI for the harness | `WebCoreMediaAudioTake/SampleRate/Channels/Diagnostics` in both `WebCoreDriver.h` copies | compiles |
 | sink install + stage.txt line | `port/WebCoreDriver.cpp` | compiles |
 | harness audio device (AudioGraph) | `harness/MediaAudio.{h,cpp}` + hooks in `MainPage.xaml.cpp` | compiles |
-| appx | `harness/AppPackages/Harness/Harness_0.2.5.18_ARM_Test/` | built |
+| appx | `harness/AppPackages/Harness/Harness_0.2.5.19_ARM_Test/` | built, **installed on the phone** |
 
 `port/link-driver-gpu.ps1` reports `EXIT=0 undefined=0 duplicate=0` and `build-harness.ps1`
 reports `MSBuild exit code: 0`.
 
-Nothing has been on a device yet. Every claim above is a build claim.
+0.2.5.19 has been on the device and exercised: the media element is now real and the engine fetches
+the media (see "Device round 1" below). Everything *before* that section is a build claim; that
+section is measurement.
 
 ### C++/CX restrictions that bit the harness half
 
@@ -48,6 +50,86 @@ MSBuild.exe harness\Harness.vcxproj /p:Configuration=Release /p:Platform=ARM `
 (And see the `MSB6001`/`NO_PROXY` row in `docs/HARNESS-BUILD.md`: MSBuild will not start at all
 if the environment holds a variable twice under different casings.)
 
+
+## Device round 1 (2026-10-09): the fix landed, and the crash that replaced the silence
+
+0.2.5.19 (the `setMediaEnabled(true)` build) was installed and the same probe page was run. Two
+results, one good and one blocking.
+
+### Good: the element is real and the media path engages
+
+The LAN server log is the ground truth here (the page is served from it, and Media Foundation's
+SourceReader does its own HTTP):
+
+```
+23:31:59.538  192.168.3.159  GET /probe.html  -> 200
+23:32:00.410  192.168.3.159  GET /test.mp4    -> 206 Partial Content (range=bytes=0-             bytes=0+788493/788493)
+23:32:00.488  192.168.3.159  GET /test.mp4    -> 206 Partial Content (range=bytes=770048-788492  bytes=770048+18445/788493)
+```
+
+The second request is the progressive-MP4 signature: read the tail to get the `moov` atom. Nothing
+like this ever happened before the fix — the element was an `HTMLUnknownElement` and never asked for
+a single byte. **The element is now a real media element and the engine engaged.**
+
+### Blocking: the player crashes on teardown
+
+`LocalState\crash.txt` grew by 52 lines, at exactly that moment:
+
+```
+==== crash 2026-10-09 23:31:59.236 tid=5208 ====
+reason: WTF WTF RELEASE_ASSERT at .../wtf/RefCounted.h:53 in WTF::RefCountedBase::~RefCountedBase()
+```
+
+Line 53 is `RELEASE_ASSERT(m_refCount == 1)`. Symbolicated with
+`llvm-symbolizer --obj=Harness.exe --relative-address` (the PDB beside the exe is the exact crashing
+build — this works and is worth remembering):
+
+```
+WebCore::MediaPlayerPrivateWinUWP::~MediaPlayerPrivateWinUWP()
+  WebCore::MediaPlayerPrivateWinUWP::stopDecodeThread()
+    WTF::ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<WTF::Thread, 0>::deref() const
+      WTF::RefCountedBase::~RefCountedBase()   <-- assert
+```
+
+and `WebCore::HTMLMediaElement::load()` also appears on that stack — so a (re)load was tearing the old
+player down while its decode thread was still finishing.
+
+Mechanism: `Thread::create` returns `Ref<Thread>` *and* moves a ref into thread-local storage, which
+the thread releases as it exits (`WTF/wtf/Threading.cpp:269`, and the comment at `Threading.h:360-366`).
+My `notify*`/`postFailure` helpers take a temporary
+`RefPtr<MediaPlayerPrivateWinUWP> protectedThis { *this }` — on the **decode thread** — and post tasks
+carrying a `RefPtr` back to the main thread, while `~MediaPlayerPrivateWinUWP()` only joins the thread
+*after* the last deref has already begun destruction. That leaves a race: the main thread drops the
+count to 0 and deletes, while the decode thread has just taken a reference to the same object. The
+second delete runs `~RefCountedBase()` with `m_refCount == 0` (it is 1 on the healthy path) — and it
+runs *on the decode thread*, exactly as the stack shows.
+
+### The fix to make (deliberately not rushed)
+
+The invariant needed is "**the object cannot be destroyed while the decode thread is alive**", which
+means the keep-alive must be taken on the main thread *before* the thread starts and released *after*
+the join — never by the thread itself:
+
+1. Add a member `RefPtr<MediaPlayerPrivateWinUWP> m_threadKeepAlive;` and set it to `*this` in
+   `startDecodeThreadIfNeeded()` **before** `Thread::create`.
+2. `stopDecodeThread()`: signal stop, `waitForCompletion()`, clear `m_decodeThread`, and only then
+   clear `m_threadKeepAlive`. Every caller that can drop the last reference
+   (`~MediaPlayerPrivateWinUWP`, `cancelLoad`) must hold a local
+   `Ref<MediaPlayerPrivateWinUWP> protectedThis { *this }` across the call, so the final release does
+   not destroy the object while a member function is still touching `this`.
+3. With that in place the decode thread may keep its temporary self-refs: the count can no longer
+   reach 0 while it runs.
+
+Do **not** "fix" it by letting the decode thread hold a long-lived self-ref: that merely moves the
+destruction onto the decode thread, where `stopDecodeThread()` would then join itself.
+
+### Also learned: console.txt is buffered, not broken
+
+The probe pages' self-reports (`PROBE ...`, `MEDIADIAG ...`) that were *missing* during the earlier
+round showed up in `console.txt` hours later, at 23:3x. Console mirroring works; it **flushes late**.
+The earlier claim in this document that it "does not flush for these pages" was wrong — pulling too
+early is what made it look empty. `stage.txt` is buffered the same way, which is why its `media ...`
+line had not landed when the round was read.
 
 ## Root cause of "video renders as an empty control and .play() does nothing"
 
@@ -81,11 +163,12 @@ home/error pages.
 
 ### How it was found (worth reusing)
 
-The device's `console.txt` mirroring produced **nothing** for the probe pages while their timers
-demonstrably ran, so the instrument was rebuilt: the page reports by requesting a uniquely named
-resource from a LAN HTTP server, and the **server's request log is the ground truth** (see
-`tools/Test-MediaServer.ps1`, which logs the full request target). That turned "no output" into a
-complete self-report:
+The device's `console.txt` mirroring appeared to produce **nothing** for the probe pages while their
+timers demonstrably ran (it was in fact only flushing late — see "console.txt is buffered, not
+broken"), so the instrument was rebuilt rather than trusted: the page reports by requesting a
+uniquely named resource from a LAN HTTP server, and the **server's request log is the ground truth**
+(see `tools/Test-MediaServer.ps1`, which logs the full request target). That turned "no output" into a
+complete self-report, delivered immediately:
 
 ```
 video=HTMLUnknownElement  audio=HTMLUnknownElement  track=HTMLUnknownElement
