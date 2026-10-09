@@ -285,10 +285,26 @@ Any CMake re-run invalidates the WebCore PCH and makes the next `ninja WebCore` 
 harmless to skip when the change was outside WebCore (PAL, a link list): the previously
 built `WebCore.lib` still matches its sources.
 
+**There is a second, unrelated cause, and it is not fixable with `ninja -t restat`.** After an
+unrelated full build, `ninja WebCore` asked for 1008 steps *even though* the only edit was one
+`.cpp`. `ninja -d explain` named the reason for every object:
+
+```
+ninja explain: stored deps info out of date for '...SystemHeap.cpp.obj' (8120639114352540 vs 8131907669142920)
+```
+
+That is the dependency log disagreeing with the filesystem, not a content change — every header
+involved was still dated 2026-09-26 while the objects were from the later build, so nothing had
+actually changed and the objects were perfectly valid. `ninja -t restat` (which reconciles the
+*build* log) did **not** clear it; the count went from 1008 to 1049. Hand-archiving a replacement
+`lib\WebCore.lib` is not a way out either: the archive step runs `llvm-lib @CMakeFiles\WebCore.rsp`
+and **that response file does not exist** on disk, so the archive can only be produced by the
+build itself. Budget the hour; do not spend it trying to dodge this.
+
 ## Workflow: full rebuilds are the norm, so probe single files
 
-Every `ninja WebCore` run on this tree is ~1007 steps / 60-80 minutes, because the CMake PCH
-is regenerated and invalidates every TU. Do not iterate through it.
+Every `ninja WebCore` run on this tree is ~1007 steps / 60-80 minutes (PCH regeneration, plus the
+dependency-log problem above). Do not iterate through it.
 
 `ninja -t commands <object>` prints the fully-expanded compile command for any object, and
 `port/probe-media-compile.bat` (scratch, alongside `probe-bundle-compile.bat`) is one such line
