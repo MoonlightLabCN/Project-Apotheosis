@@ -2,6 +2,16 @@
 
 Branch: `media-mf`
 
+> **Where the engine-side code lives.** `WebKit/` is out of tree (gitignored), so none of the
+> WebCore-side work below is visible in a checkout of this repo. The whole media delta — the
+> `MediaPlayerPrivateWinUWP` player, `WinUWPMediaBridge.h`, the `PAL` clock implementation, the
+> `MediaPlayer.cpp` registration and the three CMake edits — is captured as a feature patch:
+> **`patches/2026-10-09-winuwp-media-mf.patch`** (7 files; reverse-apply checked). Treat that file,
+> not this document, as the source of truth for what to apply to a pristine webkitgtk-2.52.4.
+> The repo-root `wk-winuwp.patch` is the much larger whole-port master patch and was deliberately
+> left alone: the `WebKit` checkout currently has unmerged (`UU`) entries, so regenerating a master
+> patch unattended would not be trustworthy.
+
 ## Status (2026-10-09)
 
 **Both halves build.** What exists now:

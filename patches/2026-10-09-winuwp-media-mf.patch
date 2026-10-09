@@ -1,0 +1,2677 @@
+diff --git a/Source/WebCore/PAL/pal/PlatformWinUWP.cmake b/Source/WebCore/PAL/pal/PlatformWinUWP.cmake
+new file mode 100644
+index 0000000000..4a13eed0da
+--- /dev/null
++++ b/Source/WebCore/PAL/pal/PlatformWinUWP.cmake
+@@ -0,0 +1,24 @@
++# ============================================================================
++# PAL platform sources for the Windows 10 Mobile / App Container port.
++#
++# WHY THIS FILE EXISTS AT ALL: without it PAL is built from its cross-platform
++# Sources.txt only, which contains no Clock implementation - that went unnoticed
++# for the whole life of the port because nothing referenced PAL::Clock while
++# ENABLE_VIDEO was off. Turning <video> on pulls in MediaTime/PlatformTimeRanges
++# users that call PAL::Clock::create(), and the driver link then failed with:
++#
++#     undefined symbol: PAL::Clock::create(void)
++#
++# ClockGeneric is the portable std::chrono implementation; the desktop Win port
++# (PlatformWin.cmake) and the Cocoa port both use exactly this file, and there is
++# nothing Win32-specific about it. The other three entries of PlatformWin.cmake are
++# deliberately NOT copied here:
++#   crypto/openssl/CryptoDigestOpenSSL.cpp - PAL::CryptoDigest is provided by
++#       port/stubs-crypto.cpp for this port (see the note in WebCore/PlatformWinUWP.cmake);
++#       adding it here would duplicate every PAL crypto symbol.
++#   system/win/SoundWin.cpp - desktop system sounds (PlaySound/MMSystem).
++#   text/KillRing.cpp - Win32 clipboard-backed kill ring; the port has no clipboard there.
++# ============================================================================
++list(APPEND PAL_SOURCES
++    system/ClockGeneric.cpp
++)
+diff --git a/Source/WebCore/PlatformWinUWP.cmake b/Source/WebCore/PlatformWinUWP.cmake
+new file mode 100644
+index 0000000000..a1d22b04d6
+--- /dev/null
++++ b/Source/WebCore/PlatformWinUWP.cmake
+@@ -0,0 +1,564 @@
++# ============================================================================
++# PlatformWinUWP.cmake  —  WebCore platform glue for the WinUWP port
++# (EdgeHTML Reborn — ARM32 Win10-Mobile App Container)
++#
++# Modeled on Source/WebCore/PlatformWin.cmake, but stripped to the
++# App-Container-safe subset and re-pointed at the Cairo (software) graphics
++# backend + the GTK/WPE-style FreeType/Fontconfig/HarfBuzz font backend.
++#
++# RULES APPLIED (vs. PlatformWin.cmake):
++#   * KEEP  : compiler-only flags; coordinate/struct conversion *Win.cpp;
++#             Curl/OpenSSL/ImageDecoders/Cairo glue; portable text/locale;
++#             read-only Win helpers (SystemInfo/UserAgent/MIME/Logging).
++#   * DROP  : MSAA/oleacc accessibility; clipboard/drag/OLE pasteboard;
++#             native <select> popup; CreateWindow fullscreen/overlay;
++#             cursor; GDI image/icon/DIB paint; MediaFoundation video;
++#             EGL/ANGLE/OpenGL display + GL fences; SharedMemoryWin;
++#             Uniscribe + the win/win-cairo GDI/DirectWrite font backend.
++#   * REPLACE font block with include(platform/FreeType.cmake) (+Cairo.cmake
++#             for the software graphics backend).
++#   * DROP  link libs: usp10 (Uniscribe -> HarfBuzz) and the whole
++#             MediaFoundation INTERFACE lib (ENABLE_VIDEO/USE_MEDIA_FOUNDATION
++#             must be OFF so its block never runs).
++#
++# STATUS: BEST-EFFORT FIRST DRAFT. This has NOT been configured/compiled.
++# Expect to iterate against real configure + clang-cl errors. Every spot
++# that is uncertain / likely-to-need-a-stub is marked with "# UWP-TODO".
++# Several "kept" Win sources still reference desktop-only APIs at the .cpp
++# level and will need NotImplemented stubs (see STUB notes inline + in
++# OptionsWinUWP.cmake). The first goal is a CONFIGURE that succeeds and a
++# link error surface that tells us exactly which stubs to write.
++# ============================================================================
++
++add_definitions(/bigobj -D__STDC_CONSTANT_MACROS)
++
++# --- Form-control theming -------------------------------------------------
++# Adwaita paints controls purely via Cairo (no UxTheme/GDI), so it is the
++# App-Container-safe RenderTheme. WebCore on Windows normally uses
++# RenderThemeWin (GDI/UxTheme) — we deliberately do NOT take that path.
++# UWP-TODO: confirm RenderTheme resolves to Adwaita and never UxTheme.
++include(platform/Adwaita.cmake)
++
++# --- Networking + crypto + image decoding ---------------------------------
++# Curl is the only ResourceLoader backend wired for this port; OpenSSL is its
++# TLS/crypto backend. ImageDecoders pulls JPEG/PNG/WebP (all mandatory in
++# 2.52.4 — ScalableImageDecoder compiles them unconditionally on non-COCOA).
++# Phase 1b(网络接入,2026-06-15):curl ResourceLoader 后端 + OpenSSL 3.6.3 TLS(TLS 1.3,
++# 替 Win10M Schannel 只到 1.2)。include(platform/Curl.cmake) 含 include 目录 + 全套 framework
++# headers + 23 个 backend sources + CURL::libcurl/OpenSSL::SSL/LibPSL::LibPSL 链接。
++# 注:CurlSSLHandleWin.cpp(crypt32 系统根版 platformInitialize)维持不加——与 Curl.cmake 的
++# 跨平台 CurlSSLHandle.cpp 同名会 LNK2005;改走"打包 cacert.pem + setCACertPath",绕 App
++# Container 证书库不确定性(见 stubs / driver 的 CA 配置)。
++include(platform/Curl.cmake)
++# LibPSL 不支持 UWP(vcpkg: "libpsl is only supported on !uwp")→ 排除 PublicSuffixStoreCurl.cpp +
++# 不链 LibPSL::LibPSL。公共后缀只影响 cookie 域安全校验,不影响页面加载;PublicSuffixStore::platform*
++# 走 stub(port\stubs-other.cpp)。OpenSSL::SSL 经 find_package 传递依赖 OpenSSL::Crypto(OpenSSLHelper 需)。
++list(REMOVE_ITEM WebCore_SOURCES   platform/network/curl/PublicSuffixStoreCurl.cpp)
++list(REMOVE_ITEM WebCore_LIBRARIES LibPSL::LibPSL)
++include(platform/ImageDecoders.cmake)
++
++# --- WebCrypto: OpenSSL backend (0.2.0) -----------------------------------
++# 0.1.9 之前 crypto.subtle 完全不存在:CryptoAlgorithmRegistry::platformRegisterAlgorithms()
++# 是 port/stubs-crypto.cpp 里的空函数 → 注册表恒空 → 任何 subtle.* 调用都 NotSupportedError。
++# OpenSSL 本来就为 TLS 链进来了(OptionsWinUWP 里 USE_OPENSSL=ON,CryptoKeyEC/RSA.h 因此已经
++# 走 EVP_PKEY 那一支),缺的只是把这 18 个后端 TU 编进来。上游的 CryptoAlgorithmRegistryOpenSSL
++# 一次注册 SHA1/256/384/512 + HMAC + PBKDF2 + HKDF + AES-{CBC,CFB,CTR,GCM,KW} + ECDH/ECDSA +
++# RSASSA-PKCS1-v1_5 / RSA-OAEP / RSA-PSS,不需要本 port 另写注册表。
++# 加了这个之后 stubs-crypto.cpp 里 namespace WebCore 那一整段(RELEASE_ASSERT_NOT_REACHED 的
++# 假实现)必须删掉,否则每个符号都会 LNK2005 重复定义。PAL::CryptoDigest 仍留在 stub 里
++# (那是 PAL 的符号,不在 OpenSSL.cmake 覆盖范围内)。
++include(platform/OpenSSL.cmake)
++list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++    "${WEBCORE_DIR}/crypto/openssl"
++)
++
++# --- In-process network bridge: WebResourceLoadScheduler -------------------
++# Phase 1b(网络接入): the legacy WebResourceLoadScheduler (LoaderStrategy impl)
++# is normally compiled into WebKitLegacy, which this port does NOT build. We
++# pull just this one TU (+ its PingHandle.h header dep) into WebCore.lib so
++# PortPlatformStrategies::createLoaderStrategy() has a real loader strategy that
++# drives ResourceLoader -> ResourceHandle -> (curl-patched) CurlRequest.
++#   - It references NetscapePlugInStreamLoader::create (loader/NetscapePlugInStreamLoader.cpp,
++#     already in WebCore Sources.txt) and PingHandle::start (header-only) — both resolve.
++#   - WebResourceLoadScheduler.cpp now #includes "config.h" first (it relied on the
++#     WebKitLegacy build force-including it); harmless in either build.
++# Paths are absolute (${WEBKITLEGACY_DIR}) because WebCore_SOURCES entries are
++# otherwise resolved relative to ${WEBCORE_DIR}.
++list(APPEND WebCore_SOURCES
++    "${WEBKITLEGACY_DIR}/WebCoreSupport/WebResourceLoadScheduler.cpp"
++)
++list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++    "${WEBKITLEGACY_DIR}/WebCoreSupport"
++    "${WEBKITLEGACY_DIR}"
++)
++
++# --- 0.2.0 Web Platform baseline: DOM Storage / IndexedDB / WebSocket -------
++# 同上一段的道理:这些也是 WebKitLegacy 的**单进程**实现,而本 port 恰好就是单进程
++# (没有 WebProcess/NetworkProcess,也不打算造 IPC 去模拟现代 Safari 架构)。WebCore 侧的
++# Storage/StorageArea、IDB 客户端+服务端、WebSocket 协议层本来就已经编在 WebCore.lib 里,
++# 缺的只是 Page 上的 provider 实现 —— 就是下面这几个 TU。接线在 port/PortStorage.cpp。
++#
++#   Storage/StorageAreaImpl+StorageAreaSync+StorageNamespaceImpl+StorageSyncManager
++#       +StorageThread+StorageTracker+WebStorageNamespaceProvider
++#                                  → localStorage / sessionStorage(SQLite 落盘 or 纯内存)
++#   Storage/InProcessIDBServer + WebDatabaseProvider
++#                                  → IndexedDB(IDBServer 直接跑在本进程,无 IPC)
++#   WebCoreSupport/SocketStreamHandle.cpp + WebSocketChannel.cpp
++#                                  → WebSocket 协议层(握手/分帧/deflate/关闭握手)
++#
++# 不加 WebCoreSupport/LegacySocketProvider.cpp:它用 ObjC 风格的 #import 且只在 Cocoa 编;
++# 那两个函数在 port/PortStorage.cpp 里重写了一遍。
++# 不加 WebCoreSupport/SocketStreamHandleImpl.cpp:整份包在 #if PLATFORM(COCOA) 里(CFNetwork
++# 流 + PAC 代理)。curl 版实现在 port/PortSocketStreamHandle.cpp,声明在同名头的 WK_WINUWP 分支。
++list(APPEND WebCore_SOURCES
++    "${WEBKITLEGACY_DIR}/Storage/StorageAreaImpl.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/StorageAreaSync.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/StorageNamespaceImpl.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/StorageSyncManager.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/StorageThread.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/StorageTracker.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/WebStorageNamespaceProvider.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/InProcessIDBServer.cpp"
++    "${WEBKITLEGACY_DIR}/Storage/WebDatabaseProvider.cpp"
++    "${WEBKITLEGACY_DIR}/WebCoreSupport/SocketStreamHandle.cpp"
++    "${WEBKITLEGACY_DIR}/WebCoreSupport/WebSocketChannel.cpp"
++)
++list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++    "${WEBKITLEGACY_DIR}/Storage"
++)
++
++# DROPPED vs PlatformWin.cmake L7: include(platform/TextureMapper.cmake)
++#   TextureMapper is the GL / coordinated-graphics accelerated compositor.
++#   软件版(非 APOTHEOSIS_GPU)仍 software-only,故默认不含。
++#
++# APOTHEOSIS_GPU(M2 GPU 合成 0.1.7.x):重新加回 TextureMapper + EGL/ANGLE display 源,编进
++#   WebCore.lib,供 driver 的 WebCoreGpuInit/Composite 经 PlatformDisplay/GLContext/TextureMapper 合成。
++#   关键:0.1.7.1 真机闪退/M2 链接 14 个 undefined 的根因正是这些 .cpp 从没被编进 lib(软件版 DROP 掉,
++#   GPU 版只翻了 USE_* 开关却没加源)。USE_COORDINATED_GRAPHICS=0 → TextureMapper.cmake 走同步
++#   GraphicsLayerTextureMapper 分支(正是我们要的,无 Nicosia/WC/Coordinated)。
++if (APOTHEOSIS_GPU)
++    include(platform/TextureMapper.cmake)
++    # WebGL 专属(GraphicsContextGL)的两个 texmap 源:ENABLE_WEBGL=0,去掉避免无谓编译/链接。
++    list(REMOVE_ITEM WebCore_SOURCES
++        platform/graphics/texmap/GraphicsContextGLTextureMapperANGLE.cpp
++        platform/graphics/texmap/TextureMapperGCGLPlatformLayer.cpp
++    )
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${WEBCORE_DIR}/platform/graphics/egl"
++    )
++    # EGL/display 源(取自 PlatformWin.cmake L56-82 的 GL 子集;PlatformDisplayANGLE/GLFence 等 WebGL/同步
++    # 专属件按需再加)。PlatformDisplay::sharedDisplay()→PlatformDisplayWin::create()→GLDisplay::create()。
++    list(APPEND WebCore_SOURCES
++        platform/graphics/PlatformDisplay.cpp
++
++        platform/graphics/angle/PlatformDisplayANGLE.cpp
++
++        platform/graphics/egl/GLContext.cpp
++        platform/graphics/egl/GLContextWrapper.cpp
++        platform/graphics/egl/GLDisplay.cpp
++        platform/graphics/win/PlatformDisplayWin.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/graphics/win/PlatformDisplayWin.h
++    )
++    # ★ 这版 ms-master ANGLE 的 gl2.h/eglext.h 把核心 GL / EGL-ext 函数原型放在 GL_GLEXT_PROTOTYPES /
++    #   EGL_EGLEXT_PROTOTYPES 宏之下(与 GpuProbe 同坑;否则 glClear/glBindTexture/eglGetPlatformDisplayEXT 全
++    #   "undeclared identifier"),且缺 ANGLE 新常量 EGL_PLATFORM_ANGLE_DEBUG_LAYERS_ENABLED_ANGLE(=0x3451)。
++    #   只给这些直接调 GL/EGL 的 TU 加这三个宏(用 set_source_files_properties 而非 add_definitions——后者会
++    #   污染整个 WebCore 目录、触发 654 个 TU 全量重编)。
++    set(_APO_GPU_GL_SOURCES
++        platform/graphics/PlatformDisplay.cpp
++
++        platform/graphics/angle/PlatformDisplayANGLE.cpp
++
++        platform/graphics/egl/GLContext.cpp
++        platform/graphics/egl/GLContextWrapper.cpp
++        platform/graphics/egl/GLDisplay.cpp
++        platform/graphics/win/PlatformDisplayWin.cpp
++        platform/graphics/texmap/BitmapTexture.cpp
++        platform/graphics/texmap/BitmapTexturePool.cpp
++        platform/graphics/texmap/ClipPath.cpp
++        platform/graphics/texmap/ClipStack.cpp
++        platform/graphics/texmap/FloatPlane3D.cpp
++        platform/graphics/texmap/FloatPolygon3D.cpp
++        platform/graphics/texmap/GraphicsLayerTextureMapper.cpp
++        platform/graphics/texmap/TextureMapper.cpp
++        platform/graphics/texmap/TextureMapperAnimation.cpp
++        platform/graphics/texmap/TextureMapperBackingStore.cpp
++        platform/graphics/texmap/TextureMapperDamageVisualizer.cpp
++        platform/graphics/texmap/TextureMapperFPSCounter.cpp
++        platform/graphics/texmap/TextureMapperGPUBuffer.cpp
++        platform/graphics/texmap/TextureMapperLayer.cpp
++        platform/graphics/texmap/TextureMapperLayer3DRenderingContext.cpp
++        platform/graphics/texmap/TextureMapperPlatformLayer.cpp
++        platform/graphics/texmap/TextureMapperShaderProgram.cpp
++        platform/graphics/texmap/TextureMapperTile.cpp
++        platform/graphics/texmap/TextureMapperTiledBackingStore.cpp
++    )
++    set_source_files_properties(${_APO_GPU_GL_SOURCES} PROPERTIES COMPILE_DEFINITIONS
++        "GL_GLEXT_PROTOTYPES=1;EGL_EGLEXT_PROTOTYPES=1;EGL_PLATFORM_ANGLE_DEBUG_LAYERS_ENABLED_ANGLE=0x3451")
++
++    # Apotheosis: 回补 ahorn42 版的 Cairo 绘制栈 + CoordinatedTileBuffer(重排时随 T_full 版
++    # cmake 丢失)TileGrid 的逐层光栅化走这套;CairoPaintingContext.cpp 无限定名包含
++    # "CoordinatedTileBuffer.h"，故把 coordinated 目录加进 include 路径。
++    list(APPEND WebCore_SOURCES
++        platform/graphics/cairo/CairoOperationRecorder.cpp
++        platform/graphics/cairo/CairoPaintingContext.cpp
++        platform/graphics/cairo/CairoPaintingEngine.cpp
++        platform/graphics/cairo/CairoPaintingEngineBasic.cpp
++        platform/graphics/cairo/CairoPaintingEngineThreaded.cpp
++
++        platform/graphics/texmap/coordinated/CoordinatedTileBuffer.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/graphics/cairo/CairoPaintingEngine.h
++    )
++
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${WEBCORE_DIR}/platform/graphics/texmap/coordinated"
++    )
++
++    # Apotheosis: TileGrid v2 (docs/TILEGRID-DESIGN.md). The model and the store
++    # core are WebCore-free C++17 and are also built on the PC by
++    # Project-Apotheosis/tests/tilegrid; TextureMapperTileGridStore.cpp is the
++    # WebCore adapter. WinUWP-only, and since package 5 the only tiled store this
++    # port has - every other port keeps upstream's TextureMapperTiledBackingStore,
++    # which is compiled here but referenced by nothing and dropped by the linker.
++    # (Re-applied during the 2.54 rebase: this block was lost when the two
++    # PlatformWinUWP.cmake drafts got merged.)
++    list(APPEND WebCore_SOURCES
++        platform/graphics/texmap/TextureMapperTileGridCore.cpp
++        platform/graphics/texmap/TextureMapperTileGridModel.cpp
++        platform/graphics/texmap/TextureMapperTileGridStore.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/graphics/texmap/TextureMapperTileGridCore.h
++        platform/graphics/texmap/TextureMapperTileGridModel.h
++        platform/graphics/texmap/TextureMapperTileGridStore.h
++    )
++
++    # Boost.SML, vendored as Source/ThirdParty/sml. Included only from
++    # TextureMapperTileGridMachines.h, i.e. from TextureMapperTileGridModel.cpp,
++    # so the template-heavy header cannot leak into the rest of the build.
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${THIRDPARTY_DIR}/sml"
++    )
++endif ()
++
++# --- Graphics backend: Cairo (software image-surface) ---------------------
++# REQUIRED. Cairo.cmake adds SourcesCairo.txt. Note: that unified list still
++# contains GraphicsContextGLCairo.cpp, but it is self-guarded by
++# '#if ENABLE(WEBGL) && USE(CAIRO)' and compiles to nothing with WEBGL OFF,
++# so pulling Cairo.cmake verbatim is safe. The GTK-only GdkPixbuf branch in
++# ImageBufferUtilitiesCairo.cpp is inert as long as PLATFORM(GTK) is undefined
++# (it is, for PORT=WinUWP) — the active path is cairo-only PNG encode.
++if (USE_CAIRO)
++    include(platform/Cairo.cmake)
++# elseif (USE_SKIA)              # Skia path intentionally unsupported here.
++#     include(platform/Skia.cmake)
++endif ()
++
++# DROPPED vs PlatformWin.cmake L15-17: if (USE_DAWN) include(platform/Dawn.cmake)
++#   WebGPU/Dawn is off for this port.
++
++# --- Font/text backend: FreeType + Fontconfig + HarfBuzz ------------------
++# This REPLACES the entire win/win-cairo GDI+DirectWrite+Uniscribe+MLang font
++# stack (PlatformWin.cmake L203-214) and SystemFontDatabaseWin (L83).
++# FreeType.cmake supplies FontCacheFreeType / FontPlatformDataFreeType /
++# FontCustomPlatformDataFreeType / SimpleFontDataFreeType /
++# GlyphPageTreeNodeFreeType / FontSetCache / RefPtrFontconfig +
++# ComplexTextControllerHarfBuzz / FontDescriptionHarfBuzz, and under USE_CAIRO
++# adds platform/graphics/cairo/FontCairoHarfbuzzNG.cpp (the Cairo glyph-draw
++# glue the dropped Font*WinCairo files used to provide). It also appends the
++# Fontconfig::/Freetype::/HarfBuzz::/HarfBuzz::ICU link libs.
++# UWP-TODO (runtime, not cmake): Fontconfig needs a writable cache dir or a
++#   baked-in fonts.conf inside the App Container sandbox (FONTCONFIG_PATH /
++#   sysroot shim). Out of cmake scope but required to actually render glyphs.
++include(platform/FreeType.cmake)
++
++# --------------------------------------------------------------------------
++# Private include dirs (trimmed from PlatformWin.cmake L19-30).
++#   DROPPED: accessibility/win (MSAA), platform/graphics/egl + opengl (GL),
++#            platform/video-codecs (no media).
++#   KEPT   : page/win (EventHandler/Frame glue), graphics/opentype (OT/WOFF
++#            parsing + FontMemoryResource header), graphics/win (shared
++#            headers: IntRectWin/SharedGDIObject/LocalWindowsContext etc.),
++#            platform/mediacapabilities, platform/network/win, platform/win.
++# UWP-TODO: graphics/win is kept ONLY for headers used by kept conversion
++#   files; if it drags in GDI .cpp expectations, prune further.
++# --------------------------------------------------------------------------
++list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++    # accessibility/win 的 .cpp(MSAA/oleacc)已排除,但核心 AXCoreObject.h 仍 include
++    # AccessibilityObjectWrapperWin.h,故保留其 include 目录(只为头可见;若头拖入 oleacc 再守卫)。
++    "${WEBCORE_DIR}/accessibility/win"
++    "${WEBCORE_DIR}/page/win"
++    "${WEBCORE_DIR}/platform/graphics/opentype"
++    # AV1Utilities.cpp(无条件编)include video-codecs/BitReader.h(纯头,无媒体依赖)
++    "${WEBCORE_DIR}/platform/video-codecs"
++    "${WEBCORE_DIR}/platform/graphics/win"
++    "${WEBCORE_DIR}/platform/mediacapabilities"
++    "${WEBCORE_DIR}/platform/network/win"
++    "${WEBCORE_DIR}/platform/win"
++)
++
++# --------------------------------------------------------------------------
++# Sources (trimmed from PlatformWin.cmake L32-116).
++# Every line below was classified App-Container-safe OR is a struct/coordinate
++# conversion file touching only POINT/RECT/SIZE/BSTR/XFORM (no forbidden API).
++# Files marked "# STUB:" build today but reference desktop-only APIs in their
++# .cpp and WILL need a NotImplemented / WinRT replacement before they link or
++# run correctly.
++# --------------------------------------------------------------------------
++list(APPEND WebCore_SOURCES
++    # --- page/win: event + frame glue (no HWND message pump needed here) ---
++    page/win/EventHandlerWin.cpp
++    page/win/FrameWin.cpp
++
++    # --- portable platform bits -------------------------------------------
++    platform/LocalizedStrings.cpp           # STUB: guard the AX/context-menu
++                                            # string sets that pair with the
++                                            # excluded accessibility + context
++                                            # menu code (UWP-TODO).
++
++    platform/generic/KeyedDecoderGeneric.cpp
++    platform/generic/KeyedEncoderGeneric.cpp
++
++    # --- OpenType / custom-font table parsing (no GDI) --------------------
++    platform/graphics/opentype/OpenTypeUtilities.cpp
++
++    # --- graphics/win: struct <-> Float/Int conversions only (no GDI) -----
++    platform/graphics/win/FloatPointWin.cpp
++    platform/graphics/win/FloatRectWin.cpp
++    platform/graphics/win/IntPointWin.cpp
++    platform/graphics/win/IntRectWin.cpp
++    platform/graphics/win/IntSizeWin.cpp
++    platform/graphics/win/TransformationMatrixWin.cpp
++
++    # --- network/win: CA cert load via crypt32 (App-Container-safe) -------
++    # DEFERRED(network): platform/network/win/CurlSSLHandleWin.cpp
++    # DROPPED L87 NetworkStateNotifierWin.cpp: NotifyAddrChange overlapped
++    #   iphlpapi notify is not in the App-Container API set.
++    #   UWP-TODO: provide a WinRT connectivity-based NetworkStateNotifier, or
++    #   accept the generic/no-op notifier (likely a link stub is needed).
++
++    # --- text -------------------------------------------------------------
++    platform/text/Hyphenation.cpp           # generic NotImplemented stub
++    platform/text/LocaleICU.cpp             # ICU-based, no Win32
++
++    # --- platform/win: read-only / struct helpers -------------------------
++    platform/win/BString.cpp                # BSTR/OLE string (allowed)
++    platform/win/BitmapInfo.cpp             # fills BITMAPINFO struct (no GDI
++                                            # calls); used by Cairo image bridge
++    platform/win/KeyEventWin.cpp            # Apotheosis: GetKeyState 已 WK_WINUWP 守卫;收回 —— 2.54 需 disambiguateKeyDownEvent/currentModifiers
++    platform/win/LoggingWin.cpp             # debug logging
++    platform/win/MIMETypeRegistryWin.cpp    # registry read (allowed)
++    platform/win/SystemInfo.cpp             # OS version string (read-only)
++    platform/win/UserAgentWin.cpp           # UA string from SystemInfo
++    platform/win/WebCoreTextRenderer.cpp    # thin FontCascade draw helper
++    platform/win/WindowsKeyNames.cpp        # Apotheosis: GetKeyState 已 WK_WINUWP 守卫;收回
++
++    # --- STUB sources: build but need a non-desktop reimplementation ------
++    # EXCLUDED(App Container: HWND/SetTimer -> generic RunLoop timer): platform/win/MainThreadSharedTimerWin.cpp   # STUB: creates a hidden
++            # HWND_MESSAGE window (CreateWindow/RegisterClassEx) to drive the
++            # shared timer — forbidden in App Container. Replace with a WTF
++            # RunLoop / CreateTimerQueueTimer-based MainThreadSharedTimer.
++            # UWP-TODO: most likely the first file we must swap for a generic.
++    platform/win/WebCoreInstanceHandle.cpp      # STUB: stores HINSTANCE via
++            # DllMain — UWP app has no classic DllMain flow. Set instance
++            # handle from GetModuleHandleEx / module base at init.
++    platform/win/WebCoreBundleWin.cpp           # STUB: resolves WebKit.resources
++            # via GetModuleFileName(instanceHandle). Repoint to the UWP package
++            # Install Location (Windows.ApplicationModel.Package).
++    platform/win/SearchPopupMenuDB.cpp          # STUB: SQLite-backed search
++            # autosave; repoint DB to app-data sandbox path or make in-memory.
++
++    # --- media: WinUWP Media Foundation SourceReader backend (media-mf) ---
++    # Apotheosis: upstream's platform/graphics/win/MediaPlayerPrivateMediaFoundation.*
++    # is a Win32 desktop presenter (EVR topology + D3D9 swap chain on an HWND) and stays
++    # in the DROPPED list below. MediaPlayerPrivateWinUWP.cpp replaces it: decode through
++    # MFSourceReader (Video Processor asked for RGB32), presentation through the port's
++    # existing Cairo/TextureMapper route, so no new present path is introduced.
++    # ENABLE_VIDEO is ON for this port (OptionsWinUWP.cmake) and USE_MEDIA_FOUNDATION
++    # stays OFF, which is why the file is listed here rather than under that flag.
++    platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
++
++    # ======================================================================
++    # EXPLICITLY DROPPED (was in PlatformWin.cmake) — reasons:
++    #   L33-35 accessibility/win/AX*Win.cpp ............ MSAA/IAccessible (oleacc)
++    #   L37   editing/win/EditorWin.cpp ................ clipboard/HGLOBAL editing
++    #   L39   html/HTMLSelectElementWin.cpp ............ native Win32 popup menu
++    #   L41   page/win/DragControllerWin.cpp .......... OLE drag (DoDragDrop)
++    #   L44-45 page/win/ResourceUsage*Win.cpp ......... CreateWindow debug overlay
++    #   L47   platform/Cursor.cpp ..................... LoadCursor/SetCursor
++    #   L49   platform/StaticPasteboard.cpp ........... clipboard
++    #   L51   platform/audio/PlatformMediaSessionManager.cpp . media stack
++    #   L56   platform/graphics/PlatformDisplay.cpp ... EGL/ANGLE display
++    #   L58   .../angle/PlatformDisplayANGLE.cpp ...... ANGLE display
++    #   L60-65 .../egl/GL*.cpp ........................ OpenGL/EGL context+fences
++    #   L69   .../win/DIBPixelData.cpp ................ GDI DIB pixels (Cairo used)
++    #   L70   .../win/DisplayRefreshMonitorWin.cpp .... Win display-link (generic ok)
++    #   L73-74 .../win/FullScreen*.cpp ................ CreateWindow fullscreen
++    #   L75   .../win/GraphicsContextWin.cpp .......... GDI HDC bridge
++    #         UWP-TODO: if kept code calls getWindowsContext/releaseWindowsContext
++    #         we must add a NotImplemented stub instead of re-adding this file.
++    #   L76   .../win/IconWin.cpp ..................... HICON/LoadImage GDI
++    #   L77   .../win/ImageAdapterWin.cpp ............. GDI HBITMAP (Cairo used)
++    #   L81   .../win/MediaPlayerPrivateMediaFoundation.cpp . MediaFoundation
++    #   L82   .../win/PlatformDisplayWin.cpp .......... EGL/ANGLE display
++    #   L83   .../win/SystemFontDatabaseWin.cpp ....... Win font enum (Fontconfig used)
++    #   L94   .../win/ClipboardUtilitiesWin.cpp ....... clipboard
++    #   L95   .../win/CursorWin.cpp .................... cursor
++    #   L96   .../win/DragDataWin.cpp ................. OLE drag IDataObject
++    #   L97   .../win/GDIUtilities.cpp ................ GDI GetDeviceCaps/DPI
++    #         UWP-TODO: if DPI is needed, replace with WinRT DisplayInformation.
++    #   L102  .../win/PasteboardWin.cpp .............. clipboard
++    #   L103  .../win/PlatformMouseEventWin.cpp ....... WM_MOUSE* message pump
++    #   L104  .../win/PlatformScreenWin.cpp ........... MonitorFromWindow/HostWindow
++    #         UWP-TODO: needs a WinRT DisplayInformation-backed PlatformScreen stub
++    #         (PlatformScreen is referenced broadly — likely a required stub).
++    #   L106  .../win/SharedMemoryWin.cpp ............. CreateFileMapping named SHM
++    #   L109  .../win/WCDataObject.cpp ............... OLE IDataObject
++    #   L113  .../win/WheelEventWin.cpp .............. WM_WHEEL message pump
++    #   L114  .../win/WindowMessageBroadcaster.cpp .... HWND WndProc subclassing
++    # ======================================================================
++)
++
++# --------------------------------------------------------------------------
++# Private framework headers (trimmed from PlatformWin.cmake L118-145).
++# Keep headers needed to compile the kept .cpp + widely-included COM/GDI-type
++# RAII wrapper headers (harmless includes even when their GDI paths are unused).
++# --------------------------------------------------------------------------
++list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++    page/win/FrameWin.h
++
++    platform/graphics/opentype/FontMemoryResource.h  # RAII in-memory font
++            # (AddFontMemResourceEx). Header KEPT; impl may need a stub.
++
++    platform/graphics/win/DIBPixelData.h        # used by BitmapInfo/Cairo bridge
++    platform/graphics/win/LocalWindowsContext.h  # RAII HDC wrapper header
++    platform/graphics/win/SharedGDIObject.h      # RAII GDI handle template
++
++    platform/graphics/win/WinUWPMediaBridge.h   # Apotheosis: the media contract shared with
++            # port/ (audio sink interface + diagnostics). It must be a private framework
++            # header because port/PortMediaAudio.cpp includes it as
++            # <WebCore/WinUWPMediaBridge.h>; deliberately free of MediaPlayer/MF includes.
++
++    platform/win/BString.h
++    platform/win/BitmapInfo.h
++    platform/win/COMPtr.h                        # COM smart ptr, widely included
++    platform/win/HWndDC.h                        # header only (impl GDI-stubbed)
++    platform/win/SearchPopupMenuDB.h
++    platform/win/SystemInfo.h
++    platform/win/WebCoreBundleWin.h
++    platform/win/WebCoreTextRenderer.h
++    platform/win/WindowsKeyNames.h
++
++    # DROPPED headers (with their .cpp):
++    #   accessibility/win/AccessibilityObjectWrapperWin.h (MSAA)
++    #   platform/graphics/win/FullScreenController*.h / FullScreenWindow.h
++    #   platform/win/GDIUtilities.h (GDI)
++    #   platform/win/WCDataObject.h (OLE)
++    #   platform/win/WindowMessageBroadcaster.h / WindowMessageListener.h (HWND)
++)
++
++# --------------------------------------------------------------------------
++# Link libraries (trimmed from PlatformWin.cmake L147-151).
++#   KEEP : crypt32  (cert store for OpenSSL/Curl) — App-Container-safe
++#          iphlpapi (adapter info)                — App-Container-safe
++#   DROP : usp10    (Uniscribe) — replaced by HarfBuzz::HarfBuzz / HarfBuzz::ICU
++#          (those come from FreeType.cmake above).
++# UWP-TODO: in App Container, link against WindowsApp.lib (umbrella) instead of
++#   discrete desktop import libs where possible; crypt32/iphlpapi are believed
++#   App-Container-safe but verify against the device's allowed import set.
++# --------------------------------------------------------------------------
++list(APPEND WebCore_LIBRARIES
++    crypt32
++    iphlpapi
++
++    # Apotheosis (media-mf): Media Foundation. WindowsApp.lib is the UWP umbrella that
++    # carries the API-set forwarders for the MF surface; the discrete mf* import libs are
++    # named explicitly because the SourceReader / Video Processor entry points are exactly
++    # what MediaPlayerPrivateWinUWP.cpp calls, and a missing one should fail loudly here
++    # rather than silently at runtime. ole32/oleaut32 are for CoInitializeEx and
++    # PropVariantClear. (SDK 22621 ARM ships all of these — verified before enabling.)
++    WindowsApp.lib
++    mfplat
++    mfreadwrite
++    mfuuid
++    ole32
++    oleaut32
++)
++
++# WebCoreTestSupport is not built for this port (ENABLE_API_TESTS OFF), so the
++# shlwapi test-support lib (PlatformWin.cmake L153-155) is intentionally omitted.
++
++# --------------------------------------------------------------------------
++# Resources: broken-image / resize-corner icons used during paint, plus the
++# modern-media-control images (harmless copies). Kept from L157-171.
++# --------------------------------------------------------------------------
++set(iconFiles
++    Resources/missingImage.png
++    Resources/missingImage@2x.png
++    Resources/missingImage@3x.png
++    Resources/panIcon.png
++    Resources/textAreaResizeCorner.png
++    Resources/textAreaResizeCorner@2x.png
++)
++
++file(COPY ${iconFiles} DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/WebKit.resources/icons)
++
++# DEFERRED(no-video): ModernMediaControls image copy (var undefined when ENABLE_VIDEO OFF)
++
++# --------------------------------------------------------------------------
++# DROPPED block: PlatformWin.cmake L173-199 — the MediaFoundation INTERFACE
++# library (d3d9/dwrite/dxva2/evr/mf/mfplat/mfuuid/strmiids + /DELAYLOAD).
++# It is gated by `if (ENABLE_VIDEO AND USE_MEDIA_FOUNDATION)`; both are forced
++# OFF in OptionsWinUWP.cmake, so the block never runs. This is also how dwrite
++# (the only other DirectWrite reference) is dropped. We do NOT replicate it.
++# --------------------------------------------------------------------------
++
++# --------------------------------------------------------------------------
++# Graphics-only Cairo glue (the NON-font survivors of PlatformWin.cmake's
++# `if (USE_CAIRO)` block L201-220). The font lines L203-214 are REPLACED by
++# include(platform/FreeType.cmake) above. The media + drag lines are dropped.
++#   KEEP  : GraphicsContextWinCairo.cpp (the Cairo GraphicsContext impl)
++#           ImageAdapterWinCairo.cpp    (Cairo image<->surface adapter)
++#   DROP  : ComplexTextControllerUniscribe / FontCacheWin / FontDescriptionWin
++#           / FontPlatformDataWin / FontWin / GlyphPageTreeNodeWin /
++#           SimpleFontDataWin / FontCustomPlatformDataWin (L203-210)  -> FreeType
++#           cairo/FontCacheWinCairo / FontCustomPlatformDataWinCairo /
++#           FontPlatformDataWinCairo (L212-214)                       -> FreeType
++#           cairo/MediaPlayerPrivateMediaFoundationCairo.cpp (L217)   -> no media
++#           cairo/DragImageWinCairo.cpp via platform/win/cairo (L219) -> no drag
++# UWP-TODO: GraphicsContextWinCairo.cpp may reference getWindowsContext (the
++#   GDI HDC bridge from the dropped GraphicsContextWin.cpp). If so, add a
++#   NotImplemented stub for getWindowsContext/releaseWindowsContext rather than
++#   re-introducing GDI. This is a likely first compile/link failure.
++# --------------------------------------------------------------------------
++if (USE_CAIRO)
++    # EXCLUDED(App Container): 这两个只提供 cairo-win32(cairo_win32_surface_create)的 GDI/HDC 桥
++    # (getWindowsContext/releaseWindowsContext),App Container 无 GDI、cairo 也是 image-only 无 win32
++    # 后端。真正的 Cairo GraphicsContext 由跨平台 platform/graphics/cairo/GraphicsContextCairo.cpp
++    # (SourcesCairo.txt,已编)提供。UWP-TODO: 若有代码链 getWindowsContext,加 NotImplemented stub。
++    # platform/graphics/win/cairo/GraphicsContextWinCairo.cpp
++    # platform/graphics/win/cairo/ImageAdapterWinCairo.cpp
++endif ()
++
++# --------------------------------------------------------------------------
++# WOFF2 web-font decompression (PlatformWin.cmake L229-236). Pure libs, but
++# USE_WOFF2 is OFF for the minimal Phase-1 config (avoids the Brotli/WOFF2
++# REQUIRED find_package). Block kept verbatim so flipping USE_WOFF2 ON later
++# "just works".
++# --------------------------------------------------------------------------
++if (USE_WOFF2)
++    list(APPEND WebCore_LIBRARIES
++        Brotli::dec
++        WOFF2::common
++    )
++endif ()
++
++# DROPPED: PlatformWin.cmake L238-240 `if (USE_SKIA) ... SHARPYUV_LIBS` —
++# Skia is OFF; never built under USE_CAIRO.
+\ No newline at end of file
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+index c8a0744b2c..0d64d33416 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
++++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+@@ -84,6 +84,14 @@
+ #include "MediaPlayerPrivateMediaFoundation.h"
+ #endif
+ 
++#if defined(WK_WINUWP)
++// Apotheosis (media-mf): the WinUWP backend. It is *not* gated on USE(MEDIA_FOUNDATION)
++// because that flag would also pull in the desktop presenter (HWND/EVR/D3D9), which is
++// exactly what this backend exists to avoid; only the decode half of Media Foundation is
++// reused. See platform/graphics/win/MediaPlayerPrivateWinUWP.h.
++#include "MediaPlayerPrivateWinUWP.h"
++#endif
++
+ #if PLATFORM(COCOA)
+ 
+ #if USE(AVFOUNDATION)
+@@ -352,6 +360,13 @@ static void buildMediaEnginesVector() WTF_REQUIRES_LOCK(mediaEngineVectorLock)
+     MediaPlayerPrivateMediaFoundation::registerMediaEngine(addMediaEngine);
+ #endif
+ 
++#if defined(WK_WINUWP)
++    // Apotheosis (media-mf): Media Foundation SourceReader backend for Windows 10 Mobile /
++    // App Container. Registered unconditionally: it is the only engine this port has, and
++    // supportsType() is what decides whether a given resource can actually be played.
++    MediaPlayerPrivateWinUWP::registerMediaEngine(addMediaEngine);
++#endif
++
+ #if USE(EXTERNAL_HOLEPUNCH)
+     MediaPlayerPrivateHolePunch::registerMediaEngine(addMediaEngine);
+ #endif
+diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
+new file mode 100644
+index 0000000000..0dafe0c573
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
+@@ -0,0 +1,1425 @@
++/*
++ * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
++ * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
++ * MediaPlayerPrivateMediaFoundation (which is an EVR/D3D9/HWND desktop presenter).
++ *
++ * Decode is Media Foundation's SourceReader; presentation is the port's existing
++ * Cairo / TextureMapper path, so neither present route needed a new hook.
++ *
++ * Threading, restated because it is the whole design:
++ *   engine thread : everything HTMLMediaElement can reach; owns the frame buffer swap,
++ *                   the buffered ranges, and every MediaPlayer notification.
++ *   decode thread : everything Media Foundation plus the media clock. It never calls
++ *                   MediaPlayer; it hands work back with callOnMainThread().
++ */
++
++#include "config.h"
++#include "MediaPlayerPrivateWinUWP.h"
++
++#if defined(WK_WINUWP) && ENABLE(VIDEO)
++
++#include "BString.h"
++#include "COMPtr.h"
++#include "ContentType.h"
++#include "DestinationColorSpace.h"
++#include "GraphicsContext.h"
++#include "ImagePaintingOptions.h"
++#include "IntSize.h"
++#include "MediaPlayer.h"
++#include "NativeImage.h"
++#include "PlatformMediaDecodingType.h"
++#include "PlatformTimeRanges.h"
++#include "RefPtrCairo.h"
++#include <cairo.h>
++#include <mfapi.h>
++#include <mfidl.h>
++#include <mfreadwrite.h>
++#include <Mferror.h>
++#include <cstddef>
++#include <cstring>
++#include <mutex>
++#include <wtf/MainThread.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/TZoneMallocInlines.h>
++#include <wtf/text/ASCIILiteral.h>
++
++namespace WebCore {
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaPlayerPrivateWinUWP);
++
++// Media Foundation reports timestamps in 100-nanosecond units.
++static constexpr uint32_t tenMegahertz = 10000000;
++
++// How far ahead of the media clock a decoded frame may be before we hold it back.
++// Frames inside this window are presented immediately; the window absorbs the jitter
++// of a 60 Hz present tick against a 30 fps source.
++static constexpr double presentationLeadSeconds = 0.005;
++// Upper bound on one decode-thread sleep, so stop/pause requests are noticed promptly.
++static constexpr double maximumSleepSeconds = 0.020;
++// How long the decode loop parks when there is nothing to do.
++static constexpr Seconds idleParkInterval { 50_ms };
++
++// ===========================================================================
++// Process-wide diagnostics (read by the driver -> stage.txt)
++// ===========================================================================
++namespace {
++
++std::atomic<unsigned> g_startedSourceReaders { 0 };
++std::atomic<unsigned long long> g_framesDecoded { 0 };
++std::atomic<unsigned long long> g_framesPresented { 0 };
++std::atomic<unsigned long long> g_pcmFramesPushed { 0 };
++std::atomic<unsigned long long> g_pcmFramesDropped { 0 };
++std::atomic<long> g_lastError { 0 };
++std::atomic<const char*> g_lastErrorSite { nullptr };
++std::atomic<unsigned> g_nativeVideoSubtype { 0 };
++std::atomic<unsigned> g_outputVideoSubtype { 0 };
++std::atomic<bool> g_dxvaDisabled { false };
++std::atomic<WinUWPMediaAudioSink*> g_audioSink { nullptr };
++
++void recordError(HRESULT hr, const char* site)
++{
++    if (FAILED(hr)) {
++        g_lastError.store(static_cast<long>(hr));
++        g_lastErrorSite.store(site);
++    }
++}
++
++// Sleep, but never for longer than maximumSleepSeconds: every wait in the decode loop
++// is a place where a stop request has to stay answerable.
++void sleepForSeconds(double seconds)
++{
++    if (seconds <= 0)
++        return;
++    // WTF::sleep(Seconds) is the portable form; there is no Thread::sleep in this WTF.
++    WTF::sleep(Seconds { seconds > maximumSleepSeconds ? maximumSleepSeconds : seconds });
++}
++
++// Containers Win10 Mobile 15254 actually has decoders for. WebM is deliberately absent:
++// Windows 10 Mobile never shipped a VP8/VP9 decoder, so claiming support would leave the
++// element waiting for frames that can never arrive (which is exactly the failure mode
++// this whole line of work exists to remove).
++HashSet<String>& winUWPMediaSupportedTypes()
++{
++    static NeverDestroyed<HashSet<String>> cache = [] {
++        HashSet<String> types;
++        const ASCIILiteral containers[] = {
++            "video/mp4"_s,
++            "audio/mp4"_s,
++            "video/x-m4v"_s,
++            "audio/x-m4a"_s,
++            "video/quicktime"_s,
++            "audio/aac"_s,
++            "audio/mpeg"_s,
++            "audio/mp3"_s,
++            "audio/wav"_s,
++            "audio/x-wav"_s,
++            "video/x-ms-wmv"_s,
++            "audio/x-ms-wma"_s,
++            "video/x-msvideo"_s,
++            "video/3gpp"_s,
++            "audio/3gpp"_s,
++            "video/3gpp2"_s,
++            "audio/3gpp2"_s,
++        };
++        for (auto& container : containers)
++            types.add(String { container });
++        return types;
++    }();
++    return cache.get();
++}
++
++} // anonymous namespace
++
++unsigned WinUWPMediaDiagnostics::startedSourceReaders() { return g_startedSourceReaders.load(); }
++unsigned long long WinUWPMediaDiagnostics::framesDecoded() { return g_framesDecoded.load(); }
++unsigned long long WinUWPMediaDiagnostics::framesPresented() { return g_framesPresented.load(); }
++unsigned long long WinUWPMediaDiagnostics::pcmFramesPushed() { return g_pcmFramesPushed.load(); }
++unsigned long long WinUWPMediaDiagnostics::pcmFramesDropped() { return g_pcmFramesDropped.load(); }
++HRESULT WinUWPMediaDiagnostics::lastError() { return static_cast<HRESULT>(g_lastError.load()); }
++const char* WinUWPMediaDiagnostics::lastErrorSite() { return g_lastErrorSite.load(); }
++unsigned WinUWPMediaDiagnostics::nativeVideoSubtype() { return g_nativeVideoSubtype.load(); }
++unsigned WinUWPMediaDiagnostics::outputVideoSubtype() { return g_outputVideoSubtype.load(); }
++bool WinUWPMediaDiagnostics::dxvaDisabled() { return g_dxvaDisabled.load(); }
++
++void WinUWPMediaDiagnostics::recordVideoTypes(unsigned nativeSubtype, unsigned outputSubtype, bool dxvaDisabled)
++{
++    g_nativeVideoSubtype.store(nativeSubtype);
++    g_outputVideoSubtype.store(outputSubtype);
++    g_dxvaDisabled.store(dxvaDisabled);
++}
++
++WinUWPMediaAudioSink* winUWPMediaAudioSink()
++{
++    return g_audioSink.load();
++}
++
++void setWinUWPMediaAudioSink(WinUWPMediaAudioSink* sink)
++{
++    // Installed from the driver before any media element exists, so decode threads that
++    // read it later always observe a fully constructed sink.
++    g_audioSink.store(sink);
++}
++
++// ===========================================================================
++// Media Foundation lifetime
++// ===========================================================================
++namespace {
++
++bool ensureMediaFoundationStarted()
++{
++    static std::once_flag once;
++    static bool started = false;
++    std::call_once(once, [] {
++        // MFSTARTUP_LITE skips the media pipeline (presentation) side: the SourceReader
++        // needs only the platform, the source resolver and the codecs.
++        HRESULT hr = ::MFStartup(MF_VERSION, MFSTARTUP_LITE);
++        if (SUCCEEDED(hr))
++            started = true;
++        else
++            recordError(hr, "MFStartup");
++    });
++    return started;
++}
++
++// Media Foundation needs COM on every thread that touches it. The decode thread is
++// ours, so it initializes an MTA and tears it down again; the engine thread is left
++// exactly as it was.
++class ScopedThreadComInitialization {
++public:
++    ScopedThreadComInitialization()
++        : m_hr(::CoInitializeEx(nullptr, COINIT_MULTITHREADED))
++    {
++    }
++    ~ScopedThreadComInitialization()
++    {
++        // Only the call that actually initialized the apartment may uninitialize it.
++        if (m_hr == S_OK || m_hr == S_FALSE)
++            ::CoUninitialize();
++    }
++    // RPC_E_CHANGED_MODE means a different apartment model is already installed on this
++    // thread; Media Foundation works from either, so it is not a failure for us.
++    bool ok() const { return SUCCEEDED(m_hr) || m_hr == RPC_E_CHANGED_MODE; }
++    HRESULT result() const { return m_hr; }
++
++private:
++    HRESULT m_hr { E_FAIL };
++};
++
++} // anonymous namespace
++
++// ===========================================================================
++// Per-stream decode state. Owned by the decode thread; destroyed after it is joined.
++// ===========================================================================
++struct MediaPlayerPrivateWinUWP::DecoderState {
++    COMPtr<IMFSourceReader> reader;
++
++    bool hasVideo { false };
++    bool hasAudio { false };
++    // The reader only reports *real* stream indices from ReadSample(ANY_STREAM), so the
++    // configured streams are tracked by their real indices (see openSourceReader).
++    unsigned videoStreamIndex { 0 };
++    unsigned audioStreamIndex { 0 };
++    int videoStride { 0 };
++    IntSize videoSize;
++    bool videoIsBottomUp { false };
++    bool audioIsFloat { true };
++    bool dxvaDisabled { false };
++    // Set once every selected stream has reported end of stream.
++    bool eos { false };
++    // Set when the reader reports a hard error: the decode loop parks on this instead of
++    // retrying a reader that will never produce a sample again.
++    bool failed { false };
++};
++
++// ===========================================================================
++// Construction / teardown
++// ===========================================================================
++
++MediaPlayerPrivateWinUWP::MediaPlayerPrivateWinUWP(MediaPlayer& player)
++    : m_player(player)
++{
++}
++
++MediaPlayerPrivateWinUWP::~MediaPlayerPrivateWinUWP()
++{
++    stopDecodeThread();
++}
++
++void MediaPlayerPrivateWinUWP::startDecodeThreadIfNeeded()
++{
++    if (m_decodeThread)
++        return;
++
++    m_decoder = makeUniqueWithoutFastMallocCheck<DecoderState>();
++    m_decodeThread = Thread::create("WinUWPMediaDecode"_s, [this] {
++        decodeThreadBody();
++    });
++}
++
++void MediaPlayerPrivateWinUWP::stopDecodeThread()
++{
++    RefPtr<Thread> thread;
++    {
++        Locker locker { m_lock };
++        m_stopRequested = true;
++        m_seekPending = false;
++        // Settling (rather than dropping) makes the cancellation explicit; the producer's own
++        // destructor would reject an unsettled promise anyway.
++        if (m_seekProducer) {
++            m_seekProducer->reject(PlatformMediaError::Cancelled);
++            m_seekProducer.reset();
++        }
++        thread = m_decodeThread;
++        m_condition.notifyAll();
++    }
++
++    if (thread) {
++        thread->waitForCompletion();
++        Locker locker { m_lock };
++        m_decodeThread = nullptr;
++    }
++
++    // Only safe once the decode thread is gone: the state (and the Media Foundation
++    // objects inside it) is otherwise still in use.
++    m_decoder = nullptr;
++}
++
++// ===========================================================================
++// Load / transport
++// ===========================================================================
++
++void MediaPlayerPrivateWinUWP::load(const String& url)
++{
++    cancelLoad();
++
++    m_buffered.clear();
++
++    {
++        Locker locker { m_lock };
++        m_url = url;
++        m_stopRequested = false;
++        // Media starts paused: HTMLMediaElement drives play() once it has metadata.
++        m_paused = true;
++        m_seekPending = false;
++        m_seekProducer.reset();
++        m_eosVideo = false;
++        m_eosAudio = false;
++        m_clockAnchorMedia = MediaTime::zeroTime();
++        m_clockAnchorWall = 0;
++        m_currentTime = MediaTime::zeroTime();
++        m_duration = MediaTime::zeroTime();
++        m_audioSampleRate = 0;
++        m_audioChannels = 0;
++        m_audioAnchorMedia = MediaTime::zeroTime();
++    }
++
++    m_networkState.store(MediaPlayer::NetworkState::Loading);
++    m_readyState.store(MediaPlayer::ReadyState::HaveNothing);
++    m_hasVideo.store(false);
++    m_hasAudio.store(false);
++    m_naturalWidth.store(0);
++    m_naturalHeight.store(0);
++    m_reachedEnd.store(false);
++
++    if (auto sink = winUWPMediaAudioSink())
++        sink->reset();
++
++    startDecodeThreadIfNeeded();
++
++    if (auto player = m_player.get())
++        player->networkStateChanged();
++}
++
++void MediaPlayerPrivateWinUWP::cancelLoad()
++{
++    stopDecodeThread();
++}
++
++void MediaPlayerPrivateWinUWP::play()
++{
++    bool restartFromEnd = m_reachedEnd.exchange(false);
++
++    {
++        Locker locker { m_lock };
++        if (!m_paused && !restartFromEnd)
++            return;
++
++        m_paused = false;
++        // Re-anchor instead of catching up: wall time that passed while paused must not
++        // be charged to the media timeline.
++        m_clockAnchorMedia = m_currentTime;
++        m_clockAnchorWall = MonotonicTime::now().secondsSinceEpoch().value();
++        m_audioAnchorMedia = m_currentTime;
++
++        if (restartFromEnd) {
++            // play() on an already-ended element restarts it, which means seeking back to
++            // the beginning; the decode loop picks this up and clears the end-of-stream
++            // state as part of the seek.
++            m_seekRequest = MediaTime::zeroTime();
++            m_seekPending = true;
++            m_currentTime = MediaTime::zeroTime();
++            m_clockAnchorMedia = MediaTime::zeroTime();
++        }
++
++        m_condition.notifyAll();
++    }
++
++    if (auto player = m_player.get())
++        player->playbackStateChanged();
++}
++
++void MediaPlayerPrivateWinUWP::pause()
++{
++    {
++        Locker locker { m_lock };
++        if (m_paused)
++            return;
++        m_currentTime = clockNowLocked();
++        m_paused = true;
++    }
++
++    if (auto player = m_player.get())
++        player->playbackStateChanged();
++}
++
++void MediaPlayerPrivateWinUWP::setRate(float rate)
++{
++    Locker locker { m_lock };
++
++    // The spec makes a zero rate mean paused, and HTMLMediaElement relies on the player
++    // to be the one that actually stops the clock.
++    if (rate == 0) {
++        m_currentTime = clockNowLocked();
++        m_paused = true;
++        return;
++    }
++
++    MediaTime now = m_paused ? m_currentTime : clockNowLocked();
++    m_currentTime = now;
++    m_clockAnchorMedia = now;
++    m_clockAnchorWall = MonotonicTime::now().secondsSinceEpoch().value();
++    m_rate = rate < 0 ? 1.0 : rate;   // reverse playback is not implemented
++}
++
++Ref<MediaTimePromise> MediaPlayerPrivateWinUWP::seekToTarget(const SeekTarget& target)
++{
++    // The producer stays on this side (the decode thread settles it); the promise goes back
++    // to the element. VideoDecoder.cpp uses the same split.
++    MediaTimePromise::Producer producer;
++    Ref<MediaTimePromise> promise = producer.promise();
++
++    Locker locker { m_lock };
++
++    MediaTime time = target.time;
++    if (time < MediaTime::zeroTime())
++        time = MediaTime::zeroTime();
++    if (m_duration > MediaTime::zeroTime() && time > m_duration)
++        time = m_duration;
++
++    // Nothing to steer when no decode thread is running (not loaded, or loading failed):
++    // answer immediately rather than leaving the element waiting for a seek that no thread
++    // will ever perform.
++    if (!m_decodeThread) {
++        m_currentTime = time;
++        m_clockAnchorMedia = time;
++        m_clockAnchorWall = MonotonicTime::now().secondsSinceEpoch().value();
++        producer.resolve(time);
++        return promise;
++    }
++
++    // A second seek supersedes the first: the element only awaits the newest one.
++    if (m_seekProducer) {
++        m_seekProducer->reject(PlatformMediaError::Cancelled);
++        m_seekProducer.reset();
++    }
++
++    m_seekRequest = time;
++    m_seekPending = true;
++    m_currentTime = time;
++    m_clockAnchorMedia = time;
++    m_clockAnchorWall = MonotonicTime::now().secondsSinceEpoch().value();
++    m_seekProducer.emplace(WTF::move(producer));
++    m_condition.notifyAll();
++
++    return promise;
++}
++
++void MediaPlayerPrivateWinUWP::setVolume(float volume)
++{
++    Locker locker { m_lock };
++    m_volume = volume < 0 ? 0 : (volume > 1 ? 1 : volume);
++}
++
++void MediaPlayerPrivateWinUWP::setMuted(bool muted)
++{
++    Locker locker { m_lock };
++    m_muted = muted;
++}
++
++// ===========================================================================
++// State (engine thread)
++// ===========================================================================
++
++bool MediaPlayerPrivateWinUWP::paused() const
++{
++    Locker locker { m_lock };
++    return m_paused;
++}
++
++MediaTime MediaPlayerPrivateWinUWP::duration() const
++{
++    Locker locker { m_lock };
++    return m_duration;
++}
++
++MediaTime MediaPlayerPrivateWinUWP::currentTime() const
++{
++    Locker locker { m_lock };
++    if (m_paused)
++        return m_currentTime;
++    return clockNowLocked();
++}
++
++MediaTime MediaPlayerPrivateWinUWP::maxTimeSeekable() const
++{
++    return duration();
++}
++
++MediaTime MediaPlayerPrivateWinUWP::clockNowLocked() const
++{
++    if (m_clockAnchorWall <= 0)
++        return m_clockAnchorMedia;
++
++    double elapsed = MonotonicTime::now().secondsSinceEpoch().value() - m_clockAnchorWall;
++    if (elapsed < 0)
++        elapsed = 0;
++
++    MediaTime now = m_clockAnchorMedia + MediaTime::createWithDouble(elapsed * m_rate);
++    if (m_duration > MediaTime::zeroTime() && now > m_duration)
++        now = m_duration;
++    return now;
++}
++
++bool MediaPlayerPrivateWinUWP::didLoadingProgress() const
++{
++    // The SourceReader reads ahead on its own and never reports byte progress, so there
++    // is nothing new to report between two calls.
++    return false;
++}
++
++FloatSize MediaPlayerPrivateWinUWP::naturalSize() const
++{
++    int width = m_naturalWidth.load();
++    int height = m_naturalHeight.load();
++    if (width <= 0 || height <= 0)
++        return { };
++    return FloatSize { static_cast<float>(width), static_cast<float>(height) };
++}
++
++void MediaPlayerPrivateWinUWP::setPageIsVisible(bool)
++{
++    // Decoding continues while the page is hidden: a backgrounded app stops getting ticks
++    // anyway, and pausing here would make <video> lose its place.
++}
++
++bool MediaPlayerPrivateWinUWP::hasAvailableVideoFrame() const
++{
++    Locker locker { m_frameLock };
++    return m_havePresentableFrame;
++}
++
++DestinationColorSpace MediaPlayerPrivateWinUWP::colorSpace()
++{
++    return DestinationColorSpace::SRGB();
++}
++
++void MediaPlayerPrivateWinUWP::setReadyState(MediaPlayer::ReadyState state)
++{
++    if (m_readyState.exchange(state) == state)
++        return;
++    if (auto player = m_player.get())
++        player->readyStateChanged();
++}
++
++void MediaPlayerPrivateWinUWP::setNetworkState(MediaPlayer::NetworkState state)
++{
++    if (m_networkState.exchange(state) == state)
++        return;
++    if (auto player = m_player.get())
++        player->networkStateChanged();
++}
++
++// ===========================================================================
++// Decode thread -> engine thread notifications
++//
++// Every one of these is called on the decode thread and posts to the main run loop
++// before touching MediaPlayer, because MediaPlayer's notifications reach into the
++// renderer (mediaPlayerRepaint() calls renderer->repaint() directly), which belongs to
++// the engine thread.
++// ===========================================================================
++
++void MediaPlayerPrivateWinUWP::notifyMetadataReady()
++{
++    // WEAK, never strong - see the note in the class declaration. Taking a strong reference on this
++    // (decode) thread is what let the engine thread run ~MediaPlayerPrivateWinUWP(), whose join is
++    // exactly what waits for this thread, and then double-delete the object.
++    ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
++    callOnMainThread([weakThis] {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++
++        // Engine thread: safe to publish the ranges and poke the element.
++        MediaTime duration;
++        {
++            Locker locker { protectedThis->m_lock };
++            duration = protectedThis->m_duration;
++        }
++
++        protectedThis->m_buffered.clear();
++        if (duration > MediaTime::zeroTime())
++            protectedThis->m_buffered.add(MediaTime::zeroTime(), duration);
++
++        protectedThis->setReadyState(MediaPlayer::ReadyState::HaveMetadata);
++
++        if (auto player = protectedThis->m_player.get()) {
++            player->durationChanged();
++            player->sizeChanged();
++        }
++    });
++}
++
++void MediaPlayerPrivateWinUWP::notifyFrameReady()
++{
++    // Called for EVERY decoded video frame, not just the first one. Getting this wrong is
++    // invisible in a build: the element would reach HaveCurrentData, paint once, and then
++    // sit on that frame forever because nothing ever asked the renderer to draw again.
++    ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
++    callOnMainThread([weakThis] {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++
++        const bool firstFrame = protectedThis->m_readyState.load() < MediaPlayer::ReadyState::HaveCurrentData;
++        // Goes through setReadyState so the element actually gets readyStateChanged(); only
++        // firstVideoFrameAvailable() is exclusive to the first frame.
++        protectedThis->setReadyState(MediaPlayer::ReadyState::HaveCurrentData);
++
++        if (auto player = protectedThis->m_player.get()) {
++            if (firstFrame)
++                player->firstVideoFrameAvailable();
++            player->repaint();
++        }
++    });
++}
++
++void MediaPlayerPrivateWinUWP::notifySeekFinished()
++{
++    ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
++    callOnMainThread([weakThis] {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++
++        MediaTime duration;
++        {
++            Locker locker { protectedThis->m_lock };
++            duration = protectedThis->m_duration;
++        }
++
++        protectedThis->m_buffered.clear();
++        if (duration > MediaTime::zeroTime())
++            protectedThis->m_buffered.add(MediaTime::zeroTime(), duration);
++
++        protectedThis->setReadyState(MediaPlayer::ReadyState::HaveCurrentData);
++
++        if (auto player = protectedThis->m_player.get())
++            player->repaint();
++    });
++}
++
++void MediaPlayerPrivateWinUWP::notifyPlaybackEnded()
++{
++    ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
++    callOnMainThread([weakThis] {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++
++        if (auto player = protectedThis->m_player.get())
++            player->playbackStateChanged();
++    });
++}
++
++void MediaPlayerPrivateWinUWP::postFailure(MediaPlayer::NetworkState state, const char* site)
++{
++    recordError(E_FAIL, site);
++
++    // The state is stored immediately so a poll on the engine thread sees it even before
++    // the notification below is serviced.
++    m_networkState.store(state);
++    m_readyState.store(MediaPlayer::ReadyState::HaveNothing);
++    {
++        Locker locker { m_lock };
++        m_paused = true;
++    }
++
++    ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
++    callOnMainThread([weakThis, state] {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++
++        protectedThis->setNetworkState(state);
++    });
++}
++
++// ===========================================================================
++// Frame buffers / painting
++// ===========================================================================
++
++bool MediaPlayerPrivateWinUWP::ensureFrameBuffers(const IntSize& size)
++{
++    if (size.isEmpty())
++        return false;
++
++    Locker locker { m_frameLock };
++
++    if (m_frameSize == size && m_frameSurface[0])
++        return true;
++
++    const int stride = size.width() * 4;
++    const size_t bytes = static_cast<size_t>(stride) * static_cast<size_t>(size.height());
++
++    for (unsigned i = 0; i < s_frameBufferCount; ++i) {
++        // Drop the surface before touching the buffer it points at.
++        m_frameSurface[i] = nullptr;
++        m_frameBuffer[i].resize(bytes);
++        if (m_frameBuffer[i].size() != bytes)
++            return false;
++        memset(m_frameBuffer[i].mutableSpan().data(), 0, bytes);
++
++        // MF "RGB32" is BGRA in memory with an unused high byte, which is exactly what
++        // cairo's CAIRO_FORMAT_RGB24 describes on a little-endian machine; declaring it
++        // opaque also lets the compositor take its fast path.
++        auto surface = adoptRef(cairo_image_surface_create_for_data(m_frameBuffer[i].mutableSpan().data(), CAIRO_FORMAT_RGB24, size.width(), size.height(), stride));
++        if (cairo_surface_status(surface.get()) != CAIRO_STATUS_SUCCESS) {
++            recordError(E_FAIL, "cairo_image_surface_create_for_data");
++            m_frameSurface[i] = nullptr;
++            return false;
++        }
++        m_frameSurface[i] = WTF::move(surface);
++    }
++
++    m_frameSize = size;
++    m_havePresentableFrame = false;
++    m_presentBuffer = 0;
++    m_writeBuffer = 1;
++    return true;
++}
++
++void MediaPlayerPrivateWinUWP::publishFrame(const uint8_t* pixels, int sourceStride, const IntSize& size)
++{
++    if (!pixels || sourceStride == 0)
++        return;
++    if (!ensureFrameBuffers(size))
++        return;
++
++    Locker locker { m_frameLock };
++
++    const int destinationStride = m_frameSize.width() * 4;
++    uint8_t* destination = m_frameBuffer[m_writeBuffer].mutableSpan().data();
++
++    if (sourceStride < 0) {
++        // Bottom-up rows: a negative stride is Media Foundation's way of saying the
++        // buffer starts at the bottom row.
++        const ptrdiff_t rowBytes = static_cast<ptrdiff_t>(-sourceStride);
++        const uint8_t* source = pixels + rowBytes * (size.height() - 1);
++        for (int y = 0; y < size.height(); ++y, source -= rowBytes)
++            memcpy(destination + static_cast<size_t>(y) * destinationStride, source, destinationStride);
++    } else {
++        for (int y = 0; y < size.height(); ++y)
++            memcpy(destination + static_cast<size_t>(y) * destinationStride, pixels + static_cast<size_t>(y) * sourceStride, destinationStride);
++    }
++
++    cairo_surface_mark_dirty(m_frameSurface[m_writeBuffer].get());
++
++    m_presentBuffer = m_writeBuffer;
++    m_writeBuffer = (m_writeBuffer + 1) % s_frameBufferCount;
++    m_havePresentableFrame = true;
++    g_framesDecoded.fetch_add(1);
++}
++
++void MediaPlayerPrivateWinUWP::paint(GraphicsContext& context, const FloatRect& destinationRect)
++{
++    // The frame lock is held across the blit on purpose: the decoder must not write into
++    // the buffer Cairo is reading. The critical section is one bounded blit, and the
++    // decode thread only waits that long before publishing its next frame.
++    Locker locker { m_frameLock };
++
++    if (!m_havePresentableFrame)
++        return;
++    auto& surface = m_frameSurface[m_presentBuffer];
++    if (!surface)
++        return;
++
++    RefPtr<cairo_surface_t> surfaceRef = surface;
++    auto image = NativeImage::create(WTF::move(surfaceRef));
++    if (!image)
++        return;
++
++    FloatRect sourceRect { 0, 0, static_cast<float>(m_frameSize.width()), static_cast<float>(m_frameSize.height()) };
++    context.drawNativeImage(*image, destinationRect, sourceRect, ImagePaintingOptions { });
++    g_framesPresented.fetch_add(1);
++}
++
++// ===========================================================================
++// Decode thread
++// ===========================================================================
++
++void MediaPlayerPrivateWinUWP::decodeThreadBody()
++{
++    if (!ensureMediaFoundationStarted()) {
++        postFailure(MediaPlayer::NetworkState::NetworkError, "MFStartup");
++        return;
++    }
++
++    ScopedThreadComInitialization com;
++    if (!com.ok()) {
++        recordError(com.result(), "CoInitializeEx");
++        postFailure(MediaPlayer::NetworkState::NetworkError, "CoInitializeEx");
++        return;
++    }
++
++    String url;
++    {
++        Locker locker { m_lock };
++        url = m_url.isolatedCopy();
++    }
++
++    if (!openSourceReader(*m_decoder, url)) {
++        postFailure(MediaPlayer::NetworkState::FormatError, "openSourceReader");
++        return;
++    }
++
++    notifyMetadataReady();
++    decodeLoop(*m_decoder);
++
++    // Release the Media Foundation objects on the thread that created them.
++    m_decoder->reader = nullptr;
++}
++
++bool MediaPlayerPrivateWinUWP::openSourceReader(DecoderState& state, const String& url)
++{
++    COMPtr<IMFAttributes> attributes;
++    HRESULT hr = ::MFCreateAttributes(&attributes, 3);
++    if (FAILED(hr)) {
++        recordError(hr, "MFCreateAttributes");
++        return false;
++    }
++
++    // Without this the SourceReader refuses to convert formats and every frame would have
++    // to be negotiated as NV12 and converted by hand. With it, the reader inserts the
++    // Video Processor MFT and can hand back RGB32 directly.
++    attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
++    // MF_SOURCE_READER_DISABLE_DXVA is deliberately left unset: on Win10M the H.264
++    // decoder may hand back GPU-backed samples and let the Video Processor convert them.
++    // App Container DXVA2 availability still has to be confirmed on device; if the
++    // transform fails there, set MF_SOURCE_READER_DISABLE_DXVA = TRUE here (and nothing
++    // else) to force the software decoder.
++    attributes->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE);
++    state.dxvaDisabled = false;
++
++    BString urlString(url);
++    hr = ::MFCreateSourceReaderFromURL(static_cast<LPCWSTR>(urlString), attributes.get(), &state.reader);
++    if (FAILED(hr)) {
++        recordError(hr, "MFCreateSourceReaderFromURL");
++        return false;
++    }
++    g_startedSourceReaders.fetch_add(1);
++
++    // Everything unselected by default; each stream we can actually configure is
++    // selected below.
++    state.reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
++
++    // Media Foundation's stream indices are not the MF_SOURCE_READER_FIRST_* pseudo
++    // indices: ReadSample(ANY_STREAM) reports the real index, so enumerate the real
++    // streams first and configure those.
++    for (unsigned index = 0; index < 32; ++index) {
++        COMPtr<IMFMediaType> nativeType;
++        hr = state.reader->GetNativeMediaType(index, 0, &nativeType);
++        if (FAILED(hr))
++            break;   // no such stream: end of the stream table
++
++        GUID majorType = GUID_NULL;
++        if (FAILED(nativeType->GetGUID(MF_MT_MAJOR_TYPE, &majorType)))
++            continue;
++
++        if (majorType == MFMediaType_Video && !state.hasVideo)
++            configureVideoStream(state, index, nativeType.get());
++        else if (majorType == MFMediaType_Audio && !state.hasAudio)
++            configureAudioStream(state, index, nativeType.get());
++    }
++
++    if (!state.hasVideo && !state.hasAudio) {
++        recordError(E_FAIL, "no configurable stream");
++        return false;
++    }
++
++    // Duration comes from the presentation descriptor, in 100 ns units.
++    PROPVARIANT duration;
++    PropVariantInit(&duration);
++    if (SUCCEEDED(state.reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &duration)) && duration.vt == VT_UI8) {
++        Locker locker { m_lock };
++        m_duration = MediaTime(static_cast<int64_t>(duration.uhVal.QuadPart), tenMegahertz);
++    }
++    PropVariantClear(&duration);
++
++    m_hasVideo.store(state.hasVideo);
++    m_hasAudio.store(state.hasAudio);
++    return true;
++}
++
++bool MediaPlayerPrivateWinUWP::configureVideoStream(DecoderState& state, unsigned streamIndex, IMFMediaType* nativeType)
++{
++    UINT32 width = 0;
++    UINT32 height = 0;
++    if (FAILED(MFGetAttributeSize(nativeType, MF_MT_FRAME_SIZE, &width, &height)) || !width || !height)
++        return false;
++
++    GUID nativeSubtype = GUID_NULL;
++    nativeType->GetGUID(MF_MT_SUBTYPE, &nativeSubtype);
++
++    COMPtr<IMFMediaType> outputType;
++    HRESULT hr = ::MFCreateMediaType(&outputType);
++    if (FAILED(hr)) {
++        recordError(hr, "MFCreateMediaType(video)");
++        return false;
++    }
++
++    outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
++    outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
++    outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
++    outputType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
++    MFSetAttributeSize(outputType.get(), MF_MT_FRAME_SIZE, width, height);
++    // A positive stride asks for top-down rows. Most transformations honour it and it
++    // saves a row flip per frame; publishFrame() still copes if the reader ignores it.
++    outputType->SetUINT32(MF_MT_DEFAULT_STRIDE, width * 4);
++
++    UINT32 parNumerator = 1;
++    UINT32 parDenominator = 1;
++    if (SUCCEEDED(MFGetAttributeRatio(nativeType, MF_MT_PIXEL_ASPECT_RATIO, &parNumerator, &parDenominator)))
++        MFSetAttributeRatio(outputType.get(), MF_MT_PIXEL_ASPECT_RATIO, parNumerator, parDenominator);
++
++    hr = state.reader->SetCurrentMediaType(streamIndex, nullptr, outputType.get());
++    if (FAILED(hr)) {
++        recordError(hr, "SetCurrentMediaType(video RGB32)");
++        return false;
++    }
++
++    state.reader->SetStreamSelection(streamIndex, TRUE);
++    state.hasVideo = true;
++    state.videoStreamIndex = streamIndex;
++    state.videoSize = IntSize { static_cast<int>(width), static_cast<int>(height) };
++    state.videoStride = static_cast<int>(width) * 4;
++
++    // Read back what the reader actually settled on: the stride may still be negative
++    // (bottom-up) even though a positive one was requested.
++    COMPtr<IMFMediaType> currentType;
++    if (SUCCEEDED(state.reader->GetCurrentMediaType(streamIndex, &currentType))) {
++        UINT32 strideAttribute = 0;
++        if (SUCCEEDED(currentType->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideAttribute)))
++            state.videoStride = static_cast<int>(strideAttribute);
++
++        UINT32 currentWidth = 0;
++        UINT32 currentHeight = 0;
++        if (SUCCEEDED(MFGetAttributeSize(currentType.get(), MF_MT_FRAME_SIZE, &currentWidth, &currentHeight)) && currentWidth && currentHeight)
++            state.videoSize = IntSize { static_cast<int>(currentWidth), static_cast<int>(currentHeight) };
++    }
++
++    WinUWPMediaDiagnostics::recordVideoTypes(nativeSubtype.Data1, MFVideoFormat_RGB32.Data1, state.dxvaDisabled);
++
++    state.videoIsBottomUp = state.videoStride < 0;
++    m_naturalWidth.store(state.videoSize.width());
++    m_naturalHeight.store(state.videoSize.height());
++    return true;
++}
++
++bool MediaPlayerPrivateWinUWP::configureAudioStream(DecoderState& state, unsigned streamIndex, IMFMediaType* nativeType)
++{
++    UINT32 channels = MFGetAttributeUINT32(nativeType, MF_MT_AUDIO_NUM_CHANNELS, 0);
++    UINT32 sampleRate = MFGetAttributeUINT32(nativeType, MF_MT_AUDIO_SAMPLES_PER_SECOND, 0);
++    if (!channels || !sampleRate)
++        return false;
++
++    // Two channels is all the device needs and keeps the queue cheap; anything wider is
++    // downmixed by the reader's audio converter.
++    const int outputChannels = channels > 2 ? 2 : static_cast<int>(channels);
++
++    auto makeOutputType = [&](const GUID& subtype, unsigned bytesPerSample) -> COMPtr<IMFMediaType> {
++        COMPtr<IMFMediaType> type;
++        if (FAILED(::MFCreateMediaType(&type)))
++            return nullptr;
++        type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
++        type->SetGUID(MF_MT_SUBTYPE, subtype);
++        type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, static_cast<UINT32>(outputChannels));
++        type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate);
++        type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, static_cast<UINT32>(outputChannels) * bytesPerSample);
++        type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, static_cast<UINT32>(outputChannels) * bytesPerSample * sampleRate);
++        type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
++        return type;
++    };
++
++    // Float32 is what the sink's queue is built for and what AAC decoders emit natively.
++    bool isFloat = true;
++    HRESULT hr = E_FAIL;
++    if (auto floatType = makeOutputType(MFAudioFormat_Float, sizeof(float)))
++        hr = state.reader->SetCurrentMediaType(streamIndex, nullptr, floatType.get());
++
++    if (FAILED(hr)) {
++        // Fall back to 16-bit PCM and convert on the way into the queue: some decoders and
++        // containers only offer integer output.
++        isFloat = false;
++        auto pcmType = makeOutputType(MFAudioFormat_PCM, sizeof(int16_t));
++        if (!pcmType) {
++            recordError(E_FAIL, "MFCreateMediaType(audio)");
++            return false;
++        }
++        hr = state.reader->SetCurrentMediaType(streamIndex, nullptr, pcmType.get());
++        if (FAILED(hr)) {
++            recordError(hr, "SetCurrentMediaType(audio)");
++            return false;
++        }
++    }
++
++    state.reader->SetStreamSelection(streamIndex, TRUE);
++    state.hasAudio = true;
++    state.audioStreamIndex = streamIndex;
++    state.audioIsFloat = isFloat;
++
++    {
++        Locker locker { m_lock };
++        m_audioSampleRate = static_cast<int>(sampleRate);
++        m_audioChannels = outputChannels;
++        m_audioAnchorMedia = MediaTime::zeroTime();
++    }
++
++    if (auto sink = winUWPMediaAudioSink())
++        sink->configure(static_cast<int>(sampleRate), outputChannels);
++
++    return true;
++}
++
++// ===========================================================================
++// Decode loop
++// ===========================================================================
++
++void MediaPlayerPrivateWinUWP::decodeLoop(DecoderState& state)
++{
++    bool prerolled = false;
++
++    while (true) {
++        // Move-construct rather than assign: NativePromiseProducer is move-constructible but
++        // std::optional's assignment operators are deleted for it under MSVC.
++        std::optional<MediaTimePromise::Producer> seekProducer;
++        MediaTime seekTime;
++        bool haveSeek = false;
++        bool preroll = false;
++
++        {
++            Locker locker { m_lock };
++            if (m_stopRequested)
++                return;
++
++            // A pending seek does not always have a promise behind it: play() on an ended
++            // element seeks back to the start with nobody waiting on it. It must still be
++            // performed - and it must be performed *before* the end-of-stream park below,
++            // or restarting an ended video would park here forever.
++            if (m_seekPending) {
++                m_seekPending = false;
++                seekTime = m_seekRequest;
++                haveSeek = true;
++                if (m_seekProducer) {
++                    seekProducer.emplace(WTF::move(*m_seekProducer));
++                    m_seekProducer.reset();
++                }
++            } else if (m_paused) {
++                if (!prerolled && state.hasVideo && !state.eos) {
++                    // Decode exactly one frame so the element has something to show before
++                    // playback starts (its poster frame), then go back to sleeping. This
++                    // is what keeps <video> from staying blank until the user hits play.
++                    prerolled = true;
++                    preroll = true;
++                } else {
++                    m_condition.waitFor(m_lock, idleParkInterval);
++                    continue;
++                }
++            }
++        }
++
++        if (haveSeek) {
++            const bool ok = performSeek(state, seekTime);
++            // The seek dropped the frame we had, so a paused player has to preroll again or
++            // it would show nothing at the new position.
++            prerolled = false;
++            if (seekProducer) {
++                if (ok)
++                    seekProducer->resolve(seekTime);
++                else
++                    seekProducer->reject(PlatformMediaError::InvalidState);
++            }
++            continue;
++        }
++
++        if (preroll) {
++            decodeOneSample(state, false);
++            continue;
++        }
++
++        if (state.failed || !state.reader) {
++            // Nothing will ever be readable on this reader again. Parking (instead of
++            // retrying) is what keeps a dead stream from spinning this thread at 100% CPU
++            // for the rest of the page's life.
++            Locker locker { m_lock };
++            if (m_stopRequested)
++                return;
++            m_condition.waitFor(m_lock, idleParkInterval);
++            continue;
++        }
++
++        if (state.eos) {
++            // Parked by noteEndOfStream(), which is what lets play() restart playback from
++            // the beginning. Waiting keeps the stop request answerable.
++            Locker locker { m_lock };
++            if (m_stopRequested)
++                return;
++            m_condition.waitFor(m_lock, idleParkInterval);
++            continue;
++        }
++
++        decodeOneSample(state, true);
++    }
++}
++
++bool MediaPlayerPrivateWinUWP::performSeek(DecoderState& state, MediaTime time)
++{
++    if (!state.reader)
++        return false;
++
++    // Drop everything the reader has queued, then reposition. Flushing also clears the
++    // end-of-stream flag, which is how a restart-after-end resumes.
++    HRESULT hr = state.reader->Flush(MF_SOURCE_READER_ALL_STREAMS);
++    if (FAILED(hr))
++        recordError(hr, "Flush");
++
++    PROPVARIANT position;
++    PropVariantInit(&position);
++    position.vt = VT_I8;
++    position.hVal.QuadPart = static_cast<__int64>(time.toDouble() * tenMegahertz);
++    hr = state.reader->SetCurrentPosition(GUID_NULL, position);
++    PropVariantClear(&position);
++    if (FAILED(hr)) {
++        recordError(hr, "SetCurrentPosition");
++        return false;
++    }
++
++    state.eos = false;
++
++    // The device queue still holds audio from before the seek, so it has to be dropped too.
++    if (auto sink = winUWPMediaAudioSink())
++        sink->reset();
++
++    {
++        Locker locker { m_lock };
++        m_eosVideo = false;
++        m_eosAudio = false;
++        m_audioAnchorMedia = time;
++        m_currentTime = time;
++        m_clockAnchorMedia = time;
++        m_clockAnchorWall = MonotonicTime::now().secondsSinceEpoch().value();
++    }
++
++    // Drop any frame that belonged to the pre-seek position.
++    {
++        Locker locker { m_frameLock };
++        m_havePresentableFrame = false;
++    }
++
++    m_reachedEnd.store(false);
++    notifySeekFinished();
++    return true;
++}
++
++bool MediaPlayerPrivateWinUWP::decodeOneSample(DecoderState& state, bool respectPacing)
++{
++    if (!state.reader)
++        return false;
++
++    DWORD actualStreamIndex = 0;
++    DWORD streamFlags = 0;
++    LONGLONG timestamp = 0;
++    COMPtr<IMFSample> sample;
++
++    HRESULT hr = state.reader->ReadSample(MF_SOURCE_READER_ANY_STREAM, 0, &actualStreamIndex, &streamFlags, &timestamp, &sample);
++    if (FAILED(hr)) {
++        // MF_E_INVALIDREQUEST after a stop and E_ABORT from a cancelled read are both
++        // ordinary consequences of tearing down; anything else is worth reporting.
++        if (hr != MF_E_INVALIDREQUEST && hr != E_ABORT)
++            recordError(hr, "ReadSample");
++        return false;
++    }
++
++    if (streamFlags & MF_SOURCE_READERF_ERROR) {
++        state.failed = true;
++        postFailure(MediaPlayer::NetworkState::DecodeError, "MF_SOURCE_READERF_ERROR");
++        return false;
++    }
++
++    if (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
++        noteEndOfStream(state, actualStreamIndex);
++        return false;
++    }
++
++    // A stream tick carries a timestamp but no sample: it marks a gap in a stream, not
++    // content, and the clock here is wall-clock driven, so there is nothing to do with it.
++    if (!sample || (streamFlags & MF_SOURCE_READERF_STREAMTICK))
++        return true;
++
++    if (state.hasVideo && actualStreamIndex == state.videoStreamIndex) {
++        if (respectPacing)
++            waitUntilDue(MediaTime(timestamp, tenMegahertz));
++        handleVideoSample(state, sample.get(), timestamp);
++        return true;
++    }
++
++    if (state.hasAudio && actualStreamIndex == state.audioStreamIndex) {
++        handleAudioSample(state, sample.get(), timestamp);
++        return true;
++    }
++
++    return true;
++}
++
++void MediaPlayerPrivateWinUWP::waitUntilDue(MediaTime due)
++{
++    while (true) {
++        MediaTime now;
++        {
++            Locker locker { m_lock };
++            if (m_stopRequested || m_paused)
++                return;
++            now = clockNowLocked();
++        }
++
++        double ahead = (due - now).toDouble();
++        if (ahead <= presentationLeadSeconds)
++            return;
++        sleepForSeconds(ahead - presentationLeadSeconds);
++    }
++}
++
++void MediaPlayerPrivateWinUWP::handleVideoSample(DecoderState& state, IMFSample* sample, LONGLONG timestamp)
++{
++    (void)timestamp;
++
++    COMPtr<IMFMediaBuffer> buffer;
++    if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer)
++        return;
++
++    BYTE* data = nullptr;
++    DWORD maximumLength = 0;
++    DWORD currentLength = 0;
++    if (FAILED(buffer->Lock(&data, &maximumLength, &currentLength))) {
++        recordError(E_FAIL, "IMFMediaBuffer::Lock");
++        return;
++    }
++
++    if (currentLength)
++        publishFrame(data, state.videoStride, state.videoSize);
++
++    buffer->Unlock();
++
++    // Every frame, so the page keeps being asked to repaint for as long as the video runs
++    // (the notification itself decides whether this was the first frame).
++    notifyFrameReady();
++}
++
++void MediaPlayerPrivateWinUWP::handleAudioSample(DecoderState& state, IMFSample* sample, LONGLONG timestamp)
++{
++    auto sink = winUWPMediaAudioSink();
++    if (!sink)
++        return;
++
++    COMPtr<IMFMediaBuffer> buffer;
++    if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer)
++        return;
++
++    BYTE* data = nullptr;
++    DWORD maximumLength = 0;
++    DWORD currentLength = 0;
++    if (FAILED(buffer->Lock(&data, &maximumLength, &currentLength))) {
++        recordError(E_FAIL, "IMFMediaBuffer::Lock(audio)");
++        return;
++    }
++
++    int channels;
++    float volume;
++    bool muted;
++    {
++        Locker locker { m_lock };
++        channels = m_audioChannels;
++        volume = m_volume;
++        muted = m_muted;
++    }
++
++    if (channels > 0 && currentLength) {
++        const unsigned bytesPerSample = state.audioIsFloat ? sizeof(float) : sizeof(int16_t);
++        const size_t sampleCount = currentLength / bytesPerSample;
++        const int frames = static_cast<int>(sampleCount / static_cast<unsigned>(channels));
++
++        if (frames > 0) {
++            m_scratch.resize(sampleCount);
++            float* destination = m_scratch.mutableSpan().data();
++            const float gain = muted ? 0.0f : volume;
++
++            if (state.audioIsFloat) {
++                const float* source = reinterpret_cast<const float*>(data);
++                for (size_t i = 0; i < sampleCount; ++i)
++                    destination[i] = source[i] * gain;
++            } else {
++                const int16_t* source = reinterpret_cast<const int16_t*>(data);
++                for (size_t i = 0; i < sampleCount; ++i)
++                    destination[i] = (static_cast<float>(source[i]) / 32768.0f) * gain;
++            }
++
++            // The sink is bounded; pushing only what fits and dropping the rest would
++            // desync audio from video permanently, so a full queue is treated as
++            // back-pressure and the decoder waits for the device instead.
++            const size_t channelCount = static_cast<size_t>(channels);
++            size_t framesPushed = 0;
++            while (framesPushed < static_cast<size_t>(frames)) {
++                {
++                    Locker locker { m_lock };
++                    if (m_stopRequested || m_paused)
++                        break;
++                }
++
++                const int remaining = static_cast<int>(static_cast<size_t>(frames) - framesPushed);
++                const int queued = sink->pushPCM(destination + framesPushed * channelCount, remaining);
++                if (queued <= 0) {
++                    sleepForSeconds(0.005);
++                    continue;
++                }
++
++                g_pcmFramesPushed.fetch_add(static_cast<unsigned long long>(queued));
++                {
++                    Locker locker { m_lock };
++                    m_audioAnchorMedia = MediaTime(timestamp, tenMegahertz);
++                }
++                framesPushed += static_cast<size_t>(queued);
++            }
++
++            if (framesPushed < static_cast<size_t>(frames))
++                g_pcmFramesDropped.fetch_add(static_cast<unsigned long long>(frames - framesPushed));
++        }
++    }
++
++    buffer->Unlock();
++}
++
++void MediaPlayerPrivateWinUWP::noteEndOfStream(DecoderState& state, unsigned streamIndex)
++{
++    bool allEnded;
++    {
++        Locker locker { m_lock };
++        if (state.hasVideo && streamIndex == state.videoStreamIndex)
++            m_eosVideo = true;
++        else if (state.hasAudio && streamIndex == state.audioStreamIndex)
++            m_eosAudio = true;
++
++        // A stream we never selected reporting end-of-stream must not end playback.
++        const bool videoDone = !state.hasVideo || m_eosVideo;
++        const bool audioDone = !state.hasAudio || m_eosAudio;
++        allEnded = videoDone && audioDone;
++
++        if (allEnded) {
++            // Ending is a pause: play() on an ended element is expected to restart it, and
++            // play() keys that off m_reachedEnd.
++            m_currentTime = clockNowLocked();
++            m_paused = true;
++        }
++    }
++
++    if (!allEnded)
++        return;
++
++    state.eos = true;
++    m_reachedEnd.store(true);
++    notifyPlaybackEnded();
++}
++
++// ===========================================================================
++// Media engine registration
++// ===========================================================================
++
++void MediaPlayerPrivateWinUWP::getSupportedTypes(HashSet<String>& types)
++{
++    types = winUWPMediaSupportedTypes();
++}
++
++MediaPlayer::SupportsType MediaPlayerPrivateWinUWP::supportsType(const MediaEngineSupportParameters& parameters)
++{
++    // MSE and MediaStream have no backend here; saying "maybe" would make the element wait
++    // for source buffers or tracks that can never arrive.
++    if (parameters.platformType != PlatformMediaDecodingType::FileOrHLS)
++        return MediaPlayer::SupportsType::IsNotSupported;
++
++    if (parameters.requiresRemotePlayback)
++        return MediaPlayer::SupportsType::IsNotSupported;
++
++    auto containerType = parameters.type.containerType();
++    if (containerType.isEmpty())
++        return MediaPlayer::SupportsType::MayBeSupported;
++
++    if (!winUWPMediaSupportedTypes().contains(containerType))
++        return MediaPlayer::SupportsType::IsNotSupported;
++
++    // The container is one we can open, but without asking Media Foundation to build a
++    // decoder we cannot promise the codecs inside it are decodable.
++    if (parameters.type.codecs().isEmpty())
++        return MediaPlayer::SupportsType::IsSupported;
++
++    return MediaPlayer::SupportsType::MayBeSupported;
++}
++
++class MediaPlayerFactoryWinUWP final : public MediaPlayerFactory {
++private:
++    // This engine is Media Foundation; the identifier is upstream's and is used for
++    // diagnostics and engine ordering, so there is no separate value to invent.
++    MediaPlayerEnums::MediaEngineIdentifier identifier() const final { return MediaPlayerEnums::MediaEngineIdentifier::MediaFoundation; }
++
++    Ref<MediaPlayerPrivateInterface> createMediaEnginePlayer(MediaPlayer& player) const final
++    {
++        return adoptRef(*new MediaPlayerPrivateWinUWP(player));
++    }
++
++    void getSupportedTypes(HashSet<String>& types) const final
++    {
++        MediaPlayerPrivateWinUWP::getSupportedTypes(types);
++    }
++
++    MediaPlayer::SupportsType supportsTypeAndCodecs(const MediaEngineSupportParameters& parameters) const final
++    {
++        return MediaPlayerPrivateWinUWP::supportsType(parameters);
++    }
++};
++
++void MediaPlayerPrivateWinUWP::registerMediaEngine(MediaEngineRegistrar registrar)
++{
++    registrar(makeUnique<MediaPlayerFactoryWinUWP>());
++}
++
++} // namespace WebCore
++
++#endif // defined(WK_WINUWP) && ENABLE(VIDEO)
+diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
+new file mode 100644
+index 0000000000..2c7132f1e5
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
+@@ -0,0 +1,247 @@
++/*
++ * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
++ *
++ * This file is WebKit-WinUWP-only and is compiled from PlatformWinUWP.cmake and
++ * nothing else (same convention as platform/graphics/texmap/TextureMapperTileGridStore.*).
++ *
++ * WHY NOT platform/graphics/win/MediaPlayerPrivateMediaFoundation.*:
++ *   Upstream's Media Foundation backend is written for Win32 desktop. It builds an
++ *   EVR topology (MFCreateTopology + Direct3DPresenter on D3D9 with an HWND, DComp,
++ *   DXVA2 display mode) and presents straight into a desktop window surface. In an
++ *   App Container there is no HWND to present into and no D3D9 swap chain we can own;
++ *   the harness presents through either Cairo paintToRGBA or the TextureMapper/ANGLE
++ *   SwapChainPanel path. So the *decode* half of Media Foundation is reusable and the
++ *   *presentation* half is not.
++ *
++ * DESIGN:
++ *   MFCreateSourceReaderFromURL -> IMFSourceReader with the Video Processor MFT
++ *   auto-inserted (MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING), asked for RGB32 output.
++ *   Every decoded video sample is converted into a plain CPU BGRA buffer; the page
++ *   then paints it through the ordinary GraphicsContext::drawNativeImage path, which
++ *   means the software (Cairo) and GPU (TextureMapper) presentation routes both get
++ *   the frame for free and no new present path is introduced.
++ *
++ *   Audio samples are converted to interleaved float32 and pushed into the platform's
++ *   PCM queue through WinUWPMediaAudioSink. That interface is declared here and
++ *   *implemented by the platform layer* (port/), so the dependency points inward:
++ *   WebCore never references a port/ symbol.
++ *
++ * THREADING (the port's single-engine-thread rule):
++ *   All Media Foundation calls, including creating the source reader, happen on one
++ *   dedicated decode thread owned by this object. That thread never calls into
++ *   MediaPlayer: it publishes frames into a double buffer and then hops to the engine
++ *   thread with callOnMainThread() before notifying anything, which is the same
++ *   post-to-the-run-loop route the loader already uses. No new synchronization point
++ *   is introduced and the engine thread is never made to wait for media.
++ */
++
++#pragma once
++
++#if defined(WK_WINUWP)
++
++#include "MediaPlayerPrivate.h"
++#include "MediaPromiseTypes.h"
++#include "PlatformTimeRanges.h"   // held by value (buffered())
++#include "WinUWPMediaBridge.h"
++#include <mfobjects.h>
++#include <unknwn.h>
++#include <memory>
++#include <optional>
++#include <wtf/Condition.h>
++#include <wtf/Lock.h>
++#include <wtf/MainThread.h>          // DestructionThread
++#include <wtf/MediaTime.h>
++#include <wtf/NativePromise.h>
++#include <wtf/RefCounted.h>
++#include <wtf/ThreadSafeWeakPtr.h>
++#include <wtf/Threading.h>
++#include <wtf/TZoneMalloc.h>
++#include <wtf/Vector.h>
++
++typedef struct _cairo_surface cairo_surface_t;
++
++namespace WebCore {
++
++class IntSize;
++class NativeImage;
++
++// WinUWPMediaAudioSink / WinUWPMediaDiagnostics (the contract with port/) live in
++// WinUWPMediaBridge.h, included above.
++
++class MediaPlayerPrivateWinUWP final
++    : public MediaPlayerPrivateInterface
++    , public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<MediaPlayerPrivateWinUWP, WTF::DestructionThread::Main> {
++    WTF_MAKE_TZONE_ALLOCATED(MediaPlayerPrivateWinUWP);
++    using RefCountedBase = ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<MediaPlayerPrivateWinUWP, WTF::DestructionThread::Main>;
++public:
++    // MediaPlayerPrivateInterface derives from AbstractRefCounted, whose ref()/deref() are pure;
++    // every subclass picks its own ref-counting base (see the comment on MediaPlayerPrivateInterface).
++    //
++    // Thread-safe WEAK refcounting, and this is load-bearing rather than a preference: the decode
++    // thread must never take a STRONG reference to this object. If it does, the engine thread can
++    // drop the last strong reference and enter ~MediaPlayerPrivateWinUWP() - whose first act is to
++    // join the decode thread - while that thread is still running; a strong ref taken there lands on
++    // an object whose destructor has already begun, and the resulting second delete trips
++    // RELEASE_ASSERT(m_refCount == 1) in ~RefCountedBase(). An earlier revision did exactly that.
++    // A ThreadSafeWeakPtr outlives the object, so resolving one after death is safe and yields null.
++    void ref() const final { RefCountedBase::ref(); }
++    void deref() const final { RefCountedBase::deref(); }
++
++    explicit MediaPlayerPrivateWinUWP(MediaPlayer&);
++    ~MediaPlayerPrivateWinUWP() final;
++
++    constexpr MediaPlayerType mediaPlayerType() const final { return MediaPlayerType::MediaFoundation; }
++
++    static void registerMediaEngine(MediaEngineRegistrar);
++    static void getSupportedTypes(HashSet<String>&);
++    static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters&);
++
++    // ---- load / teardown ----
++    void load(const String& url) final;
++    void cancelLoad() final;
++
++    // ---- transport ----
++    void play() final;
++    void pause() final;
++    void setRate(float) final;
++    Ref<MediaTimePromise> seekToTarget(const SeekTarget&) final;
++    void setVolume(float) final;
++    void setMuted(bool) final;
++    void setPreservesPitch(bool) final { }
++
++    // ---- state ----
++    bool paused() const final;
++    MediaTime duration() const final;
++    MediaTime currentTime() const final;
++    MediaTime maxTimeSeekable() const final;
++    MediaPlayer::NetworkState networkState() const final { return m_networkState.load(); }
++    MediaPlayer::ReadyState readyState() const final { return m_readyState.load(); }
++    const PlatformTimeRanges& buffered() const final { return m_buffered; }
++    bool didLoadingProgress() const final;
++    unsigned long long totalBytes() const final { return 0; }
++
++    // ---- video ----
++    FloatSize naturalSize() const final;
++    bool hasVideo() const final { return m_hasVideo.load(); }
++    bool hasAudio() const final { return m_hasAudio.load(); }
++    bool hasAvailableVideoFrame() const final;
++    void setPageIsVisible(bool) final;
++    void paint(GraphicsContext&, const FloatRect&) final;
++    DestinationColorSpace colorSpace() final;
++    bool supportsAcceleratedRendering() const final { return true; }
++    bool shouldIgnoreIntrinsicSize() final { return false; }
++
++private:
++    friend class MediaPlayerFactoryWinUWP;
++
++    // Opaque per-stream decode state; Media Foundation's reader/sample types stay out
++    // of this header except where a method signature needs them.
++    struct DecoderState;
++
++    // ---- engine thread ----
++    void startDecodeThreadIfNeeded();
++    void stopDecodeThread();
++    void setReadyState(MediaPlayer::ReadyState);
++    void setNetworkState(MediaPlayer::NetworkState);
++    void notifyMetadataReady();
++    void notifySeekFinished();
++    void notifyFrameReady();
++    void notifyPlaybackEnded();
++
++    // ---- presentation (engine thread; frame lock taken internally) ----
++    bool ensureFrameBuffers(const IntSize&);
++
++    // ---- decode thread ----
++    void decodeThreadBody();
++    bool openSourceReader(DecoderState&, const String& url);
++    bool configureVideoStream(DecoderState&, unsigned streamIndex, IMFMediaType*);
++    bool configureAudioStream(DecoderState&, unsigned streamIndex, IMFMediaType*);
++    void decodeLoop(DecoderState&);
++    bool decodeOneSample(DecoderState&, bool respectPacing);
++    bool performSeek(DecoderState&, MediaTime);
++    void handleVideoSample(DecoderState&, IMFSample*, LONGLONG timestamp);
++    void handleAudioSample(DecoderState&, IMFSample*, LONGLONG timestamp);
++    void noteEndOfStream(DecoderState&, unsigned streamIndex);
++    void waitUntilDue(MediaTime due);
++    void publishFrame(const uint8_t* pixels, int sourceStride, const IntSize&);
++    // Publish the state a decode-thread failure ends in, atomically and on the engine thread.
++    void postFailure(MediaPlayer::NetworkState, const char* site);
++
++    MediaTime clockNowLocked() const WTF_REQUIRES_LOCK(m_lock);
++
++    ThreadSafeWeakPtr<MediaPlayer> m_player;
++
++    // ------------------------------------------------------------------
++    // Cross-thread state. m_lock guards everything down to m_audioAnchorMedia.
++    // The decode thread holds it only for short critical sections and never
++    // while inside Media Foundation or while notifying MediaPlayer.
++    // ------------------------------------------------------------------
++    mutable Lock m_lock;
++    Condition m_condition;
++    String m_url WTF_GUARDED_BY_LOCK(m_lock);
++    bool m_stopRequested WTF_GUARDED_BY_LOCK(m_lock) { false };
++    bool m_paused WTF_GUARDED_BY_LOCK(m_lock) { true };
++    // Media clock anchor: currentTime == m_clockAnchorMedia + (now - m_clockAnchorWall) * rate.
++    MediaTime m_clockAnchorMedia WTF_GUARDED_BY_LOCK(m_lock);
++    double m_clockAnchorWall WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    MediaTime m_currentTime WTF_GUARDED_BY_LOCK(m_lock);
++    MediaTime m_seekRequest WTF_GUARDED_BY_LOCK(m_lock);
++    bool m_seekPending WTF_GUARDED_BY_LOCK(m_lock) { false };
++    // The producer (not the promise) is what the decode thread settles. NativePromiseProducer
++    // is move-only and its destructor rejects an unsettled promise, so replacing or clearing
++    // it is itself a correct cancellation.
++    std::optional<MediaTimePromise::Producer> m_seekProducer WTF_GUARDED_BY_LOCK(m_lock);
++    MediaTime m_duration WTF_GUARDED_BY_LOCK(m_lock);
++    double m_rate WTF_GUARDED_BY_LOCK(m_lock) { 1.0 };
++    float m_volume WTF_GUARDED_BY_LOCK(m_lock) { 1.0f };
++    bool m_muted WTF_GUARDED_BY_LOCK(m_lock) { false };
++    bool m_eosVideo WTF_GUARDED_BY_LOCK(m_lock) { false };
++    bool m_eosAudio WTF_GUARDED_BY_LOCK(m_lock) { false };
++    int m_audioSampleRate WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    int m_audioChannels WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    MediaTime m_audioAnchorMedia WTF_GUARDED_BY_LOCK(m_lock);
++
++    // Engine thread only (never touched by the decode thread, so no lock): the buffered
++    // ranges are updated from the engine-thread notifications.
++    PlatformTimeRanges m_buffered;
++
++    // Written by the decode thread, read by the engine thread. Atomics rather than
++    // m_lock because naturalSize()/readyState() are polled on every layout and paint.
++    std::atomic<MediaPlayer::NetworkState> m_networkState { MediaPlayer::NetworkState::Empty };
++    std::atomic<MediaPlayer::ReadyState> m_readyState { MediaPlayer::ReadyState::HaveNothing };
++    std::atomic<bool> m_hasVideo { false };
++    std::atomic<bool> m_hasAudio { false };
++    // Set when the decoder hits end of stream. play() consumes it to restart from the
++    // beginning, which is what the element expects after it has ended.
++    std::atomic<bool> m_reachedEnd { false };
++    std::atomic<int> m_naturalWidth { 0 };
++    std::atomic<int> m_naturalHeight { 0 };
++
++    // ------------------------------------------------------------------
++    // Frame double buffer. The decode thread fills the back buffer and swaps
++    // m_presentBuffer under m_frameLock; paint() holds the same lock across its blit.
++    // Two buffers mean the decoder never writes into the surface Cairo is reading, and
++    // paint never blocks on the decoder for longer than that one blit. Both buffers are
++    // sized once per stream and never reallocated, so the cairo surfaces over them stay
++    // valid.
++    // ------------------------------------------------------------------
++    static constexpr unsigned s_frameBufferCount = 2;
++    mutable Lock m_frameLock;
++    IntSize m_frameSize WTF_GUARDED_BY_LOCK(m_frameLock);
++    Vector<uint8_t> m_frameBuffer[s_frameBufferCount] WTF_GUARDED_BY_LOCK(m_frameLock);
++    RefPtr<cairo_surface_t> m_frameSurface[s_frameBufferCount] WTF_GUARDED_BY_LOCK(m_frameLock);
++    unsigned m_writeBuffer WTF_GUARDED_BY_LOCK(m_frameLock) { 0 };
++    unsigned m_presentBuffer WTF_GUARDED_BY_LOCK(m_frameLock) { 0 };
++    bool m_havePresentableFrame WTF_GUARDED_BY_LOCK(m_frameLock) { false };
++
++    // Decode-thread-only scratch (PCM conversion); only ever touched on that thread.
++    Vector<float> m_scratch;
++
++    // Owned by the decode thread while it runs; destroyed after it is joined.
++    std::unique_ptr<DecoderState> m_decoder;
++    RefPtr<Thread> m_decodeThread;
++};
++
++} // namespace WebCore
++
++#endif // defined(WK_WINUWP)
+diff --git a/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
+new file mode 100644
+index 0000000000..9718729196
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
+@@ -0,0 +1,75 @@
++/*
++ * Apotheosis (WK_WINUWP): the WebCore <-> port contract for media.
++ *
++ * Deliberately tiny and free of MediaPlayer/Media Foundation includes: the platform
++ * layer (port/) implements the sink declared here and reads the diagnostics, and it
++ * must be able to do that without pulling WebCore's media headers into the driver.
++ * MediaPlayerPrivateWinUWP.h includes this header; port/PortMediaAudio.cpp includes it
++ * as <WebCore/WinUWPMediaBridge.h>.
++ *
++ * Direction of the dependency: WebCore declares, port/ implements and installs. The
++ * engine therefore never references a port/ symbol.
++ */
++
++#pragma once
++
++#if defined(WK_WINUWP)
++
++#include <cstdint>
++#include <unknwn.h>
++
++namespace WebCore {
++
++// ---------------------------------------------------------------------------
++// The audio device, as seen from the engine.
++//
++// The engine has no audio device access of its own and the port keeps all device work on
++// the harness side, so decoded PCM is handed to whichever sink port/ installed. With no
++// sink installed every call is a no-op and video still plays.
++//
++// Threading: configure()/reset() are called from the engine thread while the decode loop
++// is parked; pushPCM() and consumedFrames() are called from the decode thread only.
++// pushPCM() must never block for longer than the copy takes, and returns the frames
++// actually queued, so a full queue is back-pressure the decode loop paces itself against
++// instead of dropped audio.
++// ---------------------------------------------------------------------------
++class WinUWPMediaAudioSink {
++public:
++    virtual ~WinUWPMediaAudioSink() = default;
++
++    virtual void configure(int sampleRate, int channels) = 0;
++    virtual void reset() = 0;
++    virtual int pushPCM(const float* interleaved, int frames) = 0;
++    virtual uint64_t consumedFrames() const = 0;
++};
++
++WinUWPMediaAudioSink* winUWPMediaAudioSink();
++void setWinUWPMediaAudioSink(WinUWPMediaAudioSink*);
++
++// ---------------------------------------------------------------------------
++// Diagnostics.
++//
++// A silent media failure on device is the worst outcome — the page cannot see it and the
++// element just stays blank — so the decode path records why it gave up. The driver reads
++// these into stage.txt.
++//
++// The video subtype values are GUID::Data1 of the negotiated media types, which is enough
++// to tell the interesting cases apart (RGB32 = 0x16, NV12 = 0x3231564E, H264 = 0x34363248).
++// ---------------------------------------------------------------------------
++struct WinUWPMediaDiagnostics {
++    static unsigned startedSourceReaders();
++    static unsigned long long framesDecoded();
++    static unsigned long long framesPresented();
++    static unsigned long long pcmFramesPushed();
++    static unsigned long long pcmFramesDropped();
++    static HRESULT lastError();
++    static const char* lastErrorSite();
++    static void recordVideoTypes(unsigned nativeSubtype, unsigned outputSubtype, bool dxvaDisabled);
++    static unsigned nativeVideoSubtype();
++    static unsigned outputVideoSubtype();
++    static bool dxvaDisabled();
++};
++
++} // namespace WebCore
++
++#endif // defined(WK_WINUWP)
+diff --git a/Source/cmake/OptionsWinUWP.cmake b/Source/cmake/OptionsWinUWP.cmake
+new file mode 100644
+index 0000000000..41800d418b
+--- /dev/null
++++ b/Source/cmake/OptionsWinUWP.cmake
+@@ -0,0 +1,272 @@
++# ============================================================================
++# OptionsWinUWP.cmake  —  WinUWP port (EdgeHTML Reborn)
++# Phase 0: 只编 WTF + JavaScriptCore, CLoop 解释器, 无 JIT, 系统 malloc。
++# 目标: ARM32 (ARMv7 Thumb-2) + Windows 10 Mobile UWP / App Container。
++#
++# 设计要点(基于对 webkitgtk-2.52.4 源码的核对):
++#   * WebKitFeatures.cmake 对 "ARM 且非 Linux" 的默认分支(else, 第115行)已是
++#     JIT=OFF / C_LOOP=ON / USE_SYSTEM_MALLOC=ON / WEBASSEMBLY=OFF —— 正合 Phase 0。
++#   * 故本文件刻意"不"复制 OptionsJSCOnly.cmake 里那句
++#     `if (WIN32) WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SYSTEM_MALLOC PRIVATE OFF)`,
++#     以保留默认的系统 malloc(避免 bmalloc/libpas 的 VM 适配)。
++#   * App Container 的 WINAPI_FAMILY_APP / WindowsApp.lib / VirtualAllocFromApp 等
++#     由 Toolchain-ARM32-UWP.cmake 处理, 不在此文件。
++# ============================================================================
++
++find_package(Threads REQUIRED)
++
++# 编译器 flags。Path B = clang-cl(modern WebKit 唯一可行)。OptionsMSVC.cmake 是
++# clang-cl 专用但硬编码 x86_64(/clang:-masm=att、clang_rt.builtins-x86_64),不能整体 include,
++# 故在此写 ARM 适配的 clang-cl flags。Path A(纯 MSVC cl)分支保留作记录,实际已弃。
++if (COMPILER_IS_CLANG_CL)
++    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
++    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>)
++    add_compile_options(/GS /Zc:dllexportInlines-)
++    add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_ENABLE_EXTENDED_ALIGNED_STORAGE)
++    add_link_options(/INCREMENTAL:NO /OPT:REF /OPT:NOICF /STACK:8388608)
++
++    # 关 C++ 异常: clang 的 thumbv7-windows-msvc 后端无法 lower cleanupret(Windows EH),
++    # 开异常(CMake 默认 /EHsc)会触发 "Cannot select: cleanupret" 后端崩溃(exit 70)。
++    # WebKit 本就不用异常(RELEASE_ASSERT 而非 throw),关掉即可。
++    string(REGEX REPLACE "/EH[-a-z]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
++    string(REGEX REPLACE "/EH[-a-z]+" "" CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}")
++    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/EHs-c->)
++    add_definitions(-D_HAS_EXCEPTIONS=0)
++
++    # ARM 的 clang compiler-rt builtins(若 LLVM 预编译包提供; 否则靠 MSVC CRT 的 ARM helper)。
++    # 非 REQUIRED: 找不到就不链(不像 OptionsMSVC 那样对 x86_64 强制)。
++    cmake_path(REMOVE_FILENAME CMAKE_CXX_COMPILER OUTPUT_VARIABLE _CLANG_DIR)
++    string(REGEX MATCH "^[0-9]+" _CLANG_VER ${CMAKE_CXX_COMPILER_VERSION})
++    find_library(CLANG_RT_BUILTINS_ARM
++        NAMES clang_rt.builtins-arm clang_rt.builtins-armhf clang_rt.builtins-thumbv7
++        PATHS "${_CLANG_DIR}/../lib/clang/${_CLANG_VER}/lib/windows"
++        NO_DEFAULT_PATH)
++    if (CLANG_RT_BUILTINS_ARM)
++        link_libraries(${CLANG_RT_BUILTINS_ARM})
++        message(STATUS "WinUWP: 链接 ARM compiler-rt: ${CLANG_RT_BUILTINS_ARM}")
++    else ()
++        message(STATUS "WinUWP: 未找到 ARM clang_rt.builtins, 依赖 MSVC CRT 的 ARM helper")
++    endif ()
++elseif (MSVC)
++    # Path A 残留(纯 MSVC, 已证明编不过 modern WebKit, 仅留作历史)
++    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8> $<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>)
++    add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_ENABLE_EXTENDED_ALIGNED_STORAGE)
++    add_link_options(/INCREMENTAL:NO /OPT:REF /OPT:NOICF /STACK:8388608)
++endif ()
++
++add_definitions(-DBUILDING_WINUWP__)
++
++set(PROJECT_VERSION_MAJOR 0)
++set(PROJECT_VERSION_MINOR 1)
++set(PROJECT_VERSION_MICRO 0)
++set(PROJECT_VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_MICRO})
++
++WEBKIT_OPTION_BEGIN()
++
++# JSC 构建成静态库, 便于直接打包进 appx
++WEBKIT_OPTION_DEFINE(ENABLE_STATIC_JSC "Build JavaScriptCore as a static library." PUBLIC ON)
++WEBKIT_OPTION_DEFINE(USE_LIBBACKTRACE  "Enable usage of libbacktrace."            PUBLIC OFF)
++
++# 显式锁定解释器路线(ARM32-Win 默认已如此, 这里写明以自文档化、防回归)。
++# 注: WebKitFeatures 里 ENABLE_C_LOOP 与 ENABLE_JIT / SAMPLING_PROFILER / WEBASSEMBLY
++#     互为 WEBKIT_OPTION_CONFLICT, 故设 C_LOOP=ON 即自动排除那三者。
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_C_LOOP           PRIVATE ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_JIT             PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_REMOTE_INSPECTOR PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_API_TESTS       PRIVATE OFF)
++
++# ---- Phase 1 WebCore: 最小特性集(软件渲染, 无媒体/GPU/网络重特性) ----
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBXR             PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GPU_PROCESS       PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_OFFSCREEN_CANVAS  PRIVATE OFF)
++# Apotheosis/WK_WINUWP: WEBGL/WEBGPU 必须在 WEBKIT_OPTION_END() 之前用 DEFAULT_PORT_VALUE 关,
++# 否则(像下方 L130 那样在 END() 之后 set())只改普通变量、改不到 cache option,cache 仍取
++# WebKitFeatures 默认 ON(WEBGL),使 FEATURE_DEFINES 带 ENABLE_WEBGL → IDL 生成 5-类型
++# RenderingContext union(含 WebGL*RenderingContext),与 C++ 侧 #if ENABLE(WEBGL) 的 3-类型
++# variant 不一致 → incomplete type / 缺 toJS / no viable conversion。
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGL             PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGPU            PRIVATE OFF)
++# Apotheosis: WebCodecs 关掉(basic HTML 不需要)。注:ENABLE_CSS_TYPED_OM 在 2.52.4 不是 feature
++# flag(Typed OM 常开,无法关),而 CSSMathValue/CSSStyleValue 等 Typed OM binding 的复杂 union
++# variant 是 clang thumbv7 "cannot mangle this pack expansion" 墙的主要触发源 —— 故特性裁剪绕不过
++# 这堵墙,需走"换 LLVM / 重构 switchOn"方向(见 MORNING-STATUS)。
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_CODECS        PRIVATE OFF)
++# Apotheosis: media backend is being implemented on the media-mf branch.
++# ENABLE_VIDEO is ON so the WebCore media stack (MediaPlayer/HTMLMediaElement/
++# MediaControlsHost) is actually compiled; USE_MEDIA_FOUNDATION stays OFF so the
++# desktop MF presenter (HWND/EVR/D3D9/DComp) is never pulled in. The WinUWP
++# player is registered from MediaPlayer.cpp behind WK_WINUWP instead.
++# NOTE: flipping this forces a full WebCore rebuild (config.h changes).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO             PRIVATE ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_AUDIO         PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SOURCE      PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_STREAM      PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_RTC           PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_LEGACY_ENCRYPTED_MEDIA PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_ENCRYPTED_MEDIA   PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS  PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_DRAG_SUPPORT      PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_CONTEXT_MENUS     PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_FULLSCREEN_API    PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GAMEPAD           PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GEOLOCATION       PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_DEVICE_ORIENTATION PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_NOTIFICATIONS     PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPELLCHECK        PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_RESOURCE_USAGE    PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_XSLT              PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MATHML            PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PAYMENT_REQUEST   PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_AUTHN         PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_CONTENT_EXTENSIONS PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MHTML             PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER         PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MINIBROWSER       PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SKIA                 PRIVATE OFF)  # 关键: 选 Cairo 分支
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_WOFF2               PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_AVIF                PRIVATE OFF)
++
++WEBKIT_OPTION_END()
++
++# 事件循环: 通用实现(不依赖 GLib)
++set(ALL_EVENT_LOOP_TYPES Generic)
++set(DEFAULT_EVENT_LOOP_TYPE "Generic")
++set(EVENT_LOOP_TYPE ${DEFAULT_EVENT_LOOP_TYPE} CACHE STRING "Event loop impl (one of ${ALL_EVENT_LOOP_TYPES})")
++SET_AND_EXPOSE_TO_BUILD(USE_GENERIC_EVENT_LOOP 1)
++SET_AND_EXPOSE_TO_BUILD(WTF_DEFAULT_EVENT_LOOP 0)
++
++# Phase 1: 开 WebCore(WTF + JSC + WebCore);WebKit/Legacy 层暂不建(直接驱动 WebCore)
++set(ENABLE_WEBCORE         ON)
++set(ENABLE_WEBKIT_LEGACY   OFF)
++set(ENABLE_WEBKIT          OFF)
++set(ENABLE_WEBINSPECTORUI  OFF)
++# ENABLE_WEBGL/ENABLE_WEBGPU 已上移到 WEBKIT_OPTION_END() 之前用 WEBKIT_OPTION_DEFAULT_PORT_VALUE
++# 关闭(此处 set() 在 END() 之后只改普通变量、改不到 cache,是之前两侧不一致的根因,故删除)。
++set(ENABLE_API_TESTS       OFF)
++
++# ARM 反汇编器(capstone): 无 JIT 不需要。且其 CMakeLists 用了 CMake 4.x 已移除的
++# cmake_policy(CMP0048 OLD) → 直接关掉, 避免引入该子目录。
++SET_AND_EXPOSE_TO_BUILD(USE_CAPSTONE FALSE)
++set(ENABLE_DISASSEMBLER OFF)
++
++# 静态库时无需把 WTF/bmalloc 拆成 OBJECT
++if (NOT ENABLE_STATIC_JSC)
++    set(JavaScriptCore_LIBRARY_TYPE SHARED)
++    set(bmalloc_LIBRARY_TYPE OBJECT)
++    set(WTF_LIBRARY_TYPE OBJECT)
++endif ()
++
++# ---- Windows / Win10M 编译宏 ----
++add_definitions(-D_WINDOWS)
++# Win10M 1709 (build 15254) = NTDDI_WIN10_RS3。锁低 NTDDI, 防止编进设备上不存在的新 API。
++add_definitions(-DNTDDI_VERSION=0x0A000004 -D_WIN32_WINNT=0x0A00)
++add_definitions(-DNOMINMAX -DUNICODE -D_UNICODE -DNOCRYPT)
++add_definitions(-D_CRT_NONSTDC_NO_DEPRECATE)
++add_definitions(-D_SILENCE_CXX23_DENORM_DEPRECATION_WARNING)
++
++if (DEFINED ENV{WEBKIT_IGNORE_PATH})
++    set(CMAKE_IGNORE_PATH $ENV{WEBKIT_IGNORE_PATH})
++endif ()
++
++# 单配置(Ninja)输出目录对齐
++set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}")
++set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}")
++set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
++set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
++set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
++set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
++set(CMAKE_DISABLE_PRECOMPILE_HEADERS OFF)
++
++# ---- ICU(由 vcpkg arm-uwp triplet 提供)----
++find_package(ICU 70.1 REQUIRED COMPONENTS data i18n uc)
++
++# ============================================================================
++# Phase 1: WebCore 后端开关 + 依赖。网络栈(Curl/OpenSSL/PSL)本轮延后到 Phase 1b,
++# 见 E:\Apotheosis\NIGHT-LOG-*.md。目标先让 WebCore configure + 编译渲染主体。
++# ============================================================================
++if (ENABLE_WEBCORE)
++    SET_AND_EXPOSE_TO_BUILD(USE_CAIRO          ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_FREETYPE       ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_FONTCONFIG     ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_HARFBUZZ       ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_SYSTEM_MALLOC  ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_THEME_ADWAITA  ON)
++    # Apotheosis (M4): opt-in baseline JIT. wtf/PlatformEnable.h forces ENABLE_JIT=0 on every
++# 32-bit target except ARMv7 Linux, so ENABLE_JIT=ON is inert by itself; with
++# WK_WINUWP_JIT the header keeps the cmake value. (Re-wired during the 2.54 rebase:
++# the gate lives in wtf/PlatformEnable.h and needs this define.)
++if (APOTHEOSIS_JIT)
++    add_definitions(-DWK_WINUWP_JIT=1)
++endif ()
++
++if (APOTHEOSIS_GPU)
++        # GPU 路径1:TextureMapper 同步合成(GraphicsLayerTextureMapper,无需 Coordinated/Nicosia/WC)
++        # + ANGLE。复用预编译 NuGet ANGLE.WindowsStore(arm32 UWP)做 IMPORTED target,不编 in-tree ANGLE。
++        SET_AND_EXPOSE_TO_BUILD(USE_TEXTURE_MAPPER                ON)
++        SET_AND_EXPOSE_TO_BUILD(USE_GRAPHICS_LAYER_TEXTURE_MAPPER ON)
++        SET_AND_EXPOSE_TO_BUILD(USE_COORDINATED_GRAPHICS         OFF)
++        SET_AND_EXPOSE_TO_BUILD(USE_GRAPHICS_LAYER_WC            OFF)
++        SET_AND_EXPOSE_TO_BUILD(USE_ANGLE                        ON)
++        set(USE_ANGLE_EGL ON)
++        set(_APO_ANGLE "E:/Apotheosis/angle")
++        if (NOT TARGET ANGLE::GLES)
++            add_library(ANGLE::GLES UNKNOWN IMPORTED GLOBAL)
++            set_target_properties(ANGLE::GLES PROPERTIES
++                IMPORTED_LOCATION "${_APO_ANGLE}/arm/libGLESv2.lib"
++                INTERFACE_INCLUDE_DIRECTORIES "${_APO_ANGLE}/include")
++        endif ()
++        if (NOT TARGET ANGLE::EGL)
++            add_library(ANGLE::EGL UNKNOWN IMPORTED GLOBAL)
++            set_target_properties(ANGLE::EGL PROPERTIES
++                IMPORTED_LOCATION "${_APO_ANGLE}/arm/libEGL.lib"
++                INTERFACE_INCLUDE_DIRECTORIES "${_APO_ANGLE}/include")
++        endif ()
++    else ()
++        # 加速合成路径全关(软件渲染;避免引用 TextureMapper / ANGLE / coordinated-graphics 符号)
++        SET_AND_EXPOSE_TO_BUILD(USE_TEXTURE_MAPPER       OFF)
++        SET_AND_EXPOSE_TO_BUILD(USE_COORDINATED_GRAPHICS OFF)
++        SET_AND_EXPOSE_TO_BUILD(USE_ANGLE                OFF)
++    endif ()
++    # Apotheosis: leave this off until the UWP SourceReader backend replaces
++    # the desktop EVR/D3D9 implementation in the WebCore source list.
++    SET_AND_EXPOSE_TO_BUILD(USE_MEDIA_FOUNDATION     OFF)
++    SET_AND_EXPOSE_TO_BUILD(USE_LCMS                  OFF)   # 不编 lcms2 色彩管理
++    SET_AND_EXPOSE_TO_BUILD(USE_JPEGXL                OFF)   # 不编 libjxl
++    SET_AND_EXPOSE_TO_BUILD(USE_AVIF                  OFF)   # 不编 libavif(双保险)
++    # 网络/加密后端(Phase 1b,2026-06-15):curl ResourceLoader + OpenSSL 3.6.3 TLS(TLS 1.3,
++    # 替 Win10M Schannel 只到 1.2)。库由 vcpkg curl[openssl]:arm-uwp 提供。USE_OPENSSL=ON 是 curl 的
++    # TLS/crypto 后端宏;WebCrypto(crypto/openssl 的 18 个文件)经 PlatformWinUWP 维持不 include
++    # OpenSSL.cmake 来排除(本阶段只要网络,不要 window.crypto.subtle)。
++    SET_AND_EXPOSE_TO_BUILD(USE_CURL           ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_OPENSSL        ON)
++
++    # 字体/图形/解析依赖(已为 arm-uwp 交叉编出,在 CMAKE_PREFIX_PATH 上)
++    find_package(HarfBuzz 1.4.2 REQUIRED)          # 不要 COMPONENTS ICU(未编 hb-icu;ComplexTextControllerHarfBuzz 改用 WTF 的 ICU)
++    find_package(Cairo    1.18.0 REQUIRED)
++    find_package(Freetype REQUIRED)
++    find_package(Fontconfig REQUIRED)
++    find_package(JPEG    REQUIRED)
++    find_package(PNG     REQUIRED)
++    find_package(WebP    REQUIRED COMPONENTS demux)
++    find_package(LibXml2 REQUIRED)
++    find_package(SQLite3 REQUIRED)
++    # 某些 CMake 的 FindSQLite3 找到库却不建导入 target → 显式补建
++    if (SQLite3_FOUND AND NOT TARGET SQLite3::SQLite3)
++        add_library(SQLite3::SQLite3 UNKNOWN IMPORTED GLOBAL)
++        set_target_properties(SQLite3::SQLite3 PROPERTIES
++            IMPORTED_LOCATION "${SQLite3_LIBRARY}"
++            INTERFACE_INCLUDE_DIRECTORIES "${SQLite3_INCLUDE_DIR}")
++    endif ()
++    find_package(ZLIB    REQUIRED)
++
++    # 软件渲染无 GL。WebCore/CMakeLists.txt:2174 无条件链 OpenGL::GLES(USE_ANGLE_EGL/
++    # USE_LIBEPOXY 都关时走 system GL 分支)。WEBGL/ANGLE 关 → 不会真引用 GL 符号,
++    # 建空 INTERFACE target 满足链接引用即可。
++    if (NOT TARGET OpenGL::GLES)
++        add_library(OpenGL::GLES INTERFACE IMPORTED GLOBAL)
++    endif ()
++    # ---- 网络/加密(Phase 1b):curl + OpenSSL 由 vcpkg arm-uwp 提供,在 CMAKE_PREFIX_PATH 上 ----
++    find_package(CURL    REQUIRED)          # → CURL::libcurl(Curl.cmake)
++    find_package(OpenSSL REQUIRED)          # → OpenSSL::SSL + OpenSSL::Crypto(curl TLS / OpenSSLHelper)
++    # LibPSL 不 find:不支持 UWP(vcpkg 拒),PublicSuffixStoreCurl.cpp 已在 PlatformWinUWP 排除、走 stub。
++endif ()
