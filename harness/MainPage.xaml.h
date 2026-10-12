@@ -597,6 +597,15 @@ namespace Harness {
         //   bounds how long the engine may keep the shell waiting for it. Both UI thread only.
         Windows::ApplicationModel::SuspendingDeferral^ m_suspendDeferral { nullptr };
         Windows::UI::Xaml::DispatcherTimer^ m_suspendTimer { nullptr };
+        // Apotheosis (media, 2026-10-13): 播放媒体期间必须阻止息屏。UWP 应用默认不阻止息屏,屏幕一灭
+        //   系统就冻结/挂起前台进程 —— 视频随之停住(真机上正是"画面不动了"),远程调试(WDP)也会断连。
+        //   任何视频播放器都必须这么做;这里在每次导航后持有一个 DisplayRequest 并重新计时,10 分钟
+        //   上限后自动放掉,避免长时间挂着白耗电。UI 线程 only。
+        Windows::System::Display::DisplayRequest^ m_displayRequest { nullptr };
+        Windows::UI::Xaml::DispatcherTimer^ m_displayAwakeTimer { nullptr };
+        bool m_displayRequestActive { false };
+        void HoldDisplayAwake();
+        void OnDisplayAwakeTick(Platform::Object^ sender, Platform::Object^ e);
         // Apotheosis (2026-09-27): the prompt() dialog in flight. The engine thread is parked
         // waiting for this id's answer (WebCoreCompletePrompt), so the overlay answers exactly
         // once - AnswerActivePrompt is the only way both m_promptActive and the id clear.

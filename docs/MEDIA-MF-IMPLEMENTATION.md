@@ -339,6 +339,53 @@ Lesson worth keeping: **a UI-thread crash whose stack symbolizes to nothing usef
 localized from the server side** - "the device never even asked for the page" is proof the app died
 before navigation, and it costs one grep of the test server log.
 
+### Device round 5: the element and the backend were deadlocked over readyState
+
+0.2.5.27 removed the crash and let the page load, but the picture still never came: the element
+reported `paused=0`, `rs=1`, `ct=0.000`, the page kept firing `stalled`, and (from the earlier
+instrumented rounds) `reads=1`. Reading the element's own play path explains all of it, and the
+explanation is a deadlock between the element and the backend rather than a bug in either one:
+
+```cpp
+// HTMLMediaElement::updatePlayState()
+bool shouldBePlaying = potentiallyPlaying();
+...
+if (shouldBePlaying) { ... playPlayer(); }        // the only path that reaches MediaPlayer::play()
+
+// HTMLMediaElement::potentiallyPlaying()
+if (!couldPlayIfEnoughData()) return false;
+if (m_readyState >= HAVE_FUTURE_DATA) return true;                       // needs readyState >= 3
+return m_readyStateMaximum >= HAVE_FUTURE_DATA && m_readyState < HAVE_FUTURE_DATA;
+```
+
+`readyState` is *whatever the backend reports*. This backend only decoded while it was asked to
+play, and while paused it decoded exactly one poster frame and then parked - so it never reported
+more than `HaveCurrentData` (2), `potentiallyPlaying()` stayed false, `playPlayer()` was never
+called, `m_paused` stayed true in the backend, the decode thread stayed parked, and therefore no
+data was ever produced to raise `readyState`. Each side was waiting for the other.
+
+Every real backend breaks this the same way: **a paused player still buffers**, and reports
+`readyState` progression as it does. So 0.2.5.29 makes the backend do that:
+
+* `DecoderState::bufferedEnd` tracks how far ahead the reader has read;
+* the paused branch now keeps decoding until it has two seconds of read-ahead (or EOS), then reports
+  `HaveFutureData` (`HaveEnoughData` at EOS) on the main thread and only then parks;
+* the audio push loop no longer breaks on `m_paused` - a paused player still fills its ring, and
+  refusing to do so was a second reason `readyState` could not advance.
+
+This is a separate gate from the `IsInWindow` one in round 4, and both are needed: `IsInWindow` lets
+WebKit *permit* playback (otherwise the play() promise is rejected outright), and buffering while
+paused is what makes the element actually *ask* the backend to play.
+
+### Also fixed on the way: the app never held the screen awake
+
+Every device round kept dying mid-test because the phone's screen turned off after a few seconds,
+and when it does the system freezes the foreground process (and WDP drops). That is not only a test
+problem: **a browser that plays video has to hold a display request**, and this one never did, so
+playback would stop the moment the screen went off. 0.2.5.28 added `MainPage::HoldDisplayAwake()` -
+a `DisplayRequest` re-armed on every navigation with a 10-minute cap, so it does not sit there
+draining the battery when nothing is being watched.
+
 ## Root cause of "video renders as an empty control and .play() does nothing"
 
 Found on device, 2026-10-09, and it is **not** in WebKit: the port turned media off itself.

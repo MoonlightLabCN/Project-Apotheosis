@@ -634,10 +634,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..275554c7a5
+index 0000000000..3248c70eb2
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1497 @@
+@@ -0,0 +1,1525 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -918,6 +918,14 @@ index 0000000000..275554c7a5
 +    // Set when the reader reports a hard error: the decode loop parks on this instead of
 +    // retrying a reader that will never produce a sample again.
 +    bool failed { false };
++    // Apotheosis (media, 2026-10-13): how far ahead the decode thread has read, in media time. A
++    // *paused* player still has to fill this. WebKit does not call MediaPlayer::play() until the
++    // element's readyState has reached HAVE_FUTURE_DATA (HTMLMediaElement::potentiallyPlaying), and
++    // readyState is only what the backend reports - so a backend that decodes nothing while paused
++    // deadlocks against the element: no play(), therefore no data, therefore no HAVE_FUTURE_DATA.
++    // On device that reads as paused=0 on the element, reads=1, readyState stuck at HAVE_METADATA
++    // and no picture at all.
++    MediaTime bufferedEnd { MediaTime::zeroTime() };
 +};
 +
 +// ===========================================================================
@@ -1735,13 +1743,28 @@ index 0000000000..275554c7a5
 +                    m_seekProducer.reset();
 +                }
 +            } else if (m_paused) {
-+                if (!prerolled && state.hasVideo && !state.eos) {
-+                    // Decode exactly one frame so the element has something to show before
-+                    // playback starts (its poster frame), then go back to sleeping. This
-+                    // is what keeps <video> from staying blank until the user hits play.
++                // A paused player must still BUFFER, not decode one poster frame and sleep.
++                // WebKit does not call MediaPlayer::play() until the element's readyState has
++                // reached HAVE_FUTURE_DATA (HTMLMediaElement::potentiallyPlaying), and readyState is
++                // only ever what this backend reports - so decoding nothing while paused deadlocks
++                // the two against each other: no play(), therefore no data, therefore never
++                // HAVE_FUTURE_DATA. On device that is paused=0 on the element while reads stays at 1
++                // and readyState never leaves HAVE_METADATA. Fill a read-ahead first, report it, and
++                // only then park. See DecoderState::bufferedEnd.
++                const MediaTime bufferedAhead = state.bufferedEnd - m_currentTime;
++                if (!state.eos && bufferedAhead < MediaTime(2, 1)) {
 +                    prerolled = true;
-+                    preroll = true;
++                    preroll = true;      // respectPacing == false: fill as fast as the source allows
 +                } else {
++                    if (m_readyState.load() < MediaPlayer::ReadyState::HaveFutureData) {
++                        const auto reportedState = state.eos ? MediaPlayer::ReadyState::HaveEnoughData
++                                                             : MediaPlayer::ReadyState::HaveFutureData;
++                        ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
++                        callOnMainThread([weakThis, reportedState] {
++                            if (RefPtr protectedThis = weakThis.get())
++                                protectedThis->setReadyState(reportedState);
++                        });
++                    }
 +                    m_condition.waitFor(m_lock, idleParkInterval);
 +                    continue;
 +                }
@@ -1853,6 +1876,8 @@ index 0000000000..275554c7a5
 +
 +    HRESULT hr = state.reader->ReadSample(MF_SOURCE_READER_ANY_STREAM, 0, &actualStreamIndex, &streamFlags, &timestamp, &sample);
 +    WinUWPMediaDiagnostics::recordReadSample(static_cast<long>(hr), streamFlags, actualStreamIndex);
++    if (SUCCEEDED(hr) && !(streamFlags & MF_SOURCE_READERF_STREAMTICK))
++        state.bufferedEnd = MediaTime(timestamp, tenMegahertz);
 +    if (FAILED(hr)) {
 +        // MF_E_INVALIDREQUEST after a stop and E_ABORT from a cancelled read are both
 +        // ordinary consequences of tearing down; anything else is worth reporting.
@@ -2005,7 +2030,10 @@ index 0000000000..275554c7a5
 +            while (framesPushed < static_cast<size_t>(frames)) {
 +                {
 +                    Locker locker { m_lock };
-+                    if (m_stopRequested || m_paused)
++                    // Deliberately NOT breaking on m_paused. A paused player still buffers, and
++                    // refusing to fill the ring while paused was one of the reasons the element never
++                    // reached HAVE_FUTURE_DATA. Only a real stop ends this loop.
++                    if (m_stopRequested)
 +                        break;
 +                }
 +

@@ -2295,8 +2295,50 @@ void MainPage::SetLoading(bool loading)
     RevealTitleRow();
 }
 
+// Apotheosis (media, 2026-10-13): hold the display awake for the next 10 minutes, re-armed on every
+// navigation. UWP apps do not prevent the screen from turning off by default, and when the screen
+// goes off the system freezes/suspends the foreground process: media playback stops (on device this
+// looked exactly like "the picture never appears") and the remote debugging channel drops. Every
+// video player has to do this. Bounded on purpose - holding it forever would just drain the battery
+// while the user is not watching anything.
+void MainPage::HoldDisplayAwake()
+{
+    if (!m_displayRequestActive) {
+        try {
+            if (!m_displayRequest)
+                m_displayRequest = ref new Windows::System::Display::DisplayRequest();
+            m_displayRequest->RequestActive();
+            m_displayRequestActive = true;
+        } catch (...) {
+            // Not in the foreground, or the request is unavailable: not fatal, just no keep-awake.
+            m_displayRequestActive = false;
+            return;
+        }
+    }
+
+    if (!m_displayAwakeTimer) {
+        m_displayAwakeTimer = ref new Windows::UI::Xaml::DispatcherTimer();
+        m_displayAwakeTimer->Interval = Windows::Foundation::TimeSpan { 10LL * 60 * 10000000 };
+        m_displayAwakeTimer->Tick += ref new Windows::Foundation::EventHandler<Platform::Object^>(
+            this, &MainPage::OnDisplayAwakeTick);
+    }
+    m_displayAwakeTimer->Stop();
+    m_displayAwakeTimer->Start();
+}
+
+void MainPage::OnDisplayAwakeTick(Platform::Object^ sender, Platform::Object^ e)
+{
+    if (m_displayAwakeTimer)
+        m_displayAwakeTimer->Stop();
+    if (m_displayRequestActive && m_displayRequest) {
+        try { m_displayRequest->RequestRelease(); } catch (...) { }
+    }
+    m_displayRequestActive = false;
+}
+
 void MainPage::NavigateTo(Platform::String^ url, bool pushHistory)
 {
+    HoldDisplayAwake();
     if (m_loading) return;
 
     std::wstring wurl = url ? std::wstring(url->Data()) : L"about:home";
