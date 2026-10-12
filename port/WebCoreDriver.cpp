@@ -227,6 +227,7 @@ unsigned wkWinUWPTexmapVisibleHoles();
 #include <WebCore/EventHandler.h>            // LocalFrame::eventHandler() 派发鼠标事件
 #include <WebCore/HandleUserInputEventResult.h> // EventHandler 鼠标方法返回类型(否则不完整类型报错)
 #include <WebCore/FocusController.h>         // page->focusController().setActive/setFocused(headless 处理 JS 事件必需)
+#include <WebCore/ActivityState.h>           // Apotheosis (media-mf): ActivityState::IsInWindow 等(见 wkPutPageInForeground)
 #include <WebCore/Editor.h>                  // editor().canEdit()/insertText()/command(输入法文本插入)
 #include <WebCore/FindOptions.h>             // WebCore::FindOption / FindOptions(页内查找)
 #include <WebCore/SimpleRange.h>             // Page::FindStringData 内含 std::optional<SimpleRange>
@@ -2198,6 +2199,27 @@ static void perfWriteStageTimeline(const PerfRow& r)
         WebCorePort::appendMediaDiagnostics(media, sizeof media);
         std::fprintf(fp, "%s\n", media);
     }
+    // Apotheosis (media-mf, 设备回合 3): 播放「被允许与否」的直接证据。文档的 ActiveDOMObject 被
+    // 挂起(或帧被挂起)时,WebKit 会拒绝播放:play() 的 promise 以 AbortError 被拒、元素被 pause,
+    // 解码线程于是永远不跑 —— 真机表现就是 reads=1 且无帧。fsusp/dsusp 为 1 即确诊。
+    if (g_session && g_session->page) {
+        auto st = g_session->page->activityState();
+        int fsusp = -1, dsusp = -1;
+        if (RefPtr lf = g_session->page->localMainFrame()) {
+            fsusp = lf->activeDOMObjectsAndAnimationsSuspended() ? 1 : 0;
+            if (RefPtr doc = lf->document())
+                dsusp = doc->activeDOMObjectsAreSuspended() ? 1 : 0;
+        }
+        std::fprintf(fp,
+            "media-state vis=%d visocc=%d inwin=%d focused=%d winactive=%d idle=%d fsusp=%d dsusp=%d\n",
+            st.contains(WebCore::ActivityState::IsVisible) ? 1 : 0,
+            st.contains(WebCore::ActivityState::IsVisibleOrOccluded) ? 1 : 0,
+            st.contains(WebCore::ActivityState::IsInWindow) ? 1 : 0,
+            st.contains(WebCore::ActivityState::IsFocused) ? 1 : 0,
+            st.contains(WebCore::ActivityState::WindowIsActive) ? 1 : 0,
+            st.contains(WebCore::ActivityState::IsVisuallyIdle) ? 1 : 0,
+            fsusp, dsusp);
+    }
     std::fclose(fp);
 }
 
@@ -3843,6 +3865,31 @@ static void teardownSession()
     wkCollectJSCHeapNow();
 }
 
+// Apotheosis (media-mf, 设备回合 3): 显式把页面置入「前台可见且在窗口内」的视图状态。
+//
+// port 没有 UI 进程,所以从来没有人上报过视图状态,只有 Page::setIsVisible(true) 被调过 —— 而它
+// 只动 IsVisible/IsVisibleOrOccluded 两个位。真正要命的是 ActivityState::IsInWindow:
+// Page::setActivityState 里 `if (changed & IsInWindow) setIsInWindowInternal(...)`,为假时走到
+// LocalFrame::suspendActiveDOMObjectsAndAnimations() —— 那是个计数器,一旦 >0,文档的
+// ActiveDOMObject 就处于挂起状态。于是 HTMLMediaElement::isSuspended() 为真,
+// MediaElementSession::playbackStateChangePermitted(Playing) 以 "Element is suspended" 拒绝播放,
+// HTMLMediaElement::updateShouldPlay() 随即 pauseInternal() —— play() 的 promise 被以 AbortError
+// 拒掉、MediaPlayer::pause() 传到后端、解码线程停在暂停分支。真机读数正是 reads=1 / frames=0 /
+// readyState 卡在 HAVE_METADATA(见 docs/MEDIA-MF-IMPLEMENTATION.md 设备回合 3)。
+//
+// 只增不减:保留 WebCore 自己维护的位(IsAudible/IsLoading/...),只补齐前台该有的位。
+static void wkPutPageInForeground(WebCore::Page* page)
+{
+    if (!page)
+        return;
+    using namespace WebCore;
+    auto state = page->activityState();
+    state.add({ ActivityState::WindowIsActive, ActivityState::IsFocused, ActivityState::IsVisible,
+        ActivityState::IsVisibleOrOccluded, ActivityState::IsInWindow });
+    state.remove(ActivityState::IsVisuallyIdle);
+    page->setActivityState(state);
+}
+
 // 在已 emplace 的 g_session 上建立 Page、发起网络加载、settle、布局、提链接、绘制。
 // 约定:调用前 g_session 已 emplace 且 w/h 已设、load 已清零。成功返回 kOK 并把 page/mainFrame/client
 // 存入会话;失败返回负值(调用方 WebCoreSessionLoad 负责 teardown 不留半截会话)。
@@ -3990,6 +4037,10 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
     page->setIsVisible(true);
+    // Apotheosis (media-mf): IsVisible alone is not enough - without ActivityState::IsInWindow the
+    // frame's ActiveDOMObjects stay suspended and media playback is denied. See
+    // wkPutPageInForeground() above.
+    wkPutPageInForeground(page.ptr());
     // Apotheosis (M4 load timeline): opt in to the visually-non-empty milestone. WebCore only
     // computes and dispatches the milestones a client asked for (Page::requestedLayoutMilestones),
     // and this is the mark behind the t_firstpaint column and the stage.txt timeline line.
@@ -5063,6 +5114,9 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
     wkApplyPageWidthFactor(page.get());   // Apotheosis: device scale factor, before the first layout
     // 标记页面可见,否则后台节流会推迟图片/定时器/资源加载(headless 默认可能非可见)。
     page->setIsVisible(true);
+    // Apotheosis (media-mf): 同上,IsInWindow 必须一起给,否则文档的 ActiveDOMObject 被挂起、
+    // 媒体播放被拒。见 wkPutPageInForeground()。
+    wkPutPageInForeground(&page.get());
 
     // ---- Main frame + view ----
     RefPtr<LocalFrame> localMainFrame = page->localMainFrame();
