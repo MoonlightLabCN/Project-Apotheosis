@@ -240,6 +240,53 @@ across 0.2.5.20 and 0.2.5.21, both of which went through several teardowns (depl
 old instance, plus this session's terminate-and-relaunch test cycles) and user taps. The file grew
 only with `tap at=` interaction records. The pre-fix build crashed on the same actions twice.
 
+### Device round 3: the audio path was freezing the video path
+
+With playback finally permitted the element played (`paused=0`) and still produced no frames. The
+ReadSample instrumentation answered it in one line:
+
+```
+reads=1 lasthr=0x00000000 flags=0x0 sidx=0 vidx=2 aidx=0 drop=0
+cap=48000 qpush=0 qcons=0 qdrop=0 und=0 phase=6
+```
+
+`reads=1` means the decode thread read **exactly one** sample and never came back to the loop. That
+sample was audio (`sidx=0` matches `aidx=0`), and `phase=6` - recorded immediately before the audio
+push loop - together with `qpush=0` means `pushPCM` never returned. So the video stream was **never
+read at all**: `frames=0` had nothing to do with the video pipeline.
+
+The amplifier was our own design, and the comment said it out loud:
+
+```cpp
+// The sink is bounded; ... a full queue is treated as back-pressure and the decoder waits
+// for the device instead.
+while (framesPushed < frames) {
+    ...
+    if (queued <= 0) { sleepForSeconds(0.005); continue; }   // waits forever
+```
+
+`PortAudioOutput.h` documents the opposite contract - "pushPCM() never waits for the audio callback"
+- so the queue honoured it and the *caller* broke it. One stuck audio consumer therefore froze the
+entire media pipeline, video included. Worth remembering as a class of bug, not just as this bug:
+**an unbounded wait on a shared resource inside the decode thread converts a local problem into a
+total media stall.**
+
+Fixed in three places:
+
+1. `PortAudioOutput::pushPCM` uses `try_lock` and returns 0 when the queue mutex is busy (counting
+   `contendedPushes`), so it can never block the decode thread.
+2. The media-side push loop is bounded (250 ms), after which it drops the rest of the sample, counts
+   it in `g_pcmFramesDropped`, marks `phase=8` and returns - a dropped audio block is a far better
+   failure than a frozen picture.
+3. Audio that is consumed still needs a consumer: the harness only starts its AudioGraph from a
+   present callback (`OnPresentWake` -> `MediaAudio::EnsureStarted`), and a stalled media page
+   produces no presents of its own (`und=0`, `qcons=0`). The driver now calls `presentRequested()`
+   when a format is configured, so the graph gets built for it.
+
+The media line gained `cap / qpush / qcons / qdrop / und / cpush / phase` for exactly this hunt. Phase
+values: 1 entered, 2 sink obtained, 3 ConvertToContiguousBuffer, 4 buffer Lock, 5 formats read,
+6 entering push loop, 7 push returned, 8 gave up on the sample.
+
 ## Root cause of "video renders as an empty control and .play() does nothing"
 
 Found on device, 2026-10-09, and it is **not** in WebKit: the port turned media off itself.
