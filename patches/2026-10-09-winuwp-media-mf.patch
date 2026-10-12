@@ -634,10 +634,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..0dafe0c573
+index 0000000000..275554c7a5
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1425 @@
+@@ -0,0 +1,1497 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -717,6 +717,24 @@ index 0000000000..0dafe0c573
 +std::atomic<bool> g_dxvaDisabled { false };
 +std::atomic<WinUWPMediaAudioSink*> g_audioSink { nullptr };
 +
++// ReadSample instrumentation. On device the reader opened and negotiated types (H264 -> RGB32,
++// DXVA on, err 0) and metadata reached the element, yet no frame or PCM sample ever appeared.
++// These separate the remaining possibilities, which look identical from the media line alone:
++//   * the synchronous ReadSample never returns  -> calls stops rising, flags frozen;
++//   * it returns streamticks only               -> calls rises, flags has STREAMTICK;
++//   * a sample arrives but is dropped because its stream index matches neither configured
++//     stream                                    -> samplesDropped rises while frames stays 0.
++std::atomic<unsigned long long> g_readSampleCalls { 0 };
++std::atomic<long> g_lastReadSampleHr { 0 };
++std::atomic<unsigned> g_lastReadSampleFlags { 0 };
++std::atomic<unsigned> g_lastReadSampleStreamIndex { 0xffffffffu };
++std::atomic<unsigned long long> g_samplesDroppedStreamIndex { 0 };
++std::atomic<unsigned> g_videoStreamIndex { 0xffffffffu };
++std::atomic<unsigned> g_audioStreamIndex { 0xffffffffu };
++// See WinUWPMediaBridge.h: the phase the decode thread last reached inside handleAudioSample().
++std::atomic<int> g_audioPhase { 0 };
++std::atomic<int> g_lastPushResult { 0 };
++
 +void recordError(HRESULT hr, const char* site)
 +{
 +    if (FAILED(hr)) {
@@ -781,6 +799,36 @@ index 0000000000..0dafe0c573
 +unsigned WinUWPMediaDiagnostics::nativeVideoSubtype() { return g_nativeVideoSubtype.load(); }
 +unsigned WinUWPMediaDiagnostics::outputVideoSubtype() { return g_outputVideoSubtype.load(); }
 +bool WinUWPMediaDiagnostics::dxvaDisabled() { return g_dxvaDisabled.load(); }
++unsigned long long WinUWPMediaDiagnostics::readSampleCalls() { return g_readSampleCalls.load(); }
++long WinUWPMediaDiagnostics::lastReadSampleHr() { return g_lastReadSampleHr.load(); }
++unsigned WinUWPMediaDiagnostics::lastReadSampleFlags() { return g_lastReadSampleFlags.load(); }
++unsigned WinUWPMediaDiagnostics::lastReadSampleStreamIndex() { return g_lastReadSampleStreamIndex.load(); }
++unsigned long long WinUWPMediaDiagnostics::samplesDroppedStreamIndex() { return g_samplesDroppedStreamIndex.load(); }
++unsigned WinUWPMediaDiagnostics::videoStreamIndex() { return g_videoStreamIndex.load(); }
++unsigned WinUWPMediaDiagnostics::audioStreamIndex() { return g_audioStreamIndex.load(); }
++
++void WinUWPMediaDiagnostics::recordReadSample(long hr, unsigned flags, unsigned streamIndex)
++{
++    g_readSampleCalls.fetch_add(1);
++    g_lastReadSampleHr.store(hr);
++    g_lastReadSampleFlags.store(flags);
++    g_lastReadSampleStreamIndex.store(streamIndex);
++}
++
++void WinUWPMediaDiagnostics::recordSampleDroppedStreamIndex()
++{
++    g_samplesDroppedStreamIndex.fetch_add(1);
++}
++
++void WinUWPMediaDiagnostics::recordStreamIndices(unsigned videoIndex, unsigned audioIndex)
++{
++    g_videoStreamIndex.store(videoIndex);
++    g_audioStreamIndex.store(audioIndex);
++}
++
++void WinUWPMediaDiagnostics::recordAudioPhase(int phase) { g_audioPhase.store(phase); }
++int WinUWPMediaDiagnostics::audioPhase() { return g_audioPhase.load(); }
++void WinUWPMediaDiagnostics::recordPushResult(int queued) { g_lastPushResult.store(queued); }
 +
 +void WinUWPMediaDiagnostics::recordVideoTypes(unsigned nativeSubtype, unsigned outputSubtype, bool dxvaDisabled)
 +{
@@ -1518,6 +1566,8 @@ index 0000000000..0dafe0c573
 +
 +    m_hasVideo.store(state.hasVideo);
 +    m_hasAudio.store(state.hasAudio);
++    WinUWPMediaDiagnostics::recordStreamIndices(state.hasVideo ? state.videoStreamIndex : 0xffffffffu,
++        state.hasAudio ? state.audioStreamIndex : 0xffffffffu);
 +    return true;
 +}
 +
@@ -1802,6 +1852,7 @@ index 0000000000..0dafe0c573
 +    COMPtr<IMFSample> sample;
 +
 +    HRESULT hr = state.reader->ReadSample(MF_SOURCE_READER_ANY_STREAM, 0, &actualStreamIndex, &streamFlags, &timestamp, &sample);
++    WinUWPMediaDiagnostics::recordReadSample(static_cast<long>(hr), streamFlags, actualStreamIndex);
 +    if (FAILED(hr)) {
 +        // MF_E_INVALIDREQUEST after a stop and E_ABORT from a cancelled read are both
 +        // ordinary consequences of tearing down; anything else is worth reporting.
@@ -1838,6 +1889,9 @@ index 0000000000..0dafe0c573
 +        return true;
 +    }
 +
++    // A real sample that matched neither configured stream: the counters and indices in the media
++    // line make this visible instead of looking identical to "no data at all".
++    WinUWPMediaDiagnostics::recordSampleDroppedStreamIndex();
 +    return true;
 +}
 +
@@ -1887,13 +1941,16 @@ index 0000000000..0dafe0c573
 +
 +void MediaPlayerPrivateWinUWP::handleAudioSample(DecoderState& state, IMFSample* sample, LONGLONG timestamp)
 +{
++    WinUWPMediaDiagnostics::recordAudioPhase(1);
 +    auto sink = winUWPMediaAudioSink();
 +    if (!sink)
 +        return;
++    WinUWPMediaDiagnostics::recordAudioPhase(2);
 +
 +    COMPtr<IMFMediaBuffer> buffer;
 +    if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer)
 +        return;
++    WinUWPMediaDiagnostics::recordAudioPhase(3);
 +
 +    BYTE* data = nullptr;
 +    DWORD maximumLength = 0;
@@ -1902,6 +1959,7 @@ index 0000000000..0dafe0c573
 +        recordError(E_FAIL, "IMFMediaBuffer::Lock(audio)");
 +        return;
 +    }
++    WinUWPMediaDiagnostics::recordAudioPhase(4);
 +
 +    int channels;
 +    float volume;
@@ -1912,6 +1970,7 @@ index 0000000000..0dafe0c573
 +        volume = m_volume;
 +        muted = m_muted;
 +    }
++    WinUWPMediaDiagnostics::recordAudioPhase(5);
 +
 +    if (channels > 0 && currentLength) {
 +        const unsigned bytesPerSample = state.audioIsFloat ? sizeof(float) : sizeof(int16_t);
@@ -1933,11 +1992,16 @@ index 0000000000..0dafe0c573
 +                    destination[i] = (static_cast<float>(source[i]) / 32768.0f) * gain;
 +            }
 +
-+            // The sink is bounded; pushing only what fits and dropping the rest would
-+            // desync audio from video permanently, so a full queue is treated as
-+            // back-pressure and the decoder waits for the device instead.
++            // The sink is bounded, and this loop is bounded too - deliberately. Treating a full
++            // queue as back-pressure and waiting for the device indefinitely is what turned an
++            // audio-side problem into a total media stall: the decode thread sat in here and never
++            // came back for the video stream (on device: reads=1, qpush=0, phase=6, frames=0 - no
++            // picture at all, because of audio). A dropped audio block is a far better failure than
++            // a frozen video, and g_pcmFramesDropped makes it visible.
 +            const size_t channelCount = static_cast<size_t>(channels);
 +            size_t framesPushed = 0;
++            WinUWPMediaDiagnostics::recordAudioPhase(6);
++            const double pushDeadline = MonotonicTime::now().secondsSinceEpoch().value() + 0.25;
 +            while (framesPushed < static_cast<size_t>(frames)) {
 +                {
 +                    Locker locker { m_lock };
@@ -1947,17 +2011,25 @@ index 0000000000..0dafe0c573
 +
 +                const int remaining = static_cast<int>(static_cast<size_t>(frames) - framesPushed);
 +                const int queued = sink->pushPCM(destination + framesPushed * channelCount, remaining);
-+                if (queued <= 0) {
-+                    sleepForSeconds(0.005);
++                WinUWPMediaDiagnostics::recordPushResult(queued);
++                WinUWPMediaDiagnostics::recordAudioPhase(7);
++                if (queued > 0) {
++                    g_pcmFramesPushed.fetch_add(static_cast<unsigned long long>(queued));
++                    {
++                        Locker locker { m_lock };
++                        m_audioAnchorMedia = MediaTime(timestamp, tenMegahertz);
++                    }
++                    framesPushed += static_cast<size_t>(queued);
 +                    continue;
 +                }
 +
-+                g_pcmFramesPushed.fetch_add(static_cast<unsigned long long>(queued));
-+                {
-+                    Locker locker { m_lock };
-+                    m_audioAnchorMedia = MediaTime(timestamp, tenMegahertz);
++                if (MonotonicTime::now().secondsSinceEpoch().value() >= pushDeadline) {
++                    g_pcmFramesDropped.fetch_add(static_cast<unsigned long long>(frames - framesPushed));
++                    WinUWPMediaDiagnostics::recordAudioPhase(8);   // gave up on this sample
++                    buffer->Unlock();
++                    return;
 +                }
-+                framesPushed += static_cast<size_t>(queued);
++                sleepForSeconds(0.005);
 +            }
 +
 +            if (framesPushed < static_cast<size_t>(frames))
@@ -2318,10 +2390,10 @@ index 0000000000..2c7132f1e5
 +#endif // defined(WK_WINUWP)
 diff --git a/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
 new file mode 100644
-index 0000000000..9718729196
+index 0000000000..081de931d4
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,95 @@
 +/*
 + * Apotheosis (WK_WINUWP): the WebCore <-> port contract for media.
 + *
@@ -2392,6 +2464,26 @@ index 0000000000..9718729196
 +    static unsigned nativeVideoSubtype();
 +    static unsigned outputVideoSubtype();
 +    static bool dxvaDisabled();
++    // ReadSample instrumentation - see the note beside the counters in the player. These exist to
++    // tell "the read never returns" apart from "samples arrive but match no configured stream".
++    static unsigned long long readSampleCalls();
++    static long lastReadSampleHr();
++    static unsigned lastReadSampleFlags();
++    static unsigned lastReadSampleStreamIndex();
++    static unsigned long long samplesDroppedStreamIndex();
++    static unsigned videoStreamIndex();
++    static unsigned audioStreamIndex();
++    static void recordReadSample(long hr, unsigned flags, unsigned streamIndex);
++    static void recordSampleDroppedStreamIndex();
++    static void recordStreamIndices(unsigned videoIndex, unsigned audioIndex);
++    // Where the decode thread currently is inside handleAudioSample(). The device round showed
++    // reads=1 with qpush=0 - the thread never returned to the loop and never reached pushPCM - so
++    // the exact stall point has to be observable from outside. Phases:
++    //   1 entered  2 sink obtained  3 ConvertToContiguousBuffer done  4 buffer Lock done
++    //   5 formats read  6 entering push loop  7 pushPCM returned
++    static void recordAudioPhase(int phase);
++    static int audioPhase();
++    static void recordPushResult(int queued);
 +};
 +
 +} // namespace WebCore

@@ -3853,8 +3853,16 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     if (!parsedURL.isValid())
         return kErrBadUrl;
 
+    // Apotheosis (media-mf): a real PageIdentifier, NOT std::nullopt. This parameter is
+    // load-bearing for media, and it is why <video> used to sit there doing nothing even after a
+    // real tap: Page::mediaSessionManager() begins with `if (!m_identifier) return nullptr;`, and
+    // PlatformMediaSession::clientWillBeginPlayback() calls its completion handler with **false**
+    // when there is no manager. The element then never finishes its play steps - `paused` stays
+    // true, the play() promise never settles, MediaPlayer::play() is never reached - so no media
+    // backend is ever asked to decode (on device: readyState stuck at HAVE_METADATA, frames=0/0).
+    // The other page-creation sites below do the same, for the same reason.
     auto pageConfiguration = pageConfigurationWithEmptyClients(
-        std::nullopt, PAL::SessionID::defaultSessionID());
+        PageIdentifier::generate(), PAL::SessionID::defaultSessionID());
 
     // cookie 持久化:DOM(document.cookie)路换成真 jar(默认是 EmptyStorageSessionProvider→nullptr→cookie 被丢)。
     // HTTP(Cookie/Set-Cookie 头)路由 LoadingFrameLoaderClient::createNetworkingContext 提供,二者共用同一 jar。
@@ -4813,8 +4821,9 @@ int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA)
     // pageConfigurationWithEmptyClients also wires up the main-frame creation
     // parameters (an EmptyLocalFrameLoaderClient), so Page::create() yields a
     // Page whose localMainFrame() is already present.
+    // PageIdentifier::generate(): a real page identifier is required for media (see buildSession).
     auto pageConfiguration = pageConfigurationWithEmptyClients(
-        std::nullopt, PAL::SessionID::defaultSessionID());
+        PageIdentifier::generate(), PAL::SessionID::defaultSessionID());
     {
         // 同 buildSession/WebCoreLoadUrl:清掉默认的 SandboxFlags::all()。这条路径是本地
         // HTML 字符串渲染,同样不该跑在 opaque origin 下(否则 <meta> CSP 会全盘拒绝,
@@ -4986,8 +4995,9 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
 
     // ---- PageConfiguration with empty clients, then swizzle the main-frame
     //      loader-client factory to our LoadingFrameLoaderClient. ----
+    // PageIdentifier::generate(): a real page identifier is required for media (see buildSession).
     auto pageConfiguration = pageConfigurationWithEmptyClients(
-        std::nullopt, PAL::SessionID::defaultSessionID());
+        PageIdentifier::generate(), PAL::SessionID::defaultSessionID());
 
     // Shared terminal-state signal. The client completion handler, settle timer and
     // watchdog all run on this (main) thread, so no locking is needed.
@@ -8068,7 +8078,7 @@ int WebCoreRenderHtmlStub(const char* utf8Html, int w, int h, uint8_t* outRGBA)
     if (!outRGBA || !isValidSurfaceSize(w, h))
         return kErrBadArgs;
     ensureWebCoreInitialized();
-    auto cfg = pageConfigurationWithEmptyClients(std::nullopt, PAL::SessionID::defaultSessionID());
+    auto cfg = pageConfigurationWithEmptyClients(PageIdentifier::generate(), PAL::SessionID::defaultSessionID());
     Ref<Page> page = Page::create(WTF::move(cfg));
     if (!page->localMainFrame())
         return kErrNoMainFrame;

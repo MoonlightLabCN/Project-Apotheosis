@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 #include <mutex>
@@ -63,6 +64,9 @@ public:
     uint64_t consumedFrames() const;
     uint64_t droppedFrames() const;
     uint64_t underrunEvents() const;
+    // Pushes that found the queue mutex busy and gave up instead of waiting. Non-zero here means
+    // some other thread is holding the lock long enough to be a problem.
+    uint64_t contendedPushes() const;
 
 private:
     mutable std::mutex m_mutex;
@@ -77,6 +81,7 @@ private:
     uint64_t m_consumedFrames { 0 };
     uint64_t m_droppedFrames { 0 };
     uint64_t m_underrunEvents { 0 };
+    std::atomic<uint64_t> m_contendedPushes { 0 };
 };
 
 } // namespace WebCorePort

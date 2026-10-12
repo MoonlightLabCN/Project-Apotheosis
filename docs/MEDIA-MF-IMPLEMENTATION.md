@@ -151,19 +151,94 @@ The earlier claim in this document that it "does not flush for these pages" was 
 early is what made it look empty. `stage.txt` is buffered the same way, which is why its `media ...`
 line had not landed when the round was read.
 
-### Warning for the next round: the `media` line is gated on a settle that media itself can prevent
+### Correction: the `media` line is NOT gated on a load event
 
-The `media readers=... out=...` row is appended from `perfWriteStageTimeline`, i.e. **only when the
-navigation settles**. But `HTMLMediaElement::selectMediaResource()` starts with
-`setShouldDelayLoadEvent(true)` and only releases the load event once the media has data (or errors) —
-so on a page whose only content is a `<video>`, the navigation can stay "loading" and the diagnostic
-row may *never* be written, no matter how long you wait. Repeated pulls after the device round showed
-`before-load .../probe.html` and a fresh `jit-diag`, and still no `timeline`/`media` line, with the
-mp4 demonstrably fetched.
+An earlier revision of this section warned that the `media` row might never be written, because
+`HTMLMediaElement::selectMediaResource()` delays the load event and the row is only appended when a
+navigation settles. **Measurement says otherwise.** The row is written on every media navigation; what
+settle looks like for a page whose only content is a `<video>` is `load=- why=quiet-vp` (the settle
+logic has a video-pending path). So a missing `media` line means a missing navigation, not a
+suppressed diagnostic — and `load=-` is expected here, not a fault signal.
 
-Treat that as a diagnostic-design bug, not as "the engine did nothing" (the LAN server log already
-proves the engine engaged). Before the next round, make the media row independent of settle: write it
-on a timer, and/or at teardown/suspend alongside the console flush.
+## Device round 2 (2026-10-10): the play gate, and what is still missing
+
+0.2.5.21 fixed the thing that made `<video>` inert even with a real user tap, and 0.2.5.22 added the
+instrumentation for what is left.
+
+### What was wrong: the port gave every page a null PageIdentifier
+
+`port/WebCoreDriver.cpp` created all four of its pages with
+`pageConfigurationWithEmptyClients(std::nullopt, ...)`. With no page identifier, WebKit refuses to
+start playback, and the refusal is silent from the page's point of view:
+
+```cpp
+RefPtr<MediaSessionManagerInterface> Page::mediaSessionManager()
+{
+    if (!m_identifier)
+        return nullptr;                        // <- what we were hitting
+    ...
+}
+
+void PlatformMediaSession::clientWillBeginPlayback(CompletionHandler<void(bool)>&& completionHandler)
+{
+    ...
+    RefPtr manager = sessionManager();
+    if (!manager) {
+        completionHandler(false);              // <- "returning because of interruption"
+        return;
+    }
+```
+
+`HTMLMediaElement::playInternal()` then never reaches `completePlayInternal()`: `paused` stays true,
+the `play()` promise never settles, `MediaPlayer::play()` is never called, and no backend is ever
+asked to decode. On device that read as `readyState` pinned at HAVE_METADATA, `frames=0/0`, `pcm=0`
+— identical to "the media engine does not work", which is what made it expensive to find.
+
+Fixed by passing `PageIdentifier::generate()` at all four sites. **Verified on device**: the same
+page that reported `paused=1` forever now reports `paused=0` from the moment `play()` is called.
+
+### What is still missing: no samples are produced
+
+With playback permitted, the element plays (paused=0) and still gets **no frames**: `rs` stays 1,
+`frames=0/0`, `pcm=0/0/0`, while the engine side looks healthy —
+`readers=1 native=0x34363248(H264) out=0x16(RGB32) dxva=on err=0x00000000`.
+
+Ruled out so far:
+
+* **Not the autoplay policy.** The device log contains real `gesture-click` reports (the user tapped
+  the page) and the old build still would not play.
+* **Not a moov-at-the-end seek problem.** A `+faststart` remux (`ffmpeg -c copy -movflags
+  +faststart`) behaves identically, and it only ever issues a single `bytes=0-` request.
+* **Not the network.** After the initial fetch Media Foundation issues no further requests at all,
+  and while the page sits there "playing" the phone holds **no established connection** to the test
+  server (only TIME_WAIT sockets). So the synchronous `ReadSample` is not waiting on I/O.
+
+0.2.5.22 therefore extends the `media` line with ReadSample instrumentation, which is what the next
+device round reads:
+
+```
+reads=<N> lasthr=0x<hr> flags=0x<f> sidx=<i> vidx=<v> aidx=<a> drop=<N>
+```
+
+* `reads` frozen → the synchronous read never returns (stuck inside the decode transform, not I/O).
+* `flags` with only STREAMTICK → timestamps arrive, content never does.
+* `drop` rising while `frames` stays 0 → real samples arrive whose stream index matches neither
+  configured stream. That path exists and used to drop them silently (`decodeOneSample`'s final
+  `return true`), which is exactly the kind of failure that looks like "no data".
+
+### Known second issue: playback is interrupted ~7 s in
+
+`fast.html` ended with the play promise rejected as `AbortError — The operation was aborted.` and
+`paused` back to 1. That is a media-session interruption, and it is a separate problem from the
+missing frames: it only became reachable once playback could start at all (i.e. after the
+PageIdentifier fix). Deal with it after frames exist.
+
+### Verified: the teardown crash fix holds
+
+`crash.txt` still ends at `==== crash 2026-10-09 23:38:16` — i.e. **zero crash entries at 01:xx**
+across 0.2.5.20 and 0.2.5.21, both of which went through several teardowns (deployment stopping the
+old instance, plus this session's terminate-and-relaunch test cycles) and user taps. The file grew
+only with `tap at=` interaction records. The pre-fix build crashed on the same actions twice.
 
 ## Root cause of "video renders as an empty control and .play() does nothing"
 

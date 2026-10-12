@@ -48,7 +48,16 @@ int PortAudioOutput::pushPCM(const float* interleaved, int frames)
     if (!interleaved || frames <= 0)
         return 0;
 
-    std::lock_guard locker { m_mutex };
+    // Deliberately non-blocking, matching this class's documented contract. A blocking acquire
+    // here is what let one stuck consumer freeze the whole media pipeline: the decode thread would
+    // sit inside pushPCM and never return to read the video stream (on device: reads=1, qpush=0,
+    // phase=6, no frames). Returning 0 instead lets the caller decide how long to keep trying.
+    std::unique_lock<std::mutex> locker { m_mutex, std::try_to_lock };
+    if (!locker.owns_lock()) {
+        m_contendedPushes.fetch_add(1);
+        return 0;
+    }
+
     if (!m_capacityFrames || !m_channels)
         return 0;
 
@@ -103,5 +112,6 @@ uint64_t PortAudioOutput::pushedFrames() const { std::lock_guard locker { m_mute
 uint64_t PortAudioOutput::consumedFrames() const { std::lock_guard locker { m_mutex }; return m_consumedFrames; }
 uint64_t PortAudioOutput::droppedFrames() const { std::lock_guard locker { m_mutex }; return m_droppedFrames; }
 uint64_t PortAudioOutput::underrunEvents() const { std::lock_guard locker { m_mutex }; return m_underrunEvents; }
+uint64_t PortAudioOutput::contendedPushes() const { return m_contendedPushes.load(); }
 
 } // namespace WebCorePort

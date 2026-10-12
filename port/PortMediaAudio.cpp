@@ -16,6 +16,14 @@
 
 namespace WebCorePort {
 
+// Declared in PortChromeClient.h. Needed here because the harness only ever starts its AudioGraph
+// from a present callback (OnPresentWake -> MediaAudio::EnsureStarted), and a media page that is
+// stalled produces no presents of its own - so the format becomes known and the graph is never
+// built for it. Asking for a present the moment a format is configured closes that gap.
+// Declared at namespace scope, NOT inside the anonymous namespace below, or it would be a
+// different, never-defined function with internal linkage.
+void presentRequested();
+
 namespace {
 
 // One second of audio. Deep enough to absorb a decode hiccup or a slow first frame,
@@ -40,6 +48,7 @@ public:
     void configure(int sampleRate, int channels) final
     {
         g_audioQueue.configure(sampleRate, channels, ringCapacityFor(sampleRate));
+        WebCorePort::presentRequested();
     }
 
     void reset() final
@@ -99,7 +108,9 @@ void appendMediaDiagnostics(char* out, int outBytes)
     // Video Processor" from "the transform never engaged" on device.
     std::snprintf(out, static_cast<size_t>(outBytes),
         "media readers=%u frames=%llu/%llu pcm=%llu/%llu/%llu q=%d@%dHz/%dch"
-        " native=0x%X out=0x%X dxva=%s err=0x%08lX at=%s",
+        " native=0x%X out=0x%X dxva=%s err=0x%08lX at=%s"
+        " reads=%llu lasthr=0x%08lX flags=0x%X sidx=%d vidx=%d aidx=%d drop=%llu"
+        " cap=%d qpush=%llu qcons=%llu qdrop=%llu und=%llu cpush=%llu phase=%d",
         WebCore::WinUWPMediaDiagnostics::startedSourceReaders(),
         WebCore::WinUWPMediaDiagnostics::framesDecoded(),
         WebCore::WinUWPMediaDiagnostics::framesPresented(),
@@ -113,7 +124,28 @@ void appendMediaDiagnostics(char* out, int outBytes)
         WebCore::WinUWPMediaDiagnostics::outputVideoSubtype(),
         WebCore::WinUWPMediaDiagnostics::dxvaDisabled() ? "off" : "on",
         static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::lastError()),
-        WebCore::WinUWPMediaDiagnostics::lastErrorSite() ? WebCore::WinUWPMediaDiagnostics::lastErrorSite() : "-");
+        WebCore::WinUWPMediaDiagnostics::lastErrorSite() ? WebCore::WinUWPMediaDiagnostics::lastErrorSite() : "-",
+        // ReadSample instrumentation. `reads` rising means the synchronous read does return;
+        // lasthr/flags then say what it returned, and sidx against vidx/aidx says whether a real
+        // sample matched either configured stream (drop counts the ones that matched neither).
+        WebCore::WinUWPMediaDiagnostics::readSampleCalls(),
+        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::lastReadSampleHr()),
+        WebCore::WinUWPMediaDiagnostics::lastReadSampleFlags(),
+        static_cast<int>(WebCore::WinUWPMediaDiagnostics::lastReadSampleStreamIndex()),
+        static_cast<int>(WebCore::WinUWPMediaDiagnostics::videoStreamIndex()),
+        static_cast<int>(WebCore::WinUWPMediaDiagnostics::audioStreamIndex()),
+        WebCore::WinUWPMediaDiagnostics::samplesDroppedStreamIndex(),
+        // The queue's own view of the same traffic. `pcm` above is the *media side's* counter,
+        // which only increments once a push returns; these say whether a push was attempted at
+        // all (qpush 0 with cap > 0 = nothing ever reached the ring) and whether anything is
+        // draining it (und growing = the harness IS pulling and finding it empty).
+        g_audioQueue.capacityFrames(),
+        static_cast<unsigned long long>(g_audioQueue.pushedFrames()),
+        static_cast<unsigned long long>(g_audioQueue.consumedFrames()),
+        static_cast<unsigned long long>(g_audioQueue.droppedFrames()),
+        static_cast<unsigned long long>(g_audioQueue.underrunEvents()),
+        static_cast<unsigned long long>(g_audioQueue.contendedPushes()),
+        WebCore::WinUWPMediaDiagnostics::audioPhase());
 }
 
 } // namespace WebCorePort
