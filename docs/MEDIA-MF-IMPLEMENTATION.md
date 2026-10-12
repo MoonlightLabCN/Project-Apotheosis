@@ -287,6 +287,58 @@ The media line gained `cap / qpush / qcons / qdrop / und / cpush / phase` for ex
 values: 1 entered, 2 sink obtained, 3 ConvertToContiguousBuffer, 4 buffer Lock, 5 formats read,
 6 entering push loop, 7 push returned, 8 gave up on the sample.
 
+### Device round 4: the page was never put in the window, and the fix that broke the app
+
+Chasing the `AbortError` play promise upward through the upstream source produced a complete chain:
+
+| Step | Where | Fact |
+|---|---|---|
+| 1 | `HTMLMediaElement.cpp:9834` | `updateShouldPlay()` consults `playbackStateChangePermitted(Playing)` and calls `pauseInternal()` when denied |
+| 2 | `HTMLMediaElement.cpp:4685,4725` | `pauseInternal()` sets `paused=true` and **rejects pending play promises with AbortError** - the exact rejection seen on device |
+| 3 | then `updatePlayState()` -> `MediaPlayer::pause()` | the backend's `m_paused` becomes true, the decode thread parks: `reads=1`, no frames, readyState stuck at HAVE_METADATA |
+| 4 | `MediaElementSession.cpp:457` | one denial reason is `element->isSuspended()` |
+| 5 | `HTMLMediaElement.cpp:9252` | `isSuspended()` is `document().activeDOMObjectsAreSuspended() \|\| ...Stopped()` |
+| 6 | `ScriptExecutionContext.cpp:424` via `Document::suspendScheduledTasks` via `LocalFrame::suspendActiveDOMObjectsAndAnimations()` | that is a **counter**; while it is > 0 the document's ActiveDOMObjects stay suspended |
+| 7 | `Page.cpp:3410` | the counter is driven by `ActivityState::IsInWindow` (`setIsInWindowInternal(false)`) |
+| 8 | the port | only ever called `page->setIsVisible(true)`, which touches the IsVisible bits only - `IsInWindow` was never set |
+
+So the page was never "in the window", the document stayed suspended, and WebKit itself refused
+playback. `phase=6` was stale from the preroll; nothing was deadlocked.
+
+**The first fix attempt (0.2.5.26) crashed the app instead**, and the device evidence said so without
+needing a symbolized stack: during 0.2.5.26 the test server logged **no request from the device at
+all** (only the build machine's own `127.0.0.1` probes), and `crash.txt` gained entries at
+`2026-10-13 00:54:10` whose stacks are all XAML/UI-thread frames
+(`Windows.UI.Xaml` / `twinapi.appcore` / `minuser`). Absence of a device request was the faster and
+more reliable signal: the app was not running at all, not merely failing to play media.
+
+The cause is documented in this port's own source, one screen below the call site:
+
+```cpp
+// ⚠ 必须在 setView()+init() 之后调:setActiveInternal 的 selection().pageActivationChanged()
+//   不判空,若帧还没 document/view 会解引用 null+0x858 崩溃(0.1.0.9 真机崩因,RVA 0x1E9309)。
+page->focusController().setActive(true);
+page->focusController().setFocused(true);
+```
+
+`setActivityState` hands the whole state to `focusController().setActivityState()`, so adding
+`WindowIsActive`/`IsFocused` and calling it **before** `setView()`/`init()` walked straight into the
+0.1.0.9 crash that comment exists to prevent.
+
+0.2.5.27 therefore does the minimum, in the safe place:
+
+* add **only** `ActivityState::IsInWindow` (`Page::setIsInWindow(true)`) - it is the bit that gates the
+  suspension and it does not touch the focus path;
+* call it **after** `setView()` + `init()` (next to the existing focus calls in `buildSession`, and
+  after the view is resized in `WebCoreLoadUrl`);
+* keep the `media-state vis/visocc/inwin/focused/winactive/idle/fsusp/dsusp` diagnostic line, which
+  reports the frame/document suspension directly and will confirm or refute the hypothesis in one
+  line on the next device round.
+
+Lesson worth keeping: **a UI-thread crash whose stack symbolizes to nothing useful can still be
+localized from the server side** - "the device never even asked for the page" is proof the app died
+before navigation, and it costs one grep of the test server log.
+
 ## Root cause of "video renders as an empty control and .play() does nothing"
 
 Found on device, 2026-10-09, and it is **not** in WebKit: the port turned media off itself.

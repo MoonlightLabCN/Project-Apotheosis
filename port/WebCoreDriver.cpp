@@ -3877,17 +3877,21 @@ static void teardownSession()
 // 拒掉、MediaPlayer::pause() 传到后端、解码线程停在暂停分支。真机读数正是 reads=1 / frames=0 /
 // readyState 卡在 HAVE_METADATA(见 docs/MEDIA-MF-IMPLEMENTATION.md 设备回合 3)。
 //
-// 只增不减:保留 WebCore 自己维护的位(IsAudible/IsLoading/...),只补齐前台该有的位。
+// 只补 IsInWindow 这一位,而且必须在 frame/view 建立之后调用。
+//
+// 为什么只要这一位:ActivityState::IsInWindow 是门控文档 ActiveDOMObject 挂起的那个位
+// (Page::setActivityState -> setIsInWindowInternal -> LocalFrame::suspendActiveDOMObjectsAndAnimations
+// 的计数器),而 HTMLMediaElement::isSuspended() 为真时 WebKit 会拒绝播放。
+//
+// 为什么不顺手加 WindowIsActive/IsFocused:0.2.5.26 那样做过,真机上 app 直接起不来(设备端
+// 一条页面请求都没有,并伴随 XAML/UI 线程崩溃)。setActivityState 会把整份状态交给
+// focusController().setActivityState(),在 frame 尚未初始化时走焦点路径是不安全的。
+// 只加 IsInWindow 既够用又没有这些副作用。
 static void wkPutPageInForeground(WebCore::Page* page)
 {
     if (!page)
         return;
-    using namespace WebCore;
-    auto state = page->activityState();
-    state.add({ ActivityState::WindowIsActive, ActivityState::IsFocused, ActivityState::IsVisible,
-        ActivityState::IsVisibleOrOccluded, ActivityState::IsInWindow });
-    state.remove(ActivityState::IsVisuallyIdle);
-    page->setActivityState(state);
+    page->setIsInWindow(true);
 }
 
 // 在已 emplace 的 g_session 上建立 Page、发起网络加载、settle、布局、提链接、绘制。
@@ -4037,10 +4041,6 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     page->settings().setVisualViewportAPIEnabled(true);   // Apotheosis: 本构建默认关,打开它(nowsecure/Cloudflare 验证页需要 window.visualViewport)
 #endif
     page->setIsVisible(true);
-    // Apotheosis (media-mf): IsVisible alone is not enough - without ActivityState::IsInWindow the
-    // frame's ActiveDOMObjects stay suspended and media playback is denied. See
-    // wkPutPageInForeground() above.
-    wkPutPageInForeground(page.ptr());
     // Apotheosis (M4 load timeline): opt in to the visually-non-empty milestone. WebCore only
     // computes and dispatches the milestones a client asked for (Page::requestedLayoutMilestones),
     // and this is the mark behind the t_firstpaint column and the stage.txt timeline line.
@@ -4067,6 +4067,14 @@ static int buildSession(const char* url, int w, int h, uint8_t* outRGBA)
     //   不判空,若帧还没 document/view 会解引用 null+0x858 崩溃(0.1.0.9 真机崩因,RVA 0x1E9309)。
     page->focusController().setActive(true);
     page->focusController().setFocused(true);
+
+    // Apotheosis (media-mf, 设备回合 3): frame + view 已就绪,现在可以安全地补上 IsInWindow。
+    // 缺这一位时文档的 ActiveDOMObject 一直处于挂起,HTMLMediaElement::isSuspended() 为真,
+    // MediaElementSession::playbackStateChangePermitted(Playing) 据此拒绝播放 —— 真机表现是
+    // play() 的 promise 被 AbortError 拒、元素被 pause、解码线程永不运行(reads=1, frames=0)。
+    // 位置必须在这里:0.2.5.26 曾在 setView()+init() 之前调 setActivityState 并连带
+    // WindowIsActive/IsFocused,重演了上面 0.1.0.9 的 focus 空指针崩溃,app 直接起不来。
+    wkPutPageInForeground(page.ptr());
 
     ResourceRequest request { WTF::move(parsedURL) };
     FrameLoadRequest frameLoadRequest { *localMainFrame, WTF::move(request), SubstituteData { } };
@@ -5114,9 +5122,6 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
     wkApplyPageWidthFactor(page.get());   // Apotheosis: device scale factor, before the first layout
     // 标记页面可见,否则后台节流会推迟图片/定时器/资源加载(headless 默认可能非可见)。
     page->setIsVisible(true);
-    // Apotheosis (media-mf): 同上,IsInWindow 必须一起给,否则文档的 ActiveDOMObject 被挂起、
-    // 媒体播放被拒。见 wkPutPageInForeground()。
-    wkPutPageInForeground(&page.get());
 
     // ---- Main frame + view ----
     RefPtr<LocalFrame> localMainFrame = page->localMainFrame();
@@ -5134,6 +5139,10 @@ int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA)
     view->setBaseBackgroundColor(Color::white);
     view->setCanHaveScrollbars(true);
     view->resize(wkViewSizeFromEngine(w, h));   // establish viewport BEFORE load
+
+    // Apotheosis (media-mf): frame + view 已就绪,补上 IsInWindow(缺它则文档的 ActiveDOMObject
+    // 挂起、WebKit 拒绝媒体播放)。见 wkPutPageInForeground()。
+    wkPutPageInForeground(&page.get());
 
     // ---- Issue the network load ----
     ResourceRequest request { WTF::move(parsedURL) };
