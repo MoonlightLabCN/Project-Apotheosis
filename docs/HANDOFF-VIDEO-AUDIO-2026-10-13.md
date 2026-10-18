@@ -325,6 +325,30 @@ media readers=0 ... dxva=hw dxvaprof=10 dxvafl=0xB000 err=0x80004005 at=openSour
    名字判据匹配不上，**WQHD 兜底（1440x2560）救了场**；白名单已按真实 RM 号补齐
    （RM-1104/1105/1106/1116 + RM-1084/1085/1086/1117）。
 
+### 12.7 0.2.5.35 轮（06:39，息屏挂起前的快照）—— DXVA 终判：死路
+
+```
+media readers=1 frames=0/0 ... dxva=probe-fail ... vidx=2 aidx=0
+     dxvaprof=10 dxvafl=0xB000(FL 11_0)
+```
+
+- **回归修复确认**：`readers=1`、流配置成功（vidx=2 aidx=0）、主 reader 正常抓取 test.mp4
+  （0.2.5.34 的 manager E_FAIL 回归已修）。
+- **DXVA 终判 = `probe-fail`**：探针 reader（带 manager、**不开 VP**）同样失败
+  （服务器日志可见两个 reader 都抓了文件——探针是在 ReadSample 阶段失败的）。
+  结合 0.2.5.34 的 manager+VP 失败：**`MF_SOURCE_READER_D3D_MANAGER` 在 15254 的
+  App Container 里就是不通**——设备有能力（FL 11_0、10 个 profile）但无法把 D3D 设备
+  交给 MF 解码器。**SourceReader 硬件解码路到此为止，存档关闭。**
+- **唯一没试过的硬件解码路**（记录备查）：`Windows.Media.Playback.MediaPlayer` +
+  `VideoFrameAvailable`（UWP 原生视频栈，系统自己的硬解）——但要把媒体字节喂进
+  MediaStreamSource、帧是 D3D 纹理需 CPU 拷出，等于另起一套架构。**除非 720p 成为
+  刚需，否则不值得**（当前软解 320x176@30fps 实测流畅，DoD① 已闭环）。
+- **探针的成本**：一次性多抓一遍文件 + 首次视频加载 +2.5s（firstbyte 273→3272ms）。
+  答案已拿到，**下次自然重建时把探针摘掉**。
+- **本轮视频未确认播放**：app 由部署在后台拉起，息屏 → 进程挂起（pid 8576 cpu=0），
+  页面 JS 定时器停在 t2 之前。**播放确认待在用户在场的一轮**（老模式：屏幕亮着才
+  不会半路挂起）。
+
 ---
 
 ## 11. 0.2.5.30–0.2.5.32 回合（2026-10-18 傍晚，用户在场手动导航）
