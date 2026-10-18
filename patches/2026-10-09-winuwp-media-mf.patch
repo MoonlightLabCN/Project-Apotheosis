@@ -634,10 +634,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..b0c9c73588
+index 0000000000..70329260a2
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1633 @@
+@@ -0,0 +1,1635 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -675,8 +675,9 @@ index 0000000000..b0c9c73588
 +#include <mfidl.h>
 +#include <mfreadwrite.h>
 +#include <Mferror.h>
++// ID3D11VideoDevice lives in d3d11.h in the modern SDKs (d3d11video.h was merged in and
++// no longer ships as its own header - 10.0.22621.0 has no d3d11video.h at all).
 +#include <d3d11.h>
-+#include <d3d11video.h>
 +#include <cstddef>
 +#include <cstring>
 +#include <mutex>
@@ -1605,8 +1606,9 @@ index 0000000000..b0c9c73588
 +                    if (FAILED(videoDevice->GetVideoDecoderProfile(i, &profile)))
 +                        continue;
 +                    if (profile == D3D11_DECODER_PROFILE_H264_VLD_NOFGT
-+                        || profile == D3D11_DECODER_PROFILE_H264_VLD_MOCOMP_NOFGT
-+                        || profile == D3D11_DECODER_PROFILE_H264_VLD_FGT) {
++                        || profile == D3D11_DECODER_PROFILE_H264_VLD_FGT
++                        || profile == D3D11_DECODER_PROFILE_H264_MOCOMP_NOFGT
++                        || profile == D3D11_DECODER_PROFILE_H264_MOCOMP_FGT) {
 +                        hasH264Profile = true;
 +                        break;
 +                    }
@@ -1621,7 +1623,7 @@ index 0000000000..b0c9c73588
 +            COMPtr<IMFDXGIDeviceManager> dxgiManager;
 +            UINT resetToken = 0;
 +            if (SUCCEEDED(::MFCreateDXGIDeviceManager(&resetToken, &dxgiManager)) && dxgiManager
-+                && SUCCEEDED(dxgiManager->ResetDevice(d3dDevice.get()))
++                && SUCCEEDED(dxgiManager->ResetDevice(d3dDevice.get(), resetToken))
 +                && SUCCEEDED(attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, dxgiManager.get()))) {
 +                // Keep both alive for the reader's lifetime: the manager holds the device
 +                // and the decoder allocates its surfaces through the manager.
