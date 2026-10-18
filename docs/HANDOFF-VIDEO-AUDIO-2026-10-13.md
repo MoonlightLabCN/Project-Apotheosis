@@ -199,8 +199,41 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 
 ---
 
-## 12. 硬件解码研究（2026-10-18，代码级结论 + 待验证实验）
+## 13. 920/930 (WDDM 1.x) 适配（2026-10-18，0.2.5.34 = `e74dee4`）
 
+### 13.1 问题
+
+ANGLE 后端只覆盖 **WDDM 2.0**（Lumia 950/950XL，真机验证多年）。**WDDM 1.x 机型
+（920/930/925/928/1520/Icon/640/650…）上 GPU 路会炸**，且崩点不总在驱动的 SEH 壳内——
+ANGLE 把 surface create/resize **marshal 回面板 dispatcher（UI 线程）**，那边什么都兜不住。
+所以准入判定必须前移到任何 EGL 调用之前、按**设备身份**做，不能试探（试就炸）。
+
+### 13.2 实现（harness-only，引擎未动）
+
+- **判定**：`EasClientDeviceInformation.SystemProductName` 含 `"950"` → 放行；
+  或物理分辨率 ≥1440 宽（WQHD 为 950 家族独占，名字缺失时的兜底）→ 放行；
+  **其余一律软件路**（保守方向：未知机器不赌，Cairo 软渲染在所有 Win10M ARM 机上都能跑）。
+- **门点**（`m_gpuAllowedByDevice` 一个旗）：
+  | 入口 | 行为 |
+  |---|---|
+  | `EnableGpu()`（所有 GPU 启动的 choke point） | 拒绝并落 stage.txt |
+  | `OnGpuPanelLoaded` 的自建三角形探针（不经 EnableGpu） | 单独查旗拒绝 |
+  | autodiag 的离屏 `GpuInitGuarded` | 跳过，dump 里记 `gi=-1` |
+  | 设置页 GPU 开关 | 强制关 + `IsEnabled=false`（防手动送命） |
+  | `m_gpuDefault` | 落盘关掉，与开关一致 |
+- **日志**：每次启动落 stage.txt 一行
+  `gpu-gate: product='…' fw='…' mfr='…' phys=WxH -> gpu ALLOWED|FORCED-SOFTWARE`
+  ——**下一轮设备回合即可拿到每台机器的真实 `SystemProductName`**，用来校准白名单
+  （万一 950 上报的是 `RM-xxxx` 形式而不是 "Lumia 950"，白名单要补）。
+- **DXVA 路不门控**：`D3D11CreateDevice` 自 WP8.1 起就在 920/930 可用（不是 ANGLE），
+  且探测失败自动退软解，media 行会报实际状态（`sw-novideo`/`sw-mgrfail`）。
+
+### 13.3 验证顺序（重要）
+
+1. **先在 950 上跑 0.2.5.34**：stage.txt 应显示 `gpu-gate: product='Lumia 950…' phys=1440x2560
+   -> gpu ALLOWED`，GPU 路照常（否则白名单判据要按真实身份串修）。
+2. **再上 920/930**：应显示 `FORCED-SOFTWARE`，整机走软件路，能加载页面即算适配完成；
+   `media` 行的 `dxva=` 会告诉我们老机器的 D3D11 视频能力（大概率 `sw-novideo`）。
 > **设备矩阵（2026-10-18 用户确认，别假设所有 Lumia 一样）**：
 > **Lumia 950（WDDM 2.0）** = ANGLE/D3D11 FL9_3 GPU 合成路可用（真机验证多年），也是 DXVA
 > 实验的目标设备；**Lumia 930/920（WDDM 1.x）** = ANGLE 后端不适配，**硬件渲染会炸**，
