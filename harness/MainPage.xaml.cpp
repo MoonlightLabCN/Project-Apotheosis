@@ -318,9 +318,20 @@ static void QueryPhysicalPixels(long& width, long& height)
     } catch (...) {}
 }
 
+// 已知良好 = Lumia 950 家族(WDDM 2.0,ANGLE 真机验证)。其余一律软件路(保守方向:
+// 软件路在所有 Win10M ARM 机上都能跑,GPU 路炸了可没有 SEH 能兜)。
+// 注意:真机(0.2.5.34 轮)上 950 的 SystemProductName 是 "RM-1104_13874" 这类 RM 号,
+// 不是 "Lumia 950" —— 名字判据要匹配 RM-1104/1105/1106/1116(950)与
+// RM-1084/1085/1086/1117(950XL);名字认不出时由 WQHD 兜底(见调用方)。
 static bool GpuPathSupportedOnThisDevice(const std::wstring& product, long physWidth)
 {
     if (product.find(L"950") != std::wstring::npos) return true;
+    static const wchar_t* kKnownGoodRm[] = {
+        L"RM-1104", L"RM-1105", L"RM-1106", L"RM-1116",
+        L"RM-1084", L"RM-1085", L"RM-1086", L"RM-1117"
+    };
+    for (const wchar_t* rm : kKnownGoodRm)
+        if (product.find(rm) != std::wstring::npos) return true;
     if (physWidth >= 1440) return true;   // WQHD 是 950/950XL 独占
     return false;
 }
