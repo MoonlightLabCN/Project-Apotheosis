@@ -60,6 +60,11 @@ private:
 
     unsigned long long m_quanta { 0 };
     unsigned long long m_underruns { 0 };
+    // Apotheosis (media, 2026-10-18): null-sink guard. On device the AudioGraph spun at
+    // ~17x realtime on a null endpoint and faulted inside Windows.Media.Audio.dll after
+    // ~5 minutes of pulling from an empty ring. The graph is stopped once the ring has
+    // been empty for this long (GetTickCount64, ms); the next EnsureStarted rebuilds it.
+    unsigned long long m_lastNonEmptyQuantum { 0 };
 };
 
 } // namespace Harness

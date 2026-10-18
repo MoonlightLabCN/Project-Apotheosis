@@ -34,7 +34,10 @@ $libs = @(
   'mfuuid.lib','mfplat.lib','mfreadwrite.lib'
   # stubs-network.cpp 的 NetworkStateNotifier::updateStateWithoutNotifying 不再恒 true,
   # 改用 InternetGetConnectedState 查真实在线态(wininet 在 App partition,清单已带 internetClient)。
-  'wininet.lib'
+  'wininet.lib',
+  # Apotheosis (media, 2026-10-18): DXVA 硬件解码 —— D3D11CreateDevice/ID3D11VideoDevice
+  # (IMFDXGIDeviceManager/MFCreateDXGIDeviceManager 在已链的 mfplat.lib)。
+  'd3d11.lib'
 )
 $log = "$P\link-driver-gpu.log"
 & $lld /DLL /MACHINE:ARM /OUT:"$P\WebCoreDriver-gpu.dll" `

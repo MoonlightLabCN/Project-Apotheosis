@@ -634,10 +634,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..1961cf209f
+index 0000000000..b0c9c73588
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1544 @@
+@@ -0,0 +1,1633 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -675,6 +675,8 @@ index 0000000000..1961cf209f
 +#include <mfidl.h>
 +#include <mfreadwrite.h>
 +#include <Mferror.h>
++#include <d3d11.h>
++#include <d3d11video.h>
 +#include <cstddef>
 +#include <cstring>
 +#include <mutex>
@@ -715,6 +717,11 @@ index 0000000000..1961cf209f
 +std::atomic<unsigned> g_nativeVideoSubtype { 0 };
 +std::atomic<unsigned> g_outputVideoSubtype { 0 };
 +std::atomic<bool> g_dxvaDisabled { false };
++// Apotheosis (media, 2026-10-18): DXVA experiment state - see WinUWPMediaBridge.h.
++std::atomic<int> g_dxvaState { 0 };
++std::atomic<unsigned> g_dxvaProfiles { 0 };
++std::atomic<bool> g_dxvaH264Profile { false };
++std::atomic<unsigned> g_dxvaFeatureLevel { 0 };
 +std::atomic<WinUWPMediaAudioSink*> g_audioSink { nullptr };
 +
 +// ReadSample instrumentation. On device the reader opened and negotiated types (H264 -> RGB32,
@@ -799,6 +806,18 @@ index 0000000000..1961cf209f
 +unsigned WinUWPMediaDiagnostics::nativeVideoSubtype() { return g_nativeVideoSubtype.load(); }
 +unsigned WinUWPMediaDiagnostics::outputVideoSubtype() { return g_outputVideoSubtype.load(); }
 +bool WinUWPMediaDiagnostics::dxvaDisabled() { return g_dxvaDisabled.load(); }
++int WinUWPMediaDiagnostics::dxvaState() { return g_dxvaState.load(); }
++unsigned WinUWPMediaDiagnostics::dxvaProfiles() { return g_dxvaProfiles.load(); }
++bool WinUWPMediaDiagnostics::dxvaH264Profile() { return g_dxvaH264Profile.load(); }
++unsigned WinUWPMediaDiagnostics::dxvaFeatureLevel() { return g_dxvaFeatureLevel.load(); }
++
++void WinUWPMediaDiagnostics::recordDxvaState(int state, unsigned profiles, bool h264Profile, unsigned featureLevel)
++{
++    g_dxvaState.store(state);
++    g_dxvaProfiles.store(profiles);
++    g_dxvaH264Profile.store(h264Profile);
++    g_dxvaFeatureLevel.store(featureLevel);
++}
 +unsigned long long WinUWPMediaDiagnostics::readSampleCalls() { return g_readSampleCalls.load(); }
 +long WinUWPMediaDiagnostics::lastReadSampleHr() { return g_lastReadSampleHr.load(); }
 +unsigned WinUWPMediaDiagnostics::lastReadSampleFlags() { return g_lastReadSampleFlags.load(); }
@@ -918,6 +937,11 @@ index 0000000000..1961cf209f
 +    // Set when the reader reports a hard error: the decode loop parks on this instead of
 +    // retrying a reader that will never produce a sample again.
 +    bool failed { false };
++    // Apotheosis (media, 2026-10-18): the D3D11 device + DXGI device manager that hand the
++    // decoder hardware (DXVA) access. Both must outlive the reader that references them,
++    // which is the lifetime of this state (the decode thread's). Empty = software decode.
++    COMPtr<ID3D11Device> d3dDevice;
++    COMPtr<IMFDXGIDeviceManager> dxgiManager;
 +    // Apotheosis (media, 2026-10-13): how far ahead the decode thread has read, in media time. A
 +    // *paused* player still has to fill this. WebKit does not call MediaPlayer::play() until the
 +    // element's readyState has reached HAVE_FUTURE_DATA (HTMLMediaElement::potentiallyPlaying), and
@@ -1523,6 +1547,10 @@ index 0000000000..1961cf209f
 +
 +    // Release the Media Foundation objects on the thread that created them.
 +    m_decoder->reader = nullptr;
++    // Apotheosis (media, 2026-10-18): same for the D3D11 device + DXGI device manager the
++    // decoder may have used for hardware decode - both are COM objects created on this thread.
++    m_decoder->dxgiManager = nullptr;
++    m_decoder->d3dDevice = nullptr;
 +}
 +
 +bool MediaPlayerPrivateWinUWP::openSourceReader(DecoderState& state, const String& url)
@@ -1545,6 +1573,67 @@ index 0000000000..1961cf209f
 +    // else) to force the software decoder.
 +    attributes->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE);
 +    state.dxvaDisabled = false;
++
++    // Apotheosis (media, 2026-10-18): hardware decode. The SourceReader uses hardware
++    // transforms ONLY when the app hands it a D3D device through a DXGI device manager
++    // (MF_SOURCE_READER_D3D_MANAGER); without one the H.264 decoder runs in software no
++    // matter what DISABLE_DXVA says - that attribute can only turn hardware OFF. UWP cannot
++    // use the D3D9/DXVA2 device manager (desktop-only per the DXVA2 docs), so this is the
++    // D3D11 path: create the device with D3D11_CREATE_DEVICE_VIDEO_SUPPORT, check that it
++    // actually exposes ID3D11VideoDevice (WARP / reference / Basic Display Adapter do not),
++    // then hand it to the reader. If the decoder cannot find a configuration on the device
++    // it falls back to software by itself (MF_E_UNSUPPORTED_D3D_TYPE), so this is safe to
++    // attempt unconditionally. The Video Processor MFT (enabled above) keeps converting the
++    // decoded textures to RGB32 system memory, so the paint path is unchanged either way.
++    {
++        D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_3;
++        COMPtr<ID3D11Device> d3dDevice;
++        HRESULT deviceHr = ::D3D11CreateDevice(
++            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
++            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
++            nullptr, 0, D3D11_SDK_VERSION,
++            &d3dDevice, &featureLevel, nullptr);
++
++        unsigned profileCount = 0;
++        bool hasH264Profile = false;
++        if (SUCCEEDED(deviceHr) && d3dDevice) {
++            COMPtr<ID3D11VideoDevice> videoDevice;
++            if (SUCCEEDED(d3dDevice->QueryInterface(IID_PPV_ARGS(&videoDevice)))) {
++                profileCount = videoDevice->GetVideoDecoderProfileCount();
++                for (UINT i = 0; i < profileCount; ++i) {
++                    GUID profile = {};
++                    if (FAILED(videoDevice->GetVideoDecoderProfile(i, &profile)))
++                        continue;
++                    if (profile == D3D11_DECODER_PROFILE_H264_VLD_NOFGT
++                        || profile == D3D11_DECODER_PROFILE_H264_VLD_MOCOMP_NOFGT
++                        || profile == D3D11_DECODER_PROFILE_H264_VLD_FGT) {
++                        hasH264Profile = true;
++                        break;
++                    }
++                }
++            }
++        }
++
++        int dxvaState = 0;
++        if (FAILED(deviceHr) || !d3dDevice)
++            dxvaState = 3;
++        else {
++            COMPtr<IMFDXGIDeviceManager> dxgiManager;
++            UINT resetToken = 0;
++            if (SUCCEEDED(::MFCreateDXGIDeviceManager(&resetToken, &dxgiManager)) && dxgiManager
++                && SUCCEEDED(dxgiManager->ResetDevice(d3dDevice.get()))
++                && SUCCEEDED(attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, dxgiManager.get()))) {
++                // Keep both alive for the reader's lifetime: the manager holds the device
++                // and the decoder allocates its surfaces through the manager.
++                state.d3dDevice = d3dDevice;
++                state.dxgiManager = dxgiManager;
++                dxvaState = profileCount > 0 ? 1 : 2;
++            } else
++                dxvaState = 3;
++        }
++        WinUWPMediaDiagnostics::recordDxvaState(dxvaState, profileCount, hasH264Profile,
++            static_cast<unsigned>(featureLevel));
++    }
 +
 +    BString urlString(url);
 +    hr = ::MFCreateSourceReaderFromURL(static_cast<LPCWSTR>(urlString), attributes.get(), &state.reader);
@@ -2447,10 +2536,10 @@ index 0000000000..c946287804
 +#endif // defined(WK_WINUWP)
 diff --git a/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
 new file mode 100644
-index 0000000000..081de931d4
+index 0000000000..e35979ccc2
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,111 @@
 +/*
 + * Apotheosis (WK_WINUWP): the WebCore <-> port contract for media.
 + *
@@ -2521,6 +2610,22 @@ index 0000000000..081de931d4
 +    static unsigned nativeVideoSubtype();
 +    static unsigned outputVideoSubtype();
 +    static bool dxvaDisabled();
++    // Hardware decode (DXVA) state. MF's SourceReader only uses hardware transforms when the
++    // app provides a D3D device through a DXGI device manager (MF_SOURCE_READER_D3D_MANAGER);
++    // without one the H.264 decoder runs in software no matter what the DISABLE_DXVA attribute
++    // says (that attribute can only turn hardware OFF). UWP cannot use the D3D9/DXVA2 device
++    // manager (desktop only), so this is the D3D11 path. state:
++    //   0 no manager set (software)        2 manager set, device has no video (software)
++    //   1 manager set, device has video (hardware decode expected)
++    //   3 device/manager creation failed (software)
++    // profiles = ID3D11VideoDevice::GetVideoDecoderProfileCount() on our device (0 = the driver
++    // exposes no hardware video at all); h264Profile = an H.264 VLD profile was among them;
++    // featureLevel = the D3D_FEATURE_LEVEL the device was created at (9_3 = 0x9300 on phone).
++    static void recordDxvaState(int state, unsigned profiles, bool h264Profile, unsigned featureLevel);
++    static int dxvaState();
++    static unsigned dxvaProfiles();
++    static bool dxvaH264Profile();
++    static unsigned dxvaFeatureLevel();
 +    // ReadSample instrumentation - see the note beside the counters in the player. These exist to
 +    // tell "the read never returns" apart from "samples arrive but match no configured stream".
 +    static unsigned long long readSampleCalls();

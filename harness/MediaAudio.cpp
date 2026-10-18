@@ -113,6 +113,22 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
     m_sampleRate = sampleRate;
     m_channels = channels;
 
+    // Apotheosis (media, 2026-10-18): endpoint probe. On device the graph "created
+    // successfully" but ran ~17x realtime on a null endpoint, so the first question is
+    // whether the app can see any audio render device at all. Async, fire-and-forget.
+    concurrency::create_task(Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(
+        Windows::Devices::Enumeration::DeviceClass::AudioRender))
+        .then([](concurrency::task<Windows::Devices::Enumeration::DeviceInformationCollection^> t) {
+            try {
+                auto devices = t.get();
+                AudioLog(std::string("endpoint probe: ") + std::to_string(devices->Size)
+                         + " AudioRender device(s)");
+                for (unsigned i = 0; i < devices->Size && i < 4; ++i)
+                    AudioLog("  endpoint[" + std::to_string(i) + "]: "
+                             + NarrowForLog(devices->GetAt(i)->Name));
+            } catch (...) { AudioLog("endpoint probe: FindAllAsync threw"); }
+        }, concurrency::task_continuation_context::use_arbitrary());
+
     // AudioRenderCategory lives in Windows::Media::Render, not Windows::Media::Audio.
     auto settings = ref new AudioGraphSettings(Windows::Media::Render::AudioRenderCategory::Media);
     // SystemDefault keeps the device's own quantum; the graph resamples our frame node
@@ -174,6 +190,7 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
         self->m_graph->Start();
         self->m_quanta = 0;
         self->m_underruns = 0;
+        self->m_lastNonEmptyQuantum = GetTickCount64();   // idle-stop reference point
         self->m_creating = false;
         AudioLog("StartGraphFor: graph STARTED (quantum handler hooked)");
     });
@@ -211,6 +228,18 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
                     const int taken = WebCoreMediaAudioTake(reinterpret_cast<float*>(data), required, &underran);
                     filled = true;
                     ++m_quanta;
+                    // Apotheosis (media, 2026-10-18): null-sink guard. The device round
+                    // showed the graph spinning on an empty ring (~17x realtime) and then
+                    // faulting inside Windows.Media.Audio.dll minutes later. Once the ring
+                    // has been empty for 3 s there is nothing left to play: stop the graph
+                    // (the next EnsureStarted rebuilds it) instead of spinning on it.
+                    if (taken > 0)
+                        m_lastNonEmptyQuantum = GetTickCount64();
+                    else if (m_quanta > 100 && GetTickCount64() - m_lastNonEmptyQuantum > 3000) {
+                        AudioLog("idle-stop: ring empty >3s -> Stop() (null-sink guard)");
+                        Stop();
+                        return;
+                    }
                     // An underrun at start-up or right after a seek is expected and looks
                     // like silence; counting them is how we tell "starved" from "broken".
                     if (underran || taken < required)

@@ -106,11 +106,22 @@ void appendMediaDiagnostics(char* out, int outBytes)
     // subtype values are GUID::Data1 of the negotiated video media types; RGB32 is 0x16,
     // NV12 is 0x3231564E, H264 is 0x34363248. Enough to tell "we got RGB32 out of the
     // Video Processor" from "the transform never engaged" on device.
+    // Apotheosis (media, 2026-10-18): dxva used to echo the DISABLE_DXVA attribute, so it
+    // read "on" even while the decode was pure software (there was no D3D manager at all).
+    // It now reports what the decode thread actually got; see WinUWPMediaDiagnostics.
+    const char* dxvaText = "sw-nomgr";
+    switch (WebCore::WinUWPMediaDiagnostics::dxvaState()) {
+    case 1:  dxvaText = "hw";         break;   // D3D manager set, device exposes video
+    case 2:  dxvaText = "sw-novideo"; break;   // manager set, device has no video decode
+    case 3:  dxvaText = "sw-mgrfail"; break;   // device/manager creation failed
+    default: dxvaText = "sw-nomgr";   break;   // no manager was set (software)
+    }
     std::snprintf(out, static_cast<size_t>(outBytes),
         "media readers=%u frames=%llu/%llu pcm=%llu/%llu/%llu q=%d@%dHz/%dch"
         " native=0x%X out=0x%X dxva=%s err=0x%08lX at=%s"
         " reads=%llu lasthr=0x%08lX flags=0x%X sidx=%d vidx=%d aidx=%d drop=%llu"
-        " cap=%d qpush=%llu qcons=%llu qdrop=%llu und=%llu cpush=%llu phase=%d",
+        " cap=%d qpush=%llu qcons=%llu qdrop=%llu und=%llu cpush=%llu phase=%d"
+        " dxvaprof=%u dxvafl=0x%04X h264=%d",
         WebCore::WinUWPMediaDiagnostics::startedSourceReaders(),
         WebCore::WinUWPMediaDiagnostics::framesDecoded(),
         WebCore::WinUWPMediaDiagnostics::framesPresented(),
@@ -122,7 +133,7 @@ void appendMediaDiagnostics(char* out, int outBytes)
         g_audioQueue.channels(),
         WebCore::WinUWPMediaDiagnostics::nativeVideoSubtype(),
         WebCore::WinUWPMediaDiagnostics::outputVideoSubtype(),
-        WebCore::WinUWPMediaDiagnostics::dxvaDisabled() ? "off" : "on",
+        dxvaText,
         static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::lastError()),
         WebCore::WinUWPMediaDiagnostics::lastErrorSite() ? WebCore::WinUWPMediaDiagnostics::lastErrorSite() : "-",
         // ReadSample instrumentation. `reads` rising means the synchronous read does return;
@@ -145,7 +156,10 @@ void appendMediaDiagnostics(char* out, int outBytes)
         static_cast<unsigned long long>(g_audioQueue.droppedFrames()),
         static_cast<unsigned long long>(g_audioQueue.underrunEvents()),
         static_cast<unsigned long long>(g_audioQueue.contendedPushes()),
-        WebCore::WinUWPMediaDiagnostics::audioPhase());
+        WebCore::WinUWPMediaDiagnostics::audioPhase(),
+        WebCore::WinUWPMediaDiagnostics::dxvaProfiles(),
+        WebCore::WinUWPMediaDiagnostics::dxvaFeatureLevel(),
+        WebCore::WinUWPMediaDiagnostics::dxvaH264Profile() ? 1 : 0);
 }
 
 } // namespace WebCorePort
