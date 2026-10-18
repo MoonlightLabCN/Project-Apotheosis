@@ -45,7 +45,7 @@ for($i=0;$i -lt ($WaitMinutes*2);$i++){
 if(-not $up){ Say 'device never came online; giving up'; exit 1 }
 
 # 已装则跳过
-$pkgs=(& curl.exe -sk -b $jar "$base/api/app/packagemanager/packages" 2>$null)|ConvertFrom-Json
+$pkgs=(& curl.exe -sk --max-time 25 -b $jar "$base/api/app/packagemanager/packages" 2>$null)|ConvertFrom-Json
 if($pkgs.InstalledPackages | Where-Object { $_.PackageFullName -eq $FN }){ Say "already installed: $FN" }
 else {
   $uploaded=$false
@@ -57,6 +57,8 @@ else {
       else { Start-Sleep -Seconds 15; $waited+=15; $up = StableUp }
     }
     if(-not $up){ Say "no stable device window for >25min before attempt $t; giving up"; exit 1 }
+    # 清掉上一轮的响应文件:HTTP 000(curl 根本没拿到响应)时会残留旧 body,日志会撒谎。
+    Remove-Item "$env:TEMP\wdp-install.json" -ErrorAction SilentlyContinue
     $tok=FreshToken
     if(-not $tok){ Say "no CSRF token (attempt $t)"; Start-Sleep -Seconds 5; continue }
     $code = & curl.exe -sk -b $jar -c $jar -o "$env:TEMP\wdp-install.json" -w '%{http_code}' `
@@ -77,7 +79,7 @@ else {
   for($i=0;$i -lt 90;$i++){
     Start-Sleep -Seconds 5
     if(-not (DevUp)){ continue }
-    $pkgs=(& curl.exe -sk -b $jar "$base/api/app/packagemanager/packages" 2>$null)|ConvertFrom-Json
+    $pkgs=(& curl.exe -sk --max-time 25 -b $jar "$base/api/app/packagemanager/packages" 2>$null)|ConvertFrom-Json
     if($pkgs.InstalledPackages | Where-Object { $_.PackageFullName -eq $FN }){ $done=$true; break }
   }
   if(-not $done){ Say 'upload accepted but package never appeared; giving up'; exit 1 }
