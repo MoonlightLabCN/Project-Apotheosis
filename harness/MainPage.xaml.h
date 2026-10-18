@@ -646,6 +646,12 @@ namespace Harness {
         bool m_gpuOn { false };       // GPU 合成是否已开(一次性;引擎侧 g_gpuActive 无 teardown,重启回软件)
         bool m_gpuPresent { false };  // GPU 直呈现模式(合成直接画到 GpuPanel,省 readback+blit)
         bool m_gpuDefault { true };   // 默认启用 GPU(设置可关;启动后首个网络页加载完自动开)
+        // Apotheosis (2026-10-18): 920/930 适配。ANGLE 后端只覆盖 WDDM 2.0 设备
+        // (Lumia 950/950XL,真机验证);WDDM 1.x 机型(920/930/925/928/1520/Icon/640/650...)
+        // 上 GPU 路会崩,且崩点可能在面板 dispatcher(UI 线程),驱动侧 SEH 壳救不了。
+        // 所以开机时按设备身份一次性判定,false = 本机所有 GPU 入口(EnableGpu 是 choke
+        // point,OnGpuPanelLoaded 的探针同样查此旗)一律不碰 EGL,整机走 Cairo 软件路。
+        bool m_gpuAllowedByDevice { true };
         int m_jitMode { 1 };           // 0=off, 1=JIT thunk/no Baseline, 2=JIT+Baseline; cold-start jitdiag.txt
         bool m_jitEnabled { true };    // compatibility mirror: m_jitMode != 0; legacy settings.ini jit
         bool m_perfLog { false };         // 性能诊断记录(每次导航写 browse-log.txt);settings.ini perflog    // EXPERIMENTAL JIT 开关,默认开(引擎基线);settings.ini jit

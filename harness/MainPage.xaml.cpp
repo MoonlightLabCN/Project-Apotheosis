@@ -275,6 +275,56 @@ static void WriteStage(const char* stage)
     } catch (...) {}
 }
 
+// ============================================================================
+// Apotheosis (2026-10-18): 920/930 (WDDM 1.x) 适配 —— 设备身份 + GPU 路准入。
+//
+// ANGLE 后端只覆盖 WDDM 2.0 设备(Lumia 950/950XL,真机验证多年)。WDDM 1.x 机型
+// (920/930/925/928/1520/Icon/640/650 等)上 GPU 路会炸,而且崩点不总在驱动的 SEH 壳
+// 内——ANGLE 把 surface create/resize marshal 回面板 dispatcher(UI 线程),那边什么
+// 都兜不住。所以准入判定必须在任何 EGL 调用之前、靠设备身份做,不能靠试探。
+//
+// 判定(保守方向——未知机器一律软件路:Cairo 软渲染在所有 Win10M ARM 机上都能跑):
+//   1. SystemProductName 含 "950"          -> 放行(Lumia 950 / 950 XL)
+//   2. 物理分辨率 >= 1440 宽(WQHD)          -> 放行(950 家族独占;名字缺失时的兜底)
+//   3. 其余                                 -> 强制软件路
+// 身份串每次启动都落 stage.txt:下一轮设备回合即可拿到每台机器的真实
+// SystemProductName,用来校准白名单(万一 950 上报的是 RM-xxxx 形式)。
+// ============================================================================
+static void QueryDeviceIdentity(std::wstring& product, std::wstring& firmware, std::wstring& manufacturer)
+{
+    try {
+        using namespace Windows::Security::ExchangeActiveSyncProvisioning;
+        EasClientDeviceInformation^ info = ref new EasClientDeviceInformation();
+        if (info->SystemProductName) product.assign(info->SystemProductName->Data());
+        if (info->SystemFirmwareVersion) firmware.assign(info->SystemFirmwareVersion->Data());
+        if (info->SystemManufacturer) manufacturer.assign(info->SystemManufacturer->Data());
+    } catch (...) {}
+}
+
+// 物理像素(不是 DIP):窗口 Bounds 是布局像素(DIP),RawPixelsPerViewPixel 是每视图像素
+// 的原始像素数。950 = 360x640 DIP x 4.0 = 1440x2560;920/930 = 1280x768。
+// (DisplayInformation 在 WinRT 里没有 ScreenWidth/ScreenHeight —— 那是 WP8 Silverlight 的。)
+static void QueryPhysicalPixels(long& width, long& height)
+{
+    width = 0; height = 0;
+    try {
+        auto bounds = Window::Current->Bounds;
+        auto di = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
+        const double dsf = di->RawPixelsPerViewPixel;
+        if (dsf > 0.0) {
+            width = static_cast<long>(bounds.Width * dsf);
+            height = static_cast<long>(bounds.Height * dsf);
+        }
+    } catch (...) {}
+}
+
+static bool GpuPathSupportedOnThisDevice(const std::wstring& product, long physWidth)
+{
+    if (product.find(L"950") != std::wstring::npos) return true;
+    if (physWidth >= 1440) return true;   // WQHD 是 950/950XL 独占
+    return false;
+}
+
 // Apotheosis (M4): UWP enforces a per-app memory cap; on a Lumia 950 the app is terminated with no
 // crash dump once it is exceeded (a code-hosting site ≈620 MB → a news site). One compact snapshot of the OS view
 // of our own working set, appended to the stage lines so WDP can pull the numbers back.
@@ -1290,6 +1340,23 @@ MainPage::MainPage()
             SaveSettings();
         }
     }
+    // Apotheosis (2026-10-18): 920/930 (WDDM 1.x) 适配 —— 设备身份门。ANGLE 只支持
+    // WDDM 2.0;老机上 GPU 路会炸且崩点可能在 UI 线程(SEH 壳救不了),所以在任何 EGL
+    // 调用前一次性判定。判定与设备身份落 stage.txt,供下轮设备回合校准白名单。
+    {
+        std::wstring product, firmware, manufacturer;
+        QueryDeviceIdentity(product, firmware, manufacturer);
+        long physW = 0, physH = 0;
+        QueryPhysicalPixels(physW, physH);
+        m_gpuAllowedByDevice = GpuPathSupportedOnThisDevice(product, physW);
+        WriteStage(("gpu-gate: product='" + WideToUtf8(product) + "' fw='" + WideToUtf8(firmware)
+            + "' mfr='" + WideToUtf8(manufacturer) + "' phys=" + std::to_string(physW) + "x" + std::to_string(physH)
+            + " -> gpu " + (m_gpuAllowedByDevice ? "ALLOWED" : "FORCED-SOFTWARE")).c_str());
+        if (!m_gpuAllowedByDevice && m_gpuDefault) {
+            m_gpuDefault = false;
+            SaveSettings();   // 持久化:设置页 GPU 开关与之一致,也不会再自动尝试
+        }
+    }
     // 前后台切换:后台暂停实时渲染(省电、避免后台跑引擎被 PLM 冻结时堆积)。
     Window::Current->VisibilityChanged += ref new Windows::UI::Xaml::WindowVisibilityChangedEventHandler(
         [this](Platform::Object^, Windows::UI::Core::VisibilityChangedEventArgs^ e) {
@@ -1539,11 +1606,14 @@ MainPage::MainPage()
     if (!diagUrls.empty()) {
         CoreDispatcher^ disp = this->Dispatcher;
         Platform::Agile<MainPage^> self(this);
-        WebEngine::instance().post([disp, self, diagUrls]() {
+        // Apotheosis (2026-10-18): 920/930 适配 —— autodiag 的离屏 GpuInit 同样走
+        // ANGLE,把设备准入旗带进去(老机上不初始化,gi 记 -1 让 dump 里看得出来)。
+        const bool gpuAllowed = m_gpuAllowedByDevice;
+        WebEngine::instance().post([disp, self, diagUrls, gpuAllowed]() {
             std::string dump;
             int gi = -999;
             const int dw = kW, dh = kH;
-            try { gi = GpuInitGuarded(nullptr, dw, dh); } catch (...) { gi = -1000; }
+            try { gi = gpuAllowed ? GpuInitGuarded(nullptr, dw, dh) : -1; } catch (...) { gi = -1000; }
             NoteEngineFrameSize(dw, dh);
             dump += "WebCoreGpuInit(offscreen) rc=" + std::to_string(gi) + "\n\n";
             auto rgba = std::vector<uint8_t>(EngineBufferBytes(), 0);
@@ -4896,7 +4966,13 @@ void MainPage::OnGpuPanelLoaded(Platform::Object^, RoutedEventArgs^)
     //   WebCoreGpuInit 窗口表面抢 ISwapChainPanelNative;原流程两者相隔十几秒才不打架。
     m_gpuPanelLoadedSeen = true;   // 诊断:真机上这个事件到底来不来(见 startup 日志行)
     if (m_pendingFirstNav.empty()) {
-        try { RunGpuProbe(GpuPanel, ref new String(LocalStateDir().c_str())); } catch (...) {}
+        // Apotheosis (2026-10-18): 920/930 适配 —— 探针自建 EGL 窗口表面,不经过
+        // EnableGpu 的闸,所以这里单独查设备准入旗(见该旗声明处的说明)。
+        if (m_gpuAllowedByDevice) {
+            try { RunGpuProbe(GpuPanel, ref new String(LocalStateDir().c_str())); } catch (...) {}
+        } else {
+            WriteStage("gpu-gate: RunGpuProbe refused (device not in the known-good set)");
+        }
         return;
     }
     // Apotheosis (2026-09-03 崩溃修复): Loaded 到达不代表面板已经过 arrange——真机上这个事件带着
@@ -6909,7 +6985,12 @@ void MainPage::ShowSettings()
     if (SetUaSwitch) SetUaSwitch->IsOn = m_setUaDesktop;
     if (SetZoomSlider) SetZoomSlider->Value = m_defaultZoom;
     if (SetZoomLabel) SetZoomLabel->Text = ref new String((std::to_wstring(m_defaultZoom) + L"%").c_str());
-    if (SetGpuSwitch) SetGpuSwitch->IsOn = m_gpuDefault;
+    if (SetGpuSwitch) {
+        // Apotheosis (2026-10-18): 920/930 适配 —— 设备不准入时开关强制关+禁用:
+        // 老机上手动开 GPU 就是送死(ANGLE 在 UI 线程崩,SEH 壳救不了)。
+        SetGpuSwitch->IsOn = m_gpuAllowedByDevice && m_gpuDefault;
+        SetGpuSwitch->IsEnabled = m_gpuAllowedByDevice;
+    }
     if (SetJitModeCombo) SetJitModeCombo->SelectedIndex = m_jitMode;
     if (SetJitSwitch) SetJitSwitch->IsOn = m_jitEnabled;
     if (SetUpdateSwitch) SetUpdateSwitch->IsOn = m_updateAuto;
@@ -6966,7 +7047,7 @@ void MainPage::HideSettings()
     }
     if (SetUaSwitch) m_setUaDesktop = SetUaSwitch->IsOn;
     if (SetZoomSlider) m_defaultZoom = (int)(SetZoomSlider->Value + 0.5);
-    if (SetGpuSwitch) m_gpuDefault = SetGpuSwitch->IsOn;
+    if (SetGpuSwitch && SetGpuSwitch->IsEnabled) m_gpuDefault = SetGpuSwitch->IsOn;
     if (SetJitModeCombo && SetJitModeCombo->SelectedIndex >= 0) m_jitMode = SetJitModeCombo->SelectedIndex;
     if (m_jitMode < 0) m_jitMode = 0; else if (m_jitMode > 2) m_jitMode = 2;
     m_jitEnabled = m_jitMode != 0;
@@ -8499,6 +8580,16 @@ void MainPage::OnPresentPanelSizeChanged(Platform::Object^, Windows::UI::Xaml::S
 void MainPage::EnableGpu()
 {
     if (m_gpuOn) return;
+
+    // Apotheosis (2026-10-18): 920/930 (WDDM 1.x) 适配。ANGLE 后端只覆盖 WDDM 2.0;
+    // 老机上 GPU 路会崩,且 ANGLE 把 surface create/resize marshal 回面板 dispatcher
+    // (UI 线程),驱动的 SEH 壳救不了那个崩。所有 GPU 入口(启动自动开、设置开关、
+    // OnNavDone 的默认-GPU 分支)都经过这里,所以在这一道闸上拒绝;OnGpuPanelLoaded
+    // 的自建探针表面不经过这里,单独查同一个旗。被拒时软件(Cairo)路自然接管。
+    if (!m_gpuAllowedByDevice) {
+        WriteStage("gpu-gate: EnableGpu refused (device not in the known-good set; software path)");
+        return;
+    }
 
     // Apotheosis (landscape/rotation, 0.1.9.41): the resolution scale below has to be measured off
     //   an ARRANGED panel, and GpuPanel is Collapsed - therefore 0x0 - until this call makes it
