@@ -260,9 +260,22 @@ GPU 合成中 + 后端声称加速渲染 ⇒ WebKit 直接跳过软件 paint，�
 
 ### 11.6 下一步
 
-1. **装 0.2.5.32 → 地址栏导 `values.html`**：判据 `frames=N/M` 且 **M 随 N 增长**（画面在动）、`pcm` consumed>0（环在抽）。`M` 仍卡在个位数 = paint 路径还有问题。
-2. **声音可听性**：quantum 频率 ~1700/s 疑似 null sink；若画面通了但没声音，查 AudioGraph 输出端点（`AudioGraph::CreateAsync` 成功但设备枚举为空？）。
+1. ~~**装 0.2.5.32 → 地址栏导 `values.html`**：判据 `frames=N/M` 且 **M 随 N 增长**（画面在动）、`pcm` consumed>0（环在抽）。`M` 仍卡在个位数 = paint 路径还有问题。~~
+   ✅ **0.2.5.32 已装（20:35）、用户真机确认"能动了"**（20:36 轮，silent.html 全程 `rs=3`，播到 `ended=1`）。paint 路径修复生效，**"有画面"闭环**。累计计数（`frames=N/M`）待用户再刷一次留档。
+2. **声音换方案**：见 §11.7。
 3. 抖音白屏（DoD ④）、软/硬解功耗（DoD ⑤）仍待设备。
+
+### 11.7 声音：AudioGraph 在此设备上不可用（0.2.5.32 轮新证据）
+
+20:36 轮（纯视频）+ 19:18 轮（带音频）对比出的结论：
+
+- AudioGraph `CreateAsync` 返回 Success、quantum  handler 正常挂上、**环也被抽干**（`qcons=477056`）——链路"通"。
+- 但 quantum 频率 **~1700/s**（480 样本/quantum ⇒ 17 倍实时），真实设备应 ~100/s ⇒ **没有真实输出端点，graph 在 null sink 上全速空转**。
+- 空转 ~5 分钟后 **在 `Windows.Media.Audio.dll` 内部 faults**：crash.txt 新增 4 条 `2026-10-18 19:24:09 tid=10180`（`reason: jit pool ... isJITPC(fault)=0`，栈帧 4-13 全在 Windows.Media.Audio.dll，由 Harness.exe 调用进入）。我们的 handler 每秒上千次 LockBuffer/CreateReference/GetBuffer/AddFrame 的对象churn 是诱因之一，但根因是端点缺失。
+- 结论：**Win10M 15254 的 App Container 里这条 AudioGraph 路走不通**（要么端点打不开，要么 UWP 音频栈缺陷）。下一步候选：
+  a. **MF 音频渲染器**：`MFCreateAudioRendererActivate` + `MFCreateAudioRenderer`（MF 在 App Container 已证明可用——SourceReader 就在用），把解码后的 PCM 直接交给 MF 渲染器，绕开 AudioGraph；
+  b. 先写个最小复现（App 启动即建 graph、不碰媒体），确认是"端点打不开"还是"我们喂法不对"；
+  c. 若确认端点不可用：声音降级为"仅解码计数 + 无输出"，把 DoD ① 改成"有画面、音频待硬件路径"。
 
 ---
 
