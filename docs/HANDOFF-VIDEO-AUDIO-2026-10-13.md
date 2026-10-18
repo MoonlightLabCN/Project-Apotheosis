@@ -199,6 +199,52 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 
 ---
 
+## 12. 硬件解码研究（2026-10-18，代码级结论 + 待验证实验）
+
+### 12.1 现状判定：**软解**，且 `dxva=on` 是假象
+
+- `openSourceReader()` 只设 `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING` +
+  `MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN`，**没有 `MF_SOURCE_READER_D3D_MANAGER`**；
+- 全仓库无 `MFCreateDXGIDeviceManager`/`D3D11CreateDevice` 调用，解码线程没有 D3D 设备；
+- SourceReader 的硬件 transform 以 D3D manager 为前提 ⇒ **H.264 一直跑在软件解码器上**；
+- media 行 `dxva=on` 只是 `state.dxvaDisabled=false` 的回声（诊断字段设计为“没关 DXVA”，**不是**“DXVA 已生效”）。
+
+### 12.2 硬件解码要补的（~40 行，解码线程内）
+
+```cpp
+MFCreateDXGIDeviceManager(&resetToken, &dxgiMgr);
+D3D11CreateDevice(HARDWARE, D3D11_CREATE_DEVICE_VIDEO_SUPPORT|BGRA_SUPPORT,
+                  {11_1,11_0,10_1,10_0,9_3}, &device);   // Win10M 第三方上限 FL9_3
+dxgiMgr->ResetDevice(device);
+attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, dxgiMgr);
+```
+
+VP MFT（已开）继续把 D3D 纹理转 RGB32 系统内存，**现有 paint 路零改动**。
+
+### 12.3 核心未知数（必须真机实验）
+
+Win10M 第三方 D3D11 上限 FL9_3，D3D11 视频解码接口文档要 FL10_0+；手机上 IE/MediaElement
+的硬解走平台内部设备，第三方 App Container 能否触达无文档。两种结局：
+(a) 给 FL9_3 设备 MF 仍退软解；(b) 驱动暴露 DXVA，直接通。
+
+**唯一确定的判据 = 探针 reader**：带 D3D manager + 关 VP，读一帧后 QI `IMFDXGIBuffer`——
+成功=硬解真在工作。成品路开了 VP 后输出永远 RGB32，看不出来，必须探针。
+
+### 12.4 收益与优先级
+
+- 当前 320x176@30fps 软解在 A53 上约 10-15% CPU，小片无所谓；
+- 硬解真实收益：**功耗/发热（DoD ⑤）+ 480p/720p 能力**（抖音/B 站门槛）；
+- 优先级：音频之后（用户已确认手机能正常出声 ⇒ AudioGraph null-sink 是 port 问题）。
+
+### 12.5 下一版（0.2.5.33）打包清单
+
+1. **音频端点探测**：枚举 `DeviceInformation.FindAllAsync(DeviceClass.AudioRender)` 打进 mediaaudio.txt；
+2. **DXVA 探针**：按 §12.2/§12.3 实现 + 探针 QI 判定，结果打进 media 行（如 `dxva=probe-ok/probe-fail/off`）；
+3. **音频图空转自停**：连续 N 个 quantum 取 0 帧即 `Stop()`（避开 null-sink 空转 ~5 分钟后在 Windows.Media.Audio.dll 内 faults 的问题，见 §11.7）；
+4. 声音本体方案二选一（依端点探测结果）：MF 音频渲染器 `MFCreateAudioRendererActivate`，或修 AudioGraph 端点。
+
+---
+
 ## 11. 0.2.5.30–0.2.5.32 回合（2026-10-18 傍晚，用户在场手动导航）
 
 ### 11.1 第一批 media 行（19:09 轮，地址栏手动导航 values.html）
