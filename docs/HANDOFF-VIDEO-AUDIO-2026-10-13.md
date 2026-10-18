@@ -301,6 +301,30 @@ Win10M 第三方 D3D11 上限 FL9_3。查证后的文档事实（2026-10-18，Mi
 （若枚举不到设备 = App Container 拿不到端点，走 MF 音频渲染器；能枚举到 = 查 AudioGraph
 设置/激活问题）。
 
+### 12.6 0.2.5.34 轮真机结果（2026-10-18 01:19，950）—— 两个惊喜 + 一个回归
+
+```
+gpu-gate: product='RM-1104_13874' fw='01078.00053.16236.35009' mfr='MicrosoftMDG'
+          phys=1440x2560 -> gpu ALLOWED
+media readers=0 ... dxva=hw dxvaprof=10 dxvafl=0xB000 err=0x80004005 at=openSourceReader
+```
+
+1. **设备能力 two surprises**：
+   - **D3D11 是 FL 11_0（0xB000），不是 9_3**——FL9_3 是 **ANGLE 的要求**，不是平台的
+     上限。之前 §12.3 的“平台上限 FL9_3”判断只对 ANGLE 成立。
+   - **驱动暴露 10 个解码 profile**——硬件解码在能力层面完全可行。
+2. **一个回归（已修，0.2.5.35）**：把 `MF_SOURCE_READER_D3D_MANAGER` 和
+   `ENABLE_VIDEO_PROCESSING` 设在同一份 attributes 上，`MFCreateSourceReaderFromURL`
+   直接 **E_FAIL**——文档承诺的 `MF_E_UNSUPPORTED_D3D_TYPE` 优雅退路在 15254 上**不存在**，
+   整个 reader 丢光（`readers=0`、元素卡在 HAVE_NOTHING、test.mp4 明明已被正常取走）。
+   **修法**：主 reader 回到不带 manager 的软件路（数周验证过），DXVA 改成**一次性探针**
+   （带 manager + **不开 VP** 的第二个 reader，读一帧 QI `IMFDXGIBuffer`）：
+   `1`=硬解成立（帧是 D3D 纹理，值得建 DXGI→CPU 拷贝路）、`2`=系统内存（没走成）、
+   `0`=manager 建 reader 失败。media 行 `dxva=` 改报 `probe-hw/probe-sw/probe-fail/noprobe`。
+3. **设备身份实测**：950 的 `SystemProductName` 是 **`RM-1104_13874`**（不是 "Lumia 950"）！
+   名字判据匹配不上，**WQHD 兜底（1440x2560）救了场**；白名单已按真实 RM 号补齐
+   （RM-1104/1105/1106/1116 + RM-1084/1085/1086/1117）。
+
 ---
 
 ## 11. 0.2.5.30–0.2.5.32 回合（2026-10-18 傍晚，用户在场手动导航）
