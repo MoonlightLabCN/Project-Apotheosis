@@ -620,3 +620,34 @@ media readers=<N> frames=<decoded>/<presented> pcm=<pushed>/<consumed>/<dropped>
 `readers=0` means the media engine was never asked to load anything (element absent, or
 `supportsType()` rejected the MIME type). `out=0x16` means the Video Processor did hand back
 RGB32; anything else means the negotiated output type was not what was asked for.
+
+---
+
+## Device round 6 (2026-10-18, 0.2.5.29, values.html) — gates open, evidence incomplete
+
+Server log (``port/_mediatest/server.log``), 01:44 local. First round where the element played:
+
+```
+01:44:04.6  evt-loadedmetadata rs=1 ct=0.000 dur=10.03 wh=320x176 paused=0
+01:44:04.8  evt-loadeddata    rs=2 ct=0.000
+01:44:06.3  evt-canplay       rs=3 ct=0.001   <- gate 3 fix works: HaveFutureData reported
+01:44:06.3  evt-playing       rs=3 ct=0.003   <- MediaPlayer::play() reached
+01:44:08.4  evt-waiting       rs=2 ct=2.101   <- 2 s read-ahead consumed, fresh frames arrive
+01:44:09.3  evt-stalled       rs=2 ct=3.035
+01:44:10.3  t6                rs=2 ct=3.967   <- self-reports stop (screen sleep suspends the app)
+```
+
+What this round proved: all three gates are open (page identifier, IsInWindow, paused-time
+buffering + readyState reporting). ``ct`` advanced in real time for ~4 s.
+
+What it did NOT prove: frames and PCM. The ``media`` line (``frames=``/``pcm=``) was never read
+back for 0.2.5.29, and ``ct`` is a wall clock (``clockNowLocked()``) that advances whether or not
+anything decodes. DoD item 1 stays open until ``frames>0`` and ``pcm`` pushed/consumed > 0 are
+actually read from ``stage.txt``.
+
+New root cause found from this round: every decoded frame called
+``setReadyState(HaveCurrentData)`` (notifyFrameReady), so during playback readyState oscillated
+3->2 per frame and the element fired waiting/stalled per spec (HTMLMediaElement.cpp:3332). The
+clock kept running only because ``potentiallyPlaying()`` has the ``m_readyStateMaximum`` fallback
+(HTMLMediaElement.cpp:6465). Fixed in 0.2.5.30: while playing, a frame reports HaveFutureData and
+the state only ever rises there. See HANDOFF-VIDEO-AUDIO-2026-10-13.md section 10.

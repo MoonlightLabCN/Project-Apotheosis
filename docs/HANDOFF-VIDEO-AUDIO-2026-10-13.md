@@ -196,3 +196,52 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 ## 9. 详细记录
 
 `docs/MEDIA-MF-IMPLEMENTATION.md` —— 按"设备回合 1..5"记录了每一轮的真机读数、被证伪的假设、以及上述三条根因链的完整推导。**下一轮测试结果请追加到那里。**
+
+---
+
+## 10. 0.2.5.30 回合（2026-10-18 夜间，设备睡眠期间的自主工作）
+
+### 10.1 真机读数：10/18 01:44 轮（0.2.5.29）—— 三道门全开的第一份证据
+
+服务器日志 `port/_mediatest/server.log` 里 01:44 那轮（用户在 01:42 更新本文档后两分钟跑的）：
+
+```
+01:44:04.6  evt-loadedmetadata rs=1 ct=0.000 dur=10.03 wh=320x176 paused=0
+01:44:04.8  evt-loadeddata    rs=2 ct=0.000
+01:44:06.3  evt-canplay       rs=3 ct=0.001   ← 门 3 修复生效：HaveFutureData 上报成功
+01:44:06.3  evt-playing       rs=3 ct=0.003   ← play() 被调用，时钟启动
+01:44:08.4  evt-waiting       rs=2 ct=2.101   ← 预缓冲的 2s 消费完，新帧开始到达
+01:44:09.3  evt-stalled       rs=2 ct=3.035
+01:44:10.3  t6                rs=2 ct=3.967   ← 之后页面停止自报（息屏挂起应用）
+```
+
+**仍未拿到**：`stage.txt` 的 `media` 行（`frames=`/`pcm=`）——0.2.5.29 从未在 media 行可读的时刻被拉取过。注意 `ct` 递增**不等于有画面**：本后端的时钟是 `play()` 锚定的墙钟（`clockNowLocked()`），与解码无关。**画面/声音仍无直接证据，DoD ① 未闭环。**
+
+### 10.2 新根因：播放中 readyState 被每一帧打回 HAVE_CURRENT_DATA
+
+`MediaPlayerPrivateWinUWP::notifyFrameReady()` 对**每一个解码帧**无条件 `setReadyState(HaveCurrentData)`。播放中新帧持续到达 → rs 3→2 → 元素按 spec（HTMLMediaElement.cpp:3332，4.8.10.8）逐帧触发 `waiting`/`stalled`。01:44 日志的时间点（ct≈2.0 整，预缓冲耗尽点）与根因严丝合缝。
+
+时钟没停是因为 `HTMLMediaElement::potentiallyPlaying()` 有 `m_readyStateMaximum` 回退（HTMLMediaElement.cpp:6465）——但页面和任何 JS 播放器逻辑看到的是"永久在缓冲"的元素（转圈、自定义重试都会被打断）。
+
+**修法（0.2.5.30）**：播放中（`!m_paused && !m_reachedEnd`）一帧到达 = 数据在流动 → 上报 `HaveFutureData`；暂停时维持 `HaveCurrentData`（预缓冲路径自行抬高，见 §1 门 3）。且**只升不降**——合法下降（seek/新 load）各有其通知路径（`notifySeekFinished`/`load`）。补丁已重生成入库（`patches/2026-10-09-winuwp-media-mf.patch`，132,377 B，反向自检通过），单文件编译通过，全量重建见下。
+
+### 10.3 WDP 部署坑（今天全踩了一遍；远程自动化必再撞上）
+
+| 坑 | 现象 / 修法 |
+|---|---|
+| **本机 .NET `HttpClient` TLS 握手间歇失败** | 同样代码有时通有时 90s 全超时；`Invoke-WebRequest -NoProxy` 和 `curl.exe` 每次都通。**设备交互统一用 curl**（见 `tools/_media-round-curl.ps1`） |
+| **WDP 文件上传（推 testurl.txt）500 "Access is denied"（0x80070005）** | `POST /api/filesystem/apps/file?knownfolderid=LocalAppData&packagefullname=…&path=%5CLocalState`，multipart 格式与 auto-diag.ps1 完全一致仍 500；GET 同路径正常。终止 app 再推也没用。**当前设备上 testurl.txt 内容恰是对的，重启 app 即生效**；推送链路待查 |
+| **curl 启动 app 要 `Content-Length: 0`** | 否则 411 Length Required（install-only.ps1 的 HttpClient 不发 body 反而没事） |
+| **CSRF**：每个响应都会轮换 token | 必须「本次响应里的 Set-Cookie → 下一次请求的 `X-CSRF-Token`」；GET 不校验，POST/DELETE 校验 |
+| PowerShell 命名陷阱 | `Iwr` 是 `Invoke-WebRequest` 的内置别名，**不能用作函数名**（别名优先于函数）；CookieContainer 在 `System.Net` 不在 `System.Net.Http` |
+| `install-only.ps1` 版本已装时**跳过安装** | 直接启动。设备上 0.2.5.29 早已装好（10/18 凌晨用户装的），今天的"部署"实际是重启 |
+
+### 10.4 当前状态与下一步
+
+- **0.2.5.30 构建中**（`port/build-0.2.5.30.ps1` 后台链：WebCore 全量 → `link-driver-gpu.ps1` → `build-harness.ps1`；~2h10m；日志 `port/build-0.2.5.30.log`）。唯一改动 = §10.2 的 readyState 修复；版本号已升（同版重装是静默 no-op，必须升）。
+- **设备 10/18 09:50 左右彻底睡眠**（ping 不通、443 关闭），符合§4"息屏→WDP 死"。`tools/_watch-device.ps1` 在后台看守，上线即写 `port/_mediatest/watch-state.txt`。
+- **设备一醒，按序做**：
+  1. `pwsh -File E:\Apotheosis\tools\install-only.ps1 -Ip 192.168.3.159 -Ver 0.2.5.30`（appx 就绪后）
+  2. `pwsh -NoProfile -File E:\Apotheosis\tools\_media-round-curl.ps1`（curl 版测试轮：终止→启动→等 45s→拉 stage.txt/console.txt/crash.txt）
+  3. 读 `media` 行：**`frames>0` = 有画面，`pcm` 的 pushed/consumed>0 = 有声音**；`qpush>0` 而 `cpush=0` = 音频没进设备。同时确认不再出现 `evt-waiting`/`evt-stalled`（§10.2 修复的判据）
+  4. 测试服务器必须活着：`tools\Test-MediaServer.ps1 -Port 8099`（PID 11768 从 10/13 起常驻，根目录 `port\_mediatest`）

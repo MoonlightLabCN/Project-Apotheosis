@@ -634,10 +634,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..3248c70eb2
+index 0000000000..1961cf209f
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1525 @@
+@@ -0,0 +1,1544 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -1298,9 +1298,28 @@ index 0000000000..3248c70eb2
 +            return;
 +
 +        const bool firstFrame = protectedThis->m_readyState.load() < MediaPlayer::ReadyState::HaveCurrentData;
-+        // Goes through setReadyState so the element actually gets readyStateChanged(); only
-+        // firstVideoFrameAvailable() is exclusive to the first frame.
-+        protectedThis->setReadyState(MediaPlayer::ReadyState::HaveCurrentData);
++        // Apotheosis (media, 2026-10-18): readyState is only ever what this backend reports,
++        // and a frame arriving while the player is playing is data FLOWING, not a stall.
++        // Reporting HAVE_CURRENT_DATA unconditionally used to drop readyState below
++        // HAVE_FUTURE_DATA on every frame during playback - on device that read as
++        // `playing rs=3` -> `waiting rs=2` the moment the read-ahead ran out, then
++        // `stalled`, once per frame for the rest of the clip. WebKit's potentiallyPlaying()
++        // kept the clock running off m_readyStateMaximum, so the video never actually
++        // stopped - but the page (and any JS player logic) saw a permanently stalling
++        // element. While playing, a frame means HAVE_FUTURE_DATA; paused, HAVE_CURRENT_DATA
++        // is right, and decodeLoop()'s read-ahead path raises it once the preroll exists.
++        // Only ever raise here: the states that legitimately go down (seek, new load) have
++        // their own notifications.
++        bool paused = true;
++        {
++            Locker locker { protectedThis->m_lock };
++            paused = protectedThis->m_paused;
++        }
++        const bool playing = !paused && !protectedThis->m_reachedEnd.load();
++        const auto target = playing ? MediaPlayer::ReadyState::HaveFutureData
++                                    : MediaPlayer::ReadyState::HaveCurrentData;
++        if (protectedThis->m_readyState.load() < target)
++            protectedThis->setReadyState(target);
 +
 +        if (auto player = protectedThis->m_player.get()) {
 +            if (firstFrame)
