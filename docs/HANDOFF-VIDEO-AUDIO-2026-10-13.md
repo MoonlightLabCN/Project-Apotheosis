@@ -201,6 +201,15 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 
 ## 12. 硬件解码研究（2026-10-18，代码级结论 + 待验证实验）
 
+> **设备矩阵（2026-10-18 用户确认，别假设所有 Lumia 一样）**：
+> **Lumia 950（WDDM 2.0）** = ANGLE/D3D11 FL9_3 GPU 合成路可用（真机验证多年），也是 DXVA
+> 实验的目标设备；**Lumia 930/920（WDDM 1.x）** = ANGLE 后端不适配，**硬件渲染会炸**，
+> 那两款实际只能软件渲染（Cairo）。
+> **DXVA 路本身在 930/920 上安全**：设备创建失败（无 D3D11 驱动）→ `sw-mgrfail`，或拿到
+> WARP 设备 → QI `ID3D11VideoDevice` 返 `E_NOINTERFACE` → `sw-novideo`，两种都不设/
+> 不用 manager，解码器自动退软解；且解码输出两条路都是 RGB32 系统内存（VP MFT 转换），
+> 不碰 ANGLE/SwapChainPanel——**DXVA 不引入新的设备兼容维度**。会炸的只有 ANGLE 合成路
+> （已在 `g_gpuActive` 门控，GPU 起不来回 Cairo）。
 ### 12.1 现状判定：**软解**，且 `dxva=on` 是假象
 
 - `openSourceReader()` 只设 `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING` +
