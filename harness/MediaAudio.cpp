@@ -10,6 +10,10 @@
 #include <MemoryBuffer.h>   // IMemoryBufferByteAccess
 #include <wrl/client.h>     // Microsoft::WRL::ComPtr
 
+#include <fstream>
+#include <mutex>
+#include <string>
+
 using namespace concurrency;
 using namespace Microsoft::WRL;
 using namespace Platform;
@@ -24,27 +28,67 @@ namespace Harness {
 // has (the driver mixes nothing — it has one queue).
 static MediaAudio^ g_instance = nullptr;
 
+// Apotheosis (media, 2026-10-18): device-side diagnostics. On device the media line reads
+// qcons=0 - the AudioGraph never took a single frame from the driver's ring - and nothing
+// in the app says why. Every decision point below appends one line to LocalState\
+// mediaaudio.txt so the next WDP pull shows exactly where the chain stopped.
+static std::mutex s_audioLogMtx;
+static std::string NarrowForLog(Platform::String^ s)
+{
+    if (!s) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, s->Data(), s->Length(), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(n), '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, s->Data(), s->Length(), &out[0], n, nullptr, nullptr);
+    return out;
+}
+static void AudioLog(const std::string& msg)
+{
+    std::lock_guard<std::mutex> lock(s_audioLogMtx);
+    try {
+        SYSTEMTIME st = {};
+        GetLocalTime(&st);
+        char ts[32] = "";
+        snprintf(ts, sizeof ts, "%02d:%02d:%02d ", st.wHour, st.wMinute, st.wSecond);
+        Windows::Storage::StorageFolder^ folder = Windows::Storage::ApplicationData::Current->LocalFolder;
+        std::string path = NarrowForLog(folder->Path) + "\\mediaaudio.txt";
+        std::ofstream f(path, std::ios::app | std::ios::binary);
+        if (f) f << ts << msg << "\n";
+    } catch (...) {}
+}
+
 void MediaAudio::EnsureStarted()
 {
     if (!g_instance)
         g_instance = ref new MediaAudio();
 
-    if (g_instance->m_creating || g_instance->m_failed)
+    if (g_instance->m_creating || g_instance->m_failed) {
+        AudioLog("EnsureStarted: early-return (creating=" + std::to_string(g_instance->m_creating ? 1 : 0)
+                 + " failed=" + std::to_string(g_instance->m_failed ? 1 : 0) + ")");
         return;
+    }
 
     // Nothing is playing yet (or the page only has images): 0/0 until a stream opens.
     const int sampleRate = WebCoreMediaAudioSampleRate();
     const int channels = WebCoreMediaAudioChannels();
-    if (sampleRate <= 0 || channels <= 0)
+    if (sampleRate <= 0 || channels <= 0) {
+        AudioLog("EnsureStarted: early-return (no format yet: rate=" + std::to_string(sampleRate)
+                 + " ch=" + std::to_string(channels) + ")");
         return;
+    }
 
     const bool sameFormat = g_instance->m_graph
         && g_instance->m_sampleRate == sampleRate
         && g_instance->m_channels == channels;
-    if (sameFormat)
+    if (sameFormat) {
+        AudioLog("EnsureStarted: already running at " + std::to_string(sampleRate) + "Hz/"
+                 + std::to_string(channels) + "ch (quanta=" + std::to_string(g_instance->m_quanta) + ")");
         return;
+    }
 
     // Either the first stream or a differently-formatted one: rebuild.
+    AudioLog("EnsureStarted: starting graph for " + std::to_string(sampleRate) + "Hz/"
+             + std::to_string(channels) + "ch");
     g_instance->Reset();
     g_instance->StartGraphFor(sampleRate, channels);
 }
@@ -96,10 +140,14 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
             // refused the activation. Recorded rather than thrown — <video> still plays.
             self->m_failed = true;
             self->m_creating = false;
+            AudioLog(std::string("StartGraphFor: CreateAsync FAILED status=")
+                     + (result ? std::to_string(static_cast<int>(result->Status)) : std::string("exception"))
+                     + " -> m_failed=true (no audio; <video> still plays)");
             return;
         }
 
         self->m_graph = result->Graph;
+        AudioLog("StartGraphFor: graph created");
 
         AudioEncodingProperties^ format = AudioEncodingProperties::CreatePcm(
             static_cast<unsigned>(self->m_sampleRate), static_cast<unsigned>(self->m_channels), 32);
@@ -112,6 +160,7 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
             self->m_creating = false;
             self->m_graph->Stop();
             self->m_graph = nullptr;
+            AudioLog("StartGraphFor: CreateFrameInputNode returned null -> m_failed=true");
             return;
         }
 
@@ -126,6 +175,7 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
         self->m_quanta = 0;
         self->m_underruns = 0;
         self->m_creating = false;
+        AudioLog("StartGraphFor: graph STARTED (quantum handler hooked)");
     });
 }
 
@@ -165,6 +215,11 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
                     // like silence; counting them is how we tell "starved" from "broken".
                     if (underran || taken < required)
                         ++m_underruns;
+                    // Apotheosis (media, 2026-10-18): the first quanta prove the graph is
+                    // alive and draining the ring; then one line per 100 keeps the log small.
+                    if (m_quanta <= 3 || m_quanta % 100 == 0)
+                        AudioLog("quantum #" + std::to_string(m_quanta) + " required=" + std::to_string(required)
+                                 + " taken=" + std::to_string(taken) + " underran=" + std::to_string(underran));
                 }
             }
             // Release the byte access first, then the reference and the buffer: there is no
@@ -184,6 +239,7 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
 
 void MediaAudio::Reset()
 {
+    AudioLog(std::string("Reset() [quanta=") + std::to_string(m_quanta) + " underruns=" + std::to_string(m_underruns) + "]");
     if (m_inputNode) {
         if (m_quantumHooked) {
             m_inputNode->QuantumStarted -= m_quantumToken;
