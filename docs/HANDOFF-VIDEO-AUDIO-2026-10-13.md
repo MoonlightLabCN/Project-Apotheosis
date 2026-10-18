@@ -238,10 +238,11 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 
 ### 10.4 当前状态与下一步
 
-- **0.2.5.30 构建中**（`port/build-0.2.5.30.ps1` 后台链：WebCore 全量 → `link-driver-gpu.ps1` → `build-harness.ps1`；~2h10m；日志 `port/build-0.2.5.30.log`）。唯一改动 = §10.2 的 readyState 修复；版本号已升（同版重装是静默 no-op，必须升）。
-- **设备 10/18 09:50 左右彻底睡眠**（ping 不通、443 关闭），符合§4"息屏→WDP 死"。`tools/_watch-device.ps1` 在后台看守，上线即写 `port/_mediatest/watch-state.txt`。
-- **设备一醒，按序做**：
-  1. `pwsh -File E:\Apotheosis\tools\install-only.ps1 -Ip 192.168.3.159 -Ver 0.2.5.30`（appx 就绪后）
-  2. `pwsh -NoProfile -File E:\Apotheosis\tools\_media-round-curl.ps1`（curl 版测试轮：终止→启动→等 45s→拉 stage.txt/console.txt/crash.txt）
+- **0.2.5.30 已构建完成**：`harness/AppPackages/Harness/Harness_0.2.5.30_ARM_Test/Harness_0.2.5.30_ARM.appx`（54 MB，Identity 0.2.5.30，Harness.exe 哈希与 0.2.5.29 不同 = 新引擎已入库）。唯一改动 = §10.2 的 readyState 修复；补丁已重生成入库并提交（`ba5ea6f`）。构建踩坑两则：**16GB 机 -j 4 会 OOM**（`LLVM ERROR: out of memory`，改 -j 2）；**MSBuild 起 CL.exe 时环境里 `NO_PROXY`/`no_proxy` 大小写重复会炸**（`MSB6001 ... 已添加项`，后台作业会被注入大写版，构建前把 *_PROXY 全清）。
+- **设备 10/18 09:50 左右彻底睡眠**（ping 不通、443 关闭），符合§4"息屏→WDP 死"。
+- **已挂全自动任务**：`tools/_auto-round.ps1`（等设备上线≤3h → `install-only.ps1 -Ver 0.2.5.30` → curl 版测试轮 → 证据写 `port/_mediatest/auto-round-result.txt`）。**注意：轮次要有效，手机必须亮着屏**——DisplayRequest 只防息屏不能点亮屏幕，息屏启动的 app 会被挂起（01:44 轮就死在 t6→t12 之间）。
+- **设备一醒（人工）按序做**：
+  1. 手机亮屏、解锁
+  2. 若自动任务还没跑：`pwsh -File E:\Apotheosis\tools\_deploy-and-round.ps1 -Ver 0.2.5.30`
   3. 读 `media` 行：**`frames>0` = 有画面，`pcm` 的 pushed/consumed>0 = 有声音**；`qpush>0` 而 `cpush=0` = 音频没进设备。同时确认不再出现 `evt-waiting`/`evt-stalled`（§10.2 修复的判据）
   4. 测试服务器必须活着：`tools\Test-MediaServer.ps1 -Port 8099`（PID 11768 从 10/13 起常驻，根目录 `port\_mediatest`）
