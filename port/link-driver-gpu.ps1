@@ -36,8 +36,9 @@ $libs = @(
   # 改用 InternetGetConnectedState 查真实在线态(wininet 在 App partition,清单已带 internetClient)。
   'wininet.lib',
   # Apotheosis (media, 2026-10-18): DXVA 硬件解码 —— D3D11CreateDevice/ID3D11VideoDevice
-  # (IMFDXGIDeviceManager/MFCreateDXGIDeviceManager 在已链的 mfplat.lib)。
-  'd3d11.lib'
+  # (IMFDXGIDeviceManager/MFCreateDXGIDeviceManager 在已链的 mfplat.lib);
+  # D3D11_DECODER_PROFILE_* 是 DEFINE_GUID 数据符号,住 dxguid.lib。
+  'd3d11.lib','dxguid.lib'
 )
 $log = "$P\link-driver-gpu.log"
 & $lld /DLL /MACHINE:ARM /OUT:"$P\WebCoreDriver-gpu.dll" `
