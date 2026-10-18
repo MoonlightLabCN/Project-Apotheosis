@@ -2184,10 +2184,10 @@ index 0000000000..1961cf209f
 +#endif // defined(WK_WINUWP) && ENABLE(VIDEO)
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
 new file mode 100644
-index 0000000000..2c7132f1e5
+index 0000000000..c946287804
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,257 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + *
@@ -2318,7 +2318,17 @@ index 0000000000..2c7132f1e5
 +    void setPageIsVisible(bool) final;
 +    void paint(GraphicsContext&, const FloatRect&) final;
 +    DestinationColorSpace colorSpace() final;
-+    bool supportsAcceleratedRendering() const final { return true; }
++    // Apotheosis (media, 2026-10-18): MUST stay false. This backend has no platform layer
++    // (platformLayer() is the default nullptr) - it presents CPU BGRA frames through
++    // GraphicsContext::drawNativeImage, which is the design this file's header describes.
++    // Claiming accelerated rendering makes RenderVideo::paintReplaced() SKIP the software
++    // paint entirely while the element is composited (RenderVideo.cpp: "Avoid unnecessary
++    // paints by skipping software painting if the renderer is accelerated") and hand the
++    // picture to a media platform layer that does not exist here - on device that read as
++    // frames=299/2: 299 frames decoded, 2 painted, black video area forever. With false,
++    // every frame goes through paint() -> drawNativeImage -> the layer backing store, which
++    // both the Cairo and the TextureMapper routes already display.
++    bool supportsAcceleratedRendering() const final { return false; }
 +    bool shouldIgnoreIntrinsicSize() final { return false; }
 +
 +private:
