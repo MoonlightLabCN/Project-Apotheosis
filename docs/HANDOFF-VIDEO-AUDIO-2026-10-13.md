@@ -223,12 +223,24 @@ VP MFT（已开）继续把 D3D 纹理转 RGB32 系统内存，**现有 paint �
 
 ### 12.3 核心未知数（必须真机实验）
 
-Win10M 第三方 D3D11 上限 FL9_3，D3D11 视频解码接口文档要 FL10_0+；手机上 IE/MediaElement
-的硬解走平台内部设备，第三方 App Container 能否触达无文档。两种结局：
-(a) 给 FL9_3 设备 MF 仍退软解；(b) 驱动暴露 DXVA，直接通。
+Win10M 第三方 D3D11 上限 FL9_3。查证后的文档事实（2026-10-18，Microsoft Learn）：
 
-**唯一确定的判据 = 探针 reader**：带 D3D manager + 关 VP，读一帧后 QI `IMFDXGIBuffer`——
-成功=硬解真在工作。成品路开了 VP 后输出永远 RGB32，看不出来，必须探针。
+- **UWP 只能走 D3D11 路**：`DXVA2CreateDirect3DDeviceManager9`（D3D9/DXVA2）文档
+  Requirements 明确 "desktop apps only"，Remarks 原文 **"Windows Store apps must use
+  IMFDXGIDeviceManager and Direct3D 11 Video APIs"**。D3D9 兜底路直接排除。
+- **`ID3D11VideoDevice` 没有 FL 书面限制**：文档 Remarks 只说 WARP / 参考光栅化 /
+  Microsoft Basic Display Adapter 会返回 `E_NOINTERFACE`，Requirements 是
+  "Windows 8 [desktop apps | **UWP apps**]"。（此前"要 FL10_0+"是推测，**文档无此说法**。）
+  Lumia 950 是真 WDDM 2.0 驱动（非 Basic Display），**有戏**；930/920 WDDM 1.x 的
+  老驱动不暴露 video device，与实测吻合。
+- MF 解码器在设备上找不到配置会**自动退软件解码**（`MF_E_UNSUPPORTED_D3D_TYPE` →
+  Topology Loader 发 `MFT_MESSAGE_SET_D3D_MANAGER=NULL` 重协商）⇒ 实验零风险。
+
+**判据（0.2.5.33 已实现，等真机）**：设备上 QI `ID3D11VideoDevice` +
+`GetVideoDecoderProfileCount()`，并枚举是否有 H.264 VLD profile——有 = 驱动支持硬解；
+配合 `MF_SOURCE_READER_D3D_MANAGER` 设上，解码器即走 DXVA。结果打进 media 行新增的
+`dxvaprof=` / `dxvafl=` / `h264=` 三字段，`dxva=` 改报 `hw` / `sw-nomgr` /
+`sw-novideo` / `sw-mgrfail` 实际状态（原来是 `on/off` 回声，见 §12.1）。
 
 ### 12.4 收益与优先级
 
@@ -242,6 +254,10 @@ Win10M 第三方 D3D11 上限 FL9_3，D3D11 视频解码接口文档要 FL10_0+�
 2. **DXVA 探针**：按 §12.2/§12.3 实现 + 探针 QI 判定，结果打进 media 行（如 `dxva=probe-ok/probe-fail/off`）；
 3. **音频图空转自停**：连续 N 个 quantum 取 0 帧即 `Stop()`（避开 null-sink 空转 ~5 分钟后在 Windows.Media.Audio.dll 内 faults 的问题，见 §11.7）；
 4. 声音本体方案二选一（依端点探测结果）：MF 音频渲染器 `MFCreateAudioRendererActivate`，或修 AudioGraph 端点。
+
+**状态：0.2.5.33 已实现并提交（`28d313f`），构建中。** 1/2/3 全部落地；4 待端点探测结果再定
+（若枚举不到设备 = App Container 拿不到端点，走 MF 音频渲染器；能枚举到 = 查 AudioGraph
+设置/激活问题）。
 
 ---
 
