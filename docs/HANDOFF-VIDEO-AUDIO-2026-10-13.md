@@ -199,6 +199,73 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 
 ---
 
+## 11. 0.2.5.30–0.2.5.32 回合（2026-10-18 傍晚，用户在场手动导航）
+
+### 11.1 第一批 media 行（19:09 轮，地址栏手动导航 values.html）
+
+用户手动导航（testurl 自动导航钩子当天失效，原因见 §11.5），拿到**媒体线历史上第一份真实读数**：
+
+```
+media readers=1 frames=25/1 pcm=48000/0/39296 q=48000@48000Hz/2ch native=0x34363248 out=0x16 dxva=on err=0
+     reads=75 vidx=2 aidx=0 drop=0 cap=48000 qpush=48000 qcons=0 qdrop=39296 und=0 cpush=0 phase=7
+```
+
+- 文件是真的：H264→RGB32 协商成功、DXVA 开、零错误、元数据 320x176/10.03s。
+- 元素侧：`canplay rs=3` → `playing` → `ct` 实时推进到 9.8s（时钟是墙钟，**推进不解码**）。
+- 用户观感：**进度条走、无画面**。
+
+### 11.2 音频图是好的（19:18 轮 + mediaaudio.txt 诊断）
+
+0.2.5.31 给壳加了音频诊断（`MediaAudio` 各决策点落盘 `LocalState\mediaaudio.txt`）。19:18 轮：
+
+```
+19:18:36 EnsureStarted: early-return (no format yet)
+19:18:38 EnsureStarted: starting graph for 48000Hz/2ch
+19:18:39 StartGraphFor: graph created
+19:18:39 StartGraphFor: graph STARTED (quantum handler hooked)
+19:18:39 quantum #1 required=480 taken=480 underran=0     ← 第一帧就被取走
+...
+19:23:15 quantum #465300 required=480 taken=0 underran=1  ← 播完后空转
+```
+
+- **AudioGraph 1 秒内就起来并抽干环**（`qcons=477056`）。§11.1 的 `qcons=0` 是 media 行的**快照时机**造成的误读（导航早期写的），图起来后解码线程立刻满速恢复：`frames=299`（整部解完）、视频播到 `ended=1`。
+- 存疑点：空转时 quantum 频率 ~1700/s（真实设备应 ~100/s），怀疑没有真实输出端点（null sink 空转）——**声音是否可听尚未验证**，是下一步。
+
+### 11.3 “没画面”的最终根因：`supportsAcceleratedRendering()=true`
+
+`RenderVideo::paintReplaced()`（RenderVideo.cpp:298-302）：
+
+```cpp
+// Avoid unnecessary paints by skipping software painting if the renderer is accelerated...
+if (hasAcceleratedCompositing() && videoElement->supportsAcceleratedRendering()
+    && !paintBehavior(FlattenCompositingLayers) && !paintBehavior(Snapshotting))
+    return;                      // ← 跳过 CPU paint
+videoElement->paint(context, paintRect);
+```
+
+GPU 合成中 + 后端声称加速渲染 ⇒ WebKit 直接跳过软件 paint，把画面交给**合成器的媒体平台层**。本后端没有平台层（`platformLayer()` 默认 nullptr），设计就是 CPU BGRA + `drawNativeImage`（MediaPlayerPrivateWinUWP.h 头注释原话："no new present path is introduced"）。`true` 让 WebKit 去等一条不存在的路——真机读数 **`frames=299/2`**：299 帧全部解出、只有 2 帧画上去（合成启用前的软件帧），视频区全黑。进度条能动是因为它是另一个元素，走正常 repaint。
+
+**修法（0.2.5.32，`101ed9e`）**：`supportsAcceleratedRendering()` 改 `false`，每帧都走 `paint()` → `drawNativeImage` → layer backing store，Cairo/TextureMapper 两条呈现路都能显示。**待装 0.2.5.32 验证。**
+
+### 11.4 0.2.5.30 的 readyState 修复已验证生效
+
+19:18/19:19 两轮全程 `rs=3`（`t6 rs=3 ct=3.732`、`t12 rs=3 ct=9.802`），不再出现 0.2.5.29 的 `waiting rs=2`/`stalled rs=2` 逐帧振荡（`stalled` 事件仍会出现但 `rs` 保持 3，无害）。
+
+### 11.5 当天踩过的部署/工具坑（续 §10.3）
+
+- **testurl.txt 自动导航钩子当天全程失效**（内容正确、37 字节干净，但 app 启动不读它；10/18 凌晨和今早的 mem.txt 里大量 `startup gpu-first url=...` 证明代码是好的）。手动开 app 大概率是“恢复旧进程”而非新启动（构造函数不跑 ⇒ 不读 testurl）。**测试改用地址栏手动导航，不受影响。**
+- **WDP 推文件（写 LocalState）500 "Access is denied"** 依旧（`path=%5CLocalState` 形态）；GET 正常。改文件内容这条路不通，靠设备上已有文件 + 手动导航。
+- 媒体诊断计数器是**进程级累计**（`readers=`/`frames=`/`pcm=` 不随导航清零），stage.txt 每篇导航落一行——对比两行才能看出恢复过程。
+- `mediaaudio.txt` / `silent.html`（纯视频隔离页，`silent.mp4` = test.mp4 去音轨）为新增诊断面。
+
+### 11.6 下一步
+
+1. **装 0.2.5.32 → 地址栏导 `values.html`**：判据 `frames=N/M` 且 **M 随 N 增长**（画面在动）、`pcm` consumed>0（环在抽）。`M` 仍卡在个位数 = paint 路径还有问题。
+2. **声音可听性**：quantum 频率 ~1700/s 疑似 null sink；若画面通了但没声音，查 AudioGraph 输出端点（`AudioGraph::CreateAsync` 成功但设备枚举为空？）。
+3. 抖音白屏（DoD ④）、软/硬解功耗（DoD ⑤）仍待设备。
+
+---
+
 ## 10. 0.2.5.30 回合（2026-10-18 夜间，设备睡眠期间的自主工作）
 
 ### 10.1 真机读数：10/18 01:44 轮（0.2.5.29）—— 三道门全开的第一份证据
