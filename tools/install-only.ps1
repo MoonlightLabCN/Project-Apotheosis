@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 # 只安装(不先卸载,缩短无 app 窗口),带唤醒+整体重试。装完启动。
-param([string]$Ip='192.168.3.51',[string]$Ver='0.1.7.22',[string]$Pub='x0rqga78m2mgc')
+param([string]$Ip='192.168.3.51',[string]$Ver='0.2.0.0',[string]$Pub='x0rqga78m2mgc')
 $ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Net.Http
 $base="https://${Ip}:443"; $FN="EdgeHTMLReborn.Harness_${Ver}_arm__${Pub}"; $Praid="EdgeHTMLReborn.Harness_${Pub}!App"
 $dir="E:\Apotheosis\harness\AppPackages\Harness\Harness_${Ver}_ARM_Test"; $appx="$dir\Harness_${Ver}_ARM.appx"; $cer="$dir\Harness_${Ver}_ARM.cer"

@@ -1,10 +1,10 @@
 #Requires -Version 7.0
-<#  auto-diag.ps1 — 全自动:卸载旧→装 0.1.7.9→推 autodiag.txt(URL列表)到 LocalState→启动→轮询拉 autodump.txt。
+<#  auto-diag.ps1 — 全自动:卸载旧→装 0.2.0.0→推 autodiag.txt(URL列表)到 LocalState→启动→轮询拉 autodump.txt。
     走 WDP REST + HttpClient(手搓 multipart + 从 Set-Cookie 抠 CSRF)。无需任何 UI 点按。 #>
 [CmdletBinding()]
 param(
     [string]$Ip='192.168.3.51',
-    [string]$Ver='0.1.7.9',
+    [string]$Ver='0.2.0.0',
     [string]$Pub='x0rqga78m2mgc',
     [string]$OutDir='E:\Apotheosis\crash',
     [string[]]$Urls=@('https://example.com','https://cn.bing.com','https://cn.bing.com/search?q=hello')
@@ -44,7 +44,7 @@ foreach($p in ($pkgs | Where-Object { $_.PackageFullName -like '*EdgeHTMLReborn.
   Write-Host "卸载 $($p.PackageFullName): $([int]$u.StatusCode)"
 }
 
-# 2) 安装 0.1.7.9(multipart: appx + cer)
+# 2) 安装 0.2.0.0(multipart: appx + cer)
 $mp=[System.Net.Http.MultipartFormDataContent]::new()
 foreach($f in @($appx,$cer)){
   $bytes=[System.IO.File]::ReadAllBytes($f); $name=[System.IO.Path]::GetFileName($f)
@@ -56,7 +56,7 @@ foreach($f in @($appx,$cer)){
 }
 $ins=Wdp POST "/api/app/packagemanager/package?package=$([uri]::EscapeDataString([System.IO.Path]::GetFileName($appx)))" $mp
 Write-Host "安装请求: $([int]$ins.StatusCode)"
-# 轮询安装完成(packages 出现 0.1.7.9)
+# 轮询安装完成(packages 出现 0.2.0.0)
 $ok=$false
 for($i=0;$i -lt 40;$i++){
   Start-Sleep -Seconds 3

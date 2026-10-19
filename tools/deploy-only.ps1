@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 # 仅部署(卸载+安装),带连接重试(设备间歇休眠)。无启动/抓取。
-param([string]$Ip='192.168.3.51',[string]$Ver='0.1.7.16',[string]$Pub='x0rqga78m2mgc')
+param([string]$Ip='192.168.3.51',[string]$Ver='0.2.0.0',[string]$Pub='x0rqga78m2mgc')
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Net.Http
 $base="https://${Ip}:443"

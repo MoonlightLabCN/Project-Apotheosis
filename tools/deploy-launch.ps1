@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [string]$Ip='192.168.3.51',
-    [string]$Ver='0.1.7.23',
+    [string]$Ver='0.2.0.0',
     [string]$Pub='x0rqga78m2mgc',
     # Apotheosis: repo root, defaults to the parent of tools\ so the script works from any checkout location.
     [string]$Root = (Split-Path -Parent $PSScriptRoot)

@@ -63,6 +63,20 @@ LPVOID WINAPI apoMapViewOfFile(HANDLE fileMapping, DWORD desiredAccess,
     return MapViewOfFileFromApp(fileMapping, desiredAccess, offset, numberOfBytesToMap);
 }
 
+// --- GetFileSize ------------------------------------------------------------
+// 表里第 23 项在 WINAPI_FAMILY_APP 下是空指针,winOpen 之后 winFileSize 必调(2026-10-05
+// 真机 dump:StorageAreaSync::performImport → prepare → pc=0,blr 落在 aSyscall+0x118)。
+// GetFileSizeEx 在 App Container 可用,语义对齐:出错返回 INVALID_FILE_SIZE,错误码由它留好。
+DWORD WINAPI apoGetFileSize(HANDLE file, LPDWORD fileSizeHigh)
+{
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(file, &size))
+        return INVALID_FILE_SIZE;
+    if (fileSizeHigh)
+        *fileSizeHigh = static_cast<DWORD>(size.QuadPart >> 32);
+    return static_cast<DWORD>(size.QuadPart);
+}
+
 // --- GetVersionExW --------------------------------------------------------
 // 默认构建里 SQLITE_WIN32_GETVERSIONEX=0,winIsNT() 直接返回 1,这一项永远不会被调用。
 // 但它在表里且可能为空,补一个如实回答"NT 系(Windows 10)"的实现,免得万一被调到就是空指针。
@@ -89,6 +103,7 @@ const Replacement kReplacements[] = {
     { "CreateFileW", reinterpret_cast<sqlite3_syscall_ptr>(apoCreateFileW) },
     { "CreateFileMappingW", reinterpret_cast<sqlite3_syscall_ptr>(apoCreateFileMappingW) },
     { "MapViewOfFile", reinterpret_cast<sqlite3_syscall_ptr>(apoMapViewOfFile) },
+        { "GetFileSize", reinterpret_cast<sqlite3_syscall_ptr>(apoGetFileSize) },
     { "GetVersionExW", reinterpret_cast<sqlite3_syscall_ptr>(apoGetVersionExW) },
 };
 
@@ -105,6 +120,7 @@ const char* const kRequired[] = {
     "FlushFileBuffers",
     "GetFileAttributesW",
     "GetFileAttributesExW",
+    "GetFileSize",
     "GetFullPathNameW",
     "DeleteFileW",
     "LockFile",

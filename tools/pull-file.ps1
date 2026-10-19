@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [string]$Ip='192.168.3.51',
-    [string]$Ver='0.1.7.25',
+    [string]$Ver='0.2.0.0',
     [string]$Pub='x0rqga78m2mgc',
     [Parameter(Mandatory)][string]$File
 )

@@ -42,7 +42,7 @@ Write-Host "==> configure GPU build (build-clang-gpu, $Config, JIT+TextureMapper
     "-DENABLE_STATIC_JSC=ON" `
     "-DENABLE_C_LOOP=OFF" `
     "-DENABLE_JIT=ON" `
-        "-DAPOTHEOSIS_JIT=OFF" `
+        "-DAPOTHEOSIS_JIT=ON" `
     "-DENABLE_DFG_JIT=OFF" `
     "-DENABLE_FTL_JIT=OFF" `
     "-DENABLE_SAMPLING_PROFILER=OFF" `
