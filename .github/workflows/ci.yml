@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [media-mf]
+  pull_request:
+    branches: [media-mf]
+
+# 本仓库的引擎构建需要 GB 级 WebKit 源码树 + ARM32 UWP 工具链 + 真机，CI 跑不了构建
+# （见 AGENTS.md）。CI 守的是那些"踩过才知道"的纪律——每一项都对应一次真实的事故：
+#   · ABI 两份头不同步      → 链接/运行时 ABI 不一致（2026-10 实测曾漂移 649 行）
+#   · 非 ASCII 路径         → Ruby 代码生成器 / meson 直接炸
+#   · .ps1 语法错误         → 部署链路在设备在线的那几分钟里才暴露
+#   · 同版本号重复提交      → 同版重装是静默 no-op，设备继续跑旧二进制
+#   · 补丁结构损坏          → WebKit/ 改动丢失（不在仓库，补丁是唯一入库方式）
+
+jobs:
+  discipline:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 确定对比基线
+        id: base
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $base = "${{ github.event.pull_request.base.sha }}"
+          } else {
+            $base = git rev-parse HEAD~1
+          }
+          if (-not $base) { $base = git rev-parse HEAD~1 }
+          Write-Host "base=$base"
+          "base=$base" >> $env:GITHUB_OUTPUT
+
+      - name: C ABI 两份头必须逐字节一致
+        shell: pwsh
+        run: |
+          $a = (Get-Content port/WebCoreDriver.h -Raw) -replace "`r`n","`n"
+          $b = (Get-Content harness/WebCoreDriver.h -Raw) -replace "`r`n","`n"
+          if ($a -ne $b) {
+            Write-Host "::error::port/WebCoreDriver.h 与 harness/WebCoreDriver.h 不一致（AGENTS.md 铁律：加/改导出时两份必须同步）"
+            git diff --no-index -- port/WebCoreDriver.h harness/WebCoreDriver.h | Select-Object -First 20
+            exit 1
+          }
+          Write-Host "C ABI headers identical OK"
+
+      - name: 跟踪路径必须全 ASCII
+        shell: pwsh
+        run: |
+          $bad = git ls-files | Where-Object { $_ -notmatch '^[\x20-\x7E]+$' }
+          if ($bad) {
+            Write-Host "::error::非 ASCII 路径会让 Ruby 代码生成器 / meson 炸：$($bad -join ', ')"
+            exit 1
+          }
+          Write-Host "all tracked paths ASCII OK"
+
+      - name: 上游补丁结构完整
+        shell: pwsh
+        run: |
+          $p = 'patches/2026-10-09-winuwp-media-mf.patch'
+          if (-not (Test-Path $p)) { Write-Host "::error::缺少 $p（WebKit/ 改动的唯一入库方式）"; exit 1 }
+          git apply --numstat $p
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::补丁不是合法的 git diff：$p"; exit 1 }
+          Write-Host "patch structure OK"
+
+      - name: 变更的 .ps1 必须通过语法解析
+        shell: pwsh
+        run: |
+          $changed = git diff --name-only "${{ steps.base.outputs.base }}...HEAD" | Where-Object { $_ -like '*.ps1' }
+          if (-not $changed) { Write-Host "no .ps1 changed"; exit 0 }
+          $fail = $false
+          foreach ($f in $changed) {
+            if (-not (Test-Path $f)) { continue }
+            $errs = $null
+            [System.Management.Automation.PSParser]::Tokenize((Get-Content $f -Raw), [ref]$errs) | Out-Null
+            if ($errs.Count) {
+              Write-Host "::error file=$f::语法错误 $($errs.Count) 处"
+              $errs | Select-Object -First 3 | ForEach-Object { Write-Host "  line $($_.Token.StartLine): $($_.Message)" }
+              $fail = $true
+            }
+          }
+          if ($fail) { exit 1 }
+          Write-Host "changed .ps1 parse OK: $($changed -join ', ')"
+
+      - name: 改了 harness/driver 必须升版本号
+        shell: pwsh
+        run: |
+          $changed = git diff --name-only "${{ steps.base.outputs.base }}...HEAD"
+          $srcChanged = $changed | Where-Object { $_ -like 'harness/*' -or $_ -like 'port/*' }
+          if (-not $srcChanged) { Write-Host "no harness/port change -> no bump needed"; exit 0 }
+          $manifest = 'harness/Package.appxmanifest'
+          function Get-Ver($rev) {
+            # git show 输出是行数组,Select-String 逐行匹配跨不了行 —— 先 join 成整段。
+            $c = (git show "${rev}:harness/Package.appxmanifest" 2>$null) -join "`n"
+            if (-not $c) { return '' }
+            # 锚定 <Identity> 元素：manifest 里还有 PackageDependency 的 MinVersion,
+            # 直接匹配 Version="..." 可能取到那个永远不变的依赖版本号。
+            $m = [regex]::Match($c, '(?s)<Identity[^>]*?Version="([\d.]+)"')
+            if (-not $m.Success) { return '' }
+            return $m.Groups[1].Value
+          }
+          $oldVer = Get-Ver "${{ steps.base.outputs.base }}"
+          $newVer = Get-Ver 'HEAD'
+          Write-Host "harness/port changed -> manifest version must move: '$oldVer' -> '$newVer'"
+          if ((-not $oldVer) -or (-not $newVer) -or ($oldVer -eq $newVer)) {
+            Write-Host "::error file=$manifest::改了 harness/ 或 port/ 但版本号没升——同版重装是静默 no-op，设备会继续跑旧二进制"
+            exit 1
+          }
+          Write-Host "version bump OK"

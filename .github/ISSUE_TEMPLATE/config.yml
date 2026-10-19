@@ -1,0 +1,8 @@
+blank_issues_allowed: false
+contact_links:
+  - name: 先读交接单再开工
+    url: https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/docs/HANDOFF-VIDEO-AUDIO-2026-10-13.md
+    about: 每个里程碑的根因/试错/真机数据点都在里面；重复造轮子的工单会被直接关掉
+  - name: 工程约束（AGENTS.md）
+    url: https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/AGENTS.md
+    about: ASCII 路径 / 三套工具链 / 异常关闭 / WK_WINUWP 守卫 / 版本号纪律——违反必踩坑

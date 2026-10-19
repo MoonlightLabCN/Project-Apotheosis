@@ -1,0 +1,35 @@
+name: Release
+
+# 打 tag 即建 release（notes 用 .github/RELEASE_TEMPLATE.md 渲染）。
+# appx/cer 资产不在仓库——按 AGENTS.md 的既有流程从构建机手动附：
+#   gh release upload v<VERSION> <appx> <cer> --clobber
+# App 内『检查更新』需要：版本号已升 + release 已建 + appx 已附，三者缺一不可。
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 按模板创建 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          sha=$(git rev-parse --short HEAD)
+          notes=$(sed -e "s/{VERSION}/$ver/g" \
+                       -e "s/{YYYY-MM-DD}/$(date +%F)/" \
+                       -e "s/{SHA}/$sha/g" \
+                       .github/RELEASE_TEMPLATE.md)
+          if ! gh release create "$GITHUB_REF_NAME" --target media-mf --title "v$ver" --notes "$notes"; then
+            echo "release 已存在,更新 notes"
+            gh release edit "$GITHUB_REF_NAME" --title "v$ver" --notes "$notes"
+          fi
+          echo "### 记得从构建机附上手资产:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "gh release upload $GITHUB_REF_NAME Harness_${ver}_ARM.appx Harness_${ver}_ARM.cer --clobber" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
