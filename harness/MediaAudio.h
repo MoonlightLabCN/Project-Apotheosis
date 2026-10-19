@@ -19,6 +19,7 @@
 #pragma once
 
 #include <ppltasks.h>
+#include <atomic>
 
 namespace Harness {
 
@@ -42,6 +43,12 @@ private:
     MediaAudio() { }
 
     void StartGraphFor(int sampleRate, int channels);
+    // Apotheosis (media, 2026-10-19): split out of StartGraphFor so the render-device
+    // enumeration can finish first and hand its default device to
+    // AudioGraphSettings::PrimaryRenderDevice (the graph's implicit binding produced a
+    // null sink on device: everything pushed was consumed, at real-time speed, silently).
+    void CreateGraphFor(int sampleRate, int channels,
+        Windows::Devices::Enumeration::DeviceInformation^ renderDevice);
     void OnQuantumStarted(Windows::Media::Audio::AudioFrameInputNode^ sender,
         Windows::Media::Audio::FrameInputNodeQuantumStartedEventArgs^ args);
     void Reset();
@@ -69,8 +76,12 @@ private:
     // (AudioGraph::Stop + unhooking QuantumStarted) from inside the QuantumStarted
     // callback itself crashes inside Windows.Media.Audio.dll - crash.txt 2026-10-19
     // 23:20:26 tid=1788, and the app dies with it (follow-on AV on the UI thread). The
-    // handler only raises this flag; EnsureStarted (UI thread) executes the Stop.
-    bool m_idleStopRequested { false };
+    // handler only raises this flag and posts a dispatcher job; the UI thread executes
+    // the Stop. (EnsureStarted consuming the flag is the backstop if the post fails.)
+    std::atomic<bool> m_idleStopRequested { false };
+    // Captured when the graph starts, so the quantum handler can marshal back to the UI
+    // thread (null until the first graph).
+    Windows::UI::Core::CoreDispatcher^ m_uiDispatcher;
 };
 
 } // namespace Harness

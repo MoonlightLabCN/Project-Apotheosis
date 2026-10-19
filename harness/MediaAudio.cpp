@@ -10,6 +10,10 @@
 #include <MemoryBuffer.h>   // IMemoryBufferByteAccess
 #include <wrl/client.h>     // Microsoft::WRL::ComPtr
 
+#include <windows.ui.core.h>   // CoreDispatcher / DispatchedHandler (deferred idle stop)
+#include <windows.devices.enumeration.h>   // DeviceInformation (render-device binding)
+#include <windows.applicationmodel.core.h>   // CoreApplication::MainView->Dispatcher
+
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -124,27 +128,51 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
     m_sampleRate = sampleRate;
     m_channels = channels;
 
-    // Apotheosis (media, 2026-10-18): endpoint probe. On device the graph "created
-    // successfully" but ran ~17x realtime on a null endpoint, so the first question is
-    // whether the app can see any audio render device at all. Async, fire-and-forget.
+    // Apotheosis (media, 2026-10-18/19): the endpoint enumeration is no longer a
+    // fire-and-forget probe - it now FEEDS the graph. On device the graph created
+    // "successfully" but consumed every frame into a null sink (media-diag: pcm
+    // pushed == consumed == 480128 = the whole file, at real-time speed, yet silence),
+    // so the graph's implicit default-device binding is suspect. The enumeration gives
+    // us the real devices (name / IsDefault / IsEnabled) and the default one is handed
+    // to AudioGraphSettings::PrimaryRenderDevice (its type IS DeviceInformation).
+    MediaAudio^ self = this;
     concurrency::create_task(Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(
         Windows::Devices::Enumeration::DeviceClass::AudioRender))
-        .then([](concurrency::task<Windows::Devices::Enumeration::DeviceInformationCollection^> t) {
+        .then([self, sampleRate, channels](
+            concurrency::task<Windows::Devices::Enumeration::DeviceInformationCollection^> t) {
+            Windows::Devices::Enumeration::DeviceInformation^ chosen = nullptr;
             try {
                 auto devices = t.get();
                 AudioLog(std::string("endpoint probe: ") + std::to_string(devices->Size)
                          + " AudioRender device(s)");
-                for (unsigned i = 0; i < devices->Size && i < 4; ++i)
-                    AudioLog("  endpoint[" + std::to_string(i) + "]: "
-                             + NarrowForLog(devices->GetAt(i)->Name));
+                for (unsigned i = 0; i < devices->Size; ++i) {
+                    auto d = devices->GetAt(i);
+                    AudioLog("  endpoint[" + std::to_string(i) + "]: " + NarrowForLog(d->Name)
+                             + " default=" + (d->IsDefault ? "1" : "0")
+                             + " enabled=" + (d->IsEnabled ? "1" : "0"));
+                    if (d->IsDefault && !chosen)
+                        chosen = d;
+                }
             } catch (...) { AudioLog("endpoint probe: FindAllAsync threw"); }
-        }, concurrency::task_continuation_context::use_arbitrary());
+            self->CreateGraphFor(sampleRate, channels, chosen);
+        });
+}
 
+void MediaAudio::CreateGraphFor(int sampleRate, int channels,
+    Windows::Devices::Enumeration::DeviceInformation^ renderDevice)
+{
     // AudioRenderCategory lives in Windows::Media::Render, not Windows::Media::Audio.
     auto settings = ref new AudioGraphSettings(Windows::Media::Render::AudioRenderCategory::Media);
     // SystemDefault keeps the device's own quantum; the graph resamples our frame node
     // into the device format, so we only have to match the engine's stream.
     settings->QuantumSizeSelectionMode = QuantumSizeSelectionMode::SystemDefault;
+    if (renderDevice) {
+        settings->PrimaryRenderDevice = renderDevice;
+        AudioLog("CreateGraphFor: PrimaryRenderDevice bound to '"
+                 + NarrowForLog(renderDevice->Name) + "'");
+    } else {
+        AudioLog("CreateGraphFor: no default AudioRender device enumerated - leaving the graph's implicit binding");
+    }
 
     MediaAudio^ self = this;
     create_task(AudioGraph::CreateAsync(settings)).then([self](task<CreateAudioGraphResult^> creation) {
@@ -202,6 +230,7 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
         self->m_quanta = 0;
         self->m_underruns = 0;
         self->m_lastNonEmptyQuantum = GetTickCount64();   // idle-stop reference point
+        self->m_uiDispatcher = Windows::ApplicationModel::Core::CoreApplication::MainView->Dispatcher;   // for the deferred idle stop
         self->m_creating = false;
         AudioLog("StartGraphFor: graph STARTED (quantum handler hooked)");
     });
@@ -248,8 +277,25 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
                     if (taken > 0)
                         m_lastNonEmptyQuantum = GetTickCount64();
                     else if (m_quanta > 100 && GetTickCount64() - m_lastNonEmptyQuantum > 3000) {
-                        AudioLog("idle-stop: ring empty >3s -> stop requested (deferred to UI thread)");
-                        m_idleStopRequested = true;
+                        // DEFERRED stop: never tear the graph down from inside this
+                        // callback (crash.txt 2026-10-19 23:20:26 - PC inside
+                        // Windows.Media.Audio.dll). Raise the flag once, post the Stop to
+                        // the UI thread, and stop touching the frame entirely.
+                        if (!m_idleStopRequested.exchange(true)) {
+                            AudioLog("idle-stop: ring empty >3s -> posting Stop() to the UI thread");
+                            auto disp = m_uiDispatcher;
+                            if (disp) {
+                                MediaAudio^ self = this;   // handle capture: the lambda outlives this call
+                                disp->RunAsync(Windows::UI::Core::CoreDispatcherPriority::Normal,
+                                    ref new Windows::UI::Core::DispatchedHandler([self]() {
+                                        if (self->m_idleStopRequested.exchange(false)) {
+                                            AudioLog("idle-stop: executing deferred Stop() on the UI thread");
+                                            MediaAudio::Stop();   // static: tears down g_instance
+                                        }
+                                    }));
+                            }
+                        }
+                        return;   // graph is going away; do not add another silent frame
                     }
                     // Apotheosis (media, 2026-10-19): live decode-side counters. The
                     // 23:20 round showed the ring empty during playback - the graph was
