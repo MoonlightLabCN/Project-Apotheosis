@@ -1,24 +1,152 @@
-// WebCoreDriver.h — Phase 1b 渲染驱动的 C 接口(供 C++/CX MainPage 调用)。
-// 实现在 WebCoreDriver.lib(clang-cl 编的 WebCore 驱动 + 146 平台 stub)。
+// ============================================================================
+// WebCoreDriver.h  —  C ABI for the WebCore headless software-render driver.
+//
+// Two entry points, both rendering into a caller-provided w*h RGBA8888 buffer
+// (>= w*h*4 bytes). Both return 0 on success, negative on failure.
+//
+//   WebCoreRenderHtml(html, w, h, out) — render a local UTF-8 HTML string.
+//   WebCoreLoadUrl(url, w, h, out)     — load an http(s):// URL over the network
+//                                        (curl backend) and render the page.
+//
+// Error codes (negative returns):
+//   -1  bad args            -7  cairo surface create failed
+//   -2  page create failed  -8  cairo context create failed
+//   -3  no main frame       -9  bad/invalid URL          (WebCoreLoadUrl)
+//   -4  no view            -10  load failed              (WebCoreLoadUrl)
+//   -5  no document loader -11  load timed out (watchdog)(WebCoreLoadUrl)
+//   -6  no document
+// ============================================================================
+
 #pragma once
+
 #include <cstdint>
 
+#ifdef __cplusplus
 extern "C" {
+#endif
 
-// 把一段 UTF-8 HTML 渲染成 width×height 的像素缓冲(RGBA8888,白底不透明)。
-// outBuf 必须 >= width*height*4 字节。返回 0 成功,负数失败(见 WebCoreDriver.cpp 错误码)。
-int WebCoreRenderHtml(const char* utf8Html, int width, int height, uint8_t* outBuf);
+int WebCoreRenderHtml(const char* utf8Html, int w, int h, uint8_t* outRGBA);
 
-// Phase 1b 网络:加载真实 URL(curl + OpenSSL TLS 1.3)并渲染。返回 0 成功,负数失败
-// (-9 URL 非法 / -10 加载失败 / -11 30s 超时,其余同 WebCoreRenderHtml)。
-int WebCoreLoadUrl(const char* url, int width, int height, uint8_t* outBuf);
+int WebCoreLoadUrl(const char* url, int w, int h, uint8_t* outRGBA);
 
-// 给 curl/OpenSSL 注入 CA 根证书包(PEM)。App Container 沙箱拿不到 Windows
-// 系统证书库,不调用它则所有 HTTPS(TLS 1.3)握手都会因服务器证书校验失败而断。
-// 须在首个 WebCoreLoadUrl() 之前调用一次;path 是 cacert.pem 的 UTF-8 路径。
+// Point the curl/OpenSSL backend at a CA-certificate bundle (PEM) so HTTPS
+// (TLS 1.3) server certificates can be verified inside the App Container, which
+// has no access to the Windows system trust store. Call once before the first
+// WebCoreLoadUrl(); `path` is a UTF-8 filesystem path to a cacert.pem.
 void WebCoreSetCACertPath(const char* path);
 
-// Apotheosis: 内存压力释放(防 OOM)。监听 UWP MemoryManager 内存事件,到高水位时经引擎线程调。
+// In-memory CA blob variant (CURLOPT_CAINFO_BLOB). App Container blocks OpenSSL's
+// file-based CA loading (curl 77 even on a readable file), so on device this is
+// the one that works. `data` = raw cacert.pem bytes; call before the first load.
+void WebCoreSetCACertBlob(const uint8_t* data, int len);
+
+// The Public Suffix List, as the bytes of the publicsuffix.org data file. Same
+// reason as the CA blob: the engine cannot reach the install directory, so the
+// harness reads the packaged file and passes it in. Without it the engine has
+// no way to tell a registry apart from a site, and treats every host as its own
+// registrable domain - which silently breaks every cookie a site sets on one
+// subdomain and reads on another. Call before the first load; returns the
+// number of rules parsed (0 = no list, old behaviour).
+int WebCoreSetPublicSuffixListBlob(const uint8_t* data, int len);
+
+// Explicit cookie-jar SQLite path. UNSAFE on device as of 2026-07-03 (crashes —
+// SQLite's Win32 VFS null-derefs opening a real file in this ARM32 UWP App
+// Container build; see project memory cookie-persistence). Do not call; kept
+// only so the entry point exists once the underlying bug is fixed.
+void WebCoreSetCookieJarPath(const char* path);
+
+// Cookie persistence path (JSON Lines, one cookie per line). The in-memory jar
+// itself stays ":memory:" (proven stable); this is a side-channel snapshot the
+// engine reads/writes itself, bypassing SQLite's real-file open() entirely.
+// Must be called before the first engine call; unset/empty = not persisted
+// (never crashes). `path` is a UTF-8 filesystem path.
+void WebCoreSetCookieJsonPath(const char* path);
+
+// Write current persistent (non-session, has an expiry) cookies to the JSON
+// Lines path. Call when the app is about to background/suspend (UWP can kill
+// a suspended app without notice). Engine-thread call.
+void WebCoreFlushCookiesToDisk();
+
+// ---- 0.2.0 Web Platform baseline: profile storage ----
+// Browser profile root (LocalState\profile). localStorage lands in
+// <profile>\storage, IndexedDB in <profile>\indexeddb. Call before the first
+// page is created; unset = both fall back to process-lifetime-only storage
+// (still functional, just not persisted). UTF-8 filesystem path.
+void WebCoreSetProfilePath(const char* path);
+
+// Flush localStorage to disk. StorageAreaImpl batches writes asynchronously, so
+// a UWP suspend without this loses the last batch. Call alongside
+// WebCoreFlushCookiesToDisk() when backgrounding.
+void WebCoreFlushStorage();
+
+// One line describing what storage actually does right now: persistent or not,
+// the real directories, and any SQLite syscall the App Container build is still
+// missing. The device has no console; this is how "did IndexedDB persist?" is
+// answered. Returns bytes written (excluding NUL).
+int WebCoreGetStorageDiag(char* buf, int len);
+
+// ---- M4 step 1: per-phase timing (opt-in) ----
+// Switch per-phase timing on and point it at a CSV file (one row per completed
+// nav/scroll/tick/click operation). The App Container only lets us write inside
+// LocalState and the engine cannot discover that path itself, so the harness
+// passes it in — and only when LocalState\perf.txt exists, mirroring the
+// imedebug.txt opt-in. Unset/"" = off (shipping default, one branch per probe).
+// Engine-thread call; call before the first navigation.
+void WebCoreSetPerfLogPath(const char* path);
+
+// Drain the in-memory perf ring to that CSV. Rows otherwise reach disk only on
+// navigation completion or when the ring fills, so call this before suspend
+// (UWP can terminate a suspended app without notice). No-op when off.
+void WebCorePerfFlush(void);
+// Apotheosis (0.2.6 诊断): 最近一次导航的人读性能摘要(total/ttfb/样式布局/渲染更新/绘制/帧数/子资源)。引擎线程调。
+int WebCorePerfLastNav(char* out, int len);
+
+// ---- crash reporting (always on) ----
+// Point the engine at a crash log file (LocalState\crash.txt) and arm all three
+// crash legs: the WTF crash hook (fires before the trap, carries the failing
+// assertion's file/line), a vectored exception handler for the fatal SEH codes,
+// and signal(SIGABRT) for abort(). Each crash appends a timestamped entry with
+// the reason, the host module base/size and up to 48 stack frames as
+// "module +0xRVA". Needed because Windows 10 Mobile's WER writes no dump for
+// fast-fail / breakpoint-trap terminations. Not opt-in. Engine-thread call;
+// call it as early as possible (SetupRuntimeEnv).
+void WebCoreSetCrashLogPath(const char* path);
+
+// Append one "reason:" line plus the current stack to that crash log from outside the
+// engine. The harness runs on its own CRT instance (C++/CX, MSVC v143, exceptions on),
+// so the engine's terminate/new/invalid-parameter/purecall handlers never see the
+// harness' own fatal paths — Application::UnhandledException and its std::terminate use
+// this instead, so those aborts stop looking like a silent OS memory kill. No-op until
+// WebCoreSetCrashLogPath() has run. Callable from any thread, including a dying one.
+void WebCoreCrashNote(const char* reason);
+
+// ---- network resolve mode ----
+// Force the curl backend to resolve names to IPv4 only (1) or let it use whatever
+// the resolver returns (0, the default). The phone has global IPv6 addresses and on
+// some links the v6 path is a black hole: first contact with a host then stalls for
+// 14-22 s before the main resource commits, while an immediate reload takes 0.4 s.
+// Takes effect for the next request, so call it before starting a navigation.
+// Measure the effect with the net_dns/net_connect/net_tls/net_ttfb columns of the
+// perf CSV. Engine-thread call.
+void WebCoreSetIPv4Only(int enable);
+
+// ---- diagnostics / page metadata (written by the render/load paths) ----
+// Each copies a NUL-terminated UTF-8 string into buf (<= len bytes) and returns
+// the number of bytes written (excluding NUL); empty string if nothing recorded.
+int WebCoreGetLastError(char* buf, int len);  // last failed load: curl code + desc + URL
+int WebCoreGetDiag(char* buf, int len);       // last render diag (url/title/sizes/loads/res list)
+int WebCoreGetTitle(char* buf, int len);      // last loaded page title
+
+// Download `url` to `outPath` via a standalone curl handle (no render; reuses the
+// CA blob). Returns the HTTP status code (e.g. 200) or negative on failure.
+int WebCoreDownload(const char* url, const char* outPath);
+
+// Link hit-table extracted at render time: count + rect (bitmap coords) and URL
+// of entry i. Returns 1 on success, 0 if i is out of range.
+int WebCoreGetLinkCount();
+int WebCoreGetLink(int i, int* x, int* y, int* w, int* h, char* url, int len);
+
+// Apotheosis: 内存压力释放(防 OOM)。harness 监听 UWP 内存事件,到高水位时经引擎线程调。
 // critical: 1=严重,0=温和。一把清资源/后退页面缓存 + JSC GC + 字体缓存。
 void WebCoreReleaseMemory(int critical);
 
@@ -71,135 +199,21 @@ void WebCoreSetMemoryPressure(int level);
 // 清除全部 cookie(含持久 SQLite 库里的)。设置页"清除数据"用;引擎线程调。
 void WebCoreClearCookies();
 
-// 用内存 PEM blob 注入 CA 根证书(CURLOPT_CAINFO_BLOB)。App Container 沙箱挡 OpenSSL
-// 的文件式 CA 加载(即便文件可读也 curl 77),故设备上必须用 blob 绕开文件 I/O。
-// data 是 cacert.pem 原始字节,须在首个 WebCoreLoadUrl 之前调用。
-void WebCoreSetCACertBlob(const uint8_t* data, int len);
-
-// 公共后缀表(publicsuffix.org 数据文件原始字节)。理由同 CA blob:引擎读不到安装目录,
-// 由 harness 读出打包文件再传入。没有它引擎分不清"注册局"与"站点",会把每个主机名当成
-// 自己的 registrable domain —— 于是站点在一个子域 Set-Cookie、在另一个子域读的 cookie
-// 全被丢弃(存与读两条路都按 registrable domain 过滤)。须在首个 WebCoreLoadUrl 之前调用;
-// 返回解析到的规则条数(0 = 没有表,退回旧行为)。
-int WebCoreSetPublicSuffixListBlob(const uint8_t* data, int len);
-
-// ⚠ 设 cookie jar 落盘 SQLite 路径。2026-07-03 真机验证会崩(这个 ARM32 UWP App Container 构建
-// 的 SQLite Win32 VFS 打开真实文件时空指针,详见项目记忆 cookie-persistence)。harness 不要调用
-// 这个 —— 保留仅为坑修好后备用。cookie 持久化改用下面两个(JSON Lines 旁路快照)。
-void WebCoreSetCookieJarPath(const char* path);
-
-// cookie 的 JSON Lines 持久化文件路径(每行一个 cookie 对象;jar 本身固定 ":memory:",不碰
-// SQLite 真实文件 open())。须在首个引擎调用之前调(SetupRuntimeEnv 里);
-// 空/未调用则不持久化(不崩)。path 是 UTF-8 文件系统路径。
-void WebCoreSetCookieJsonPath(const char* path);
-
-// 把当前 jar 里的持久(有过期时间、非会话)cookie 写回 JSON Lines 文件。app 切后台(即将被
-// UWP 挂起/可能被系统直接终止)时调,引擎线程串行。
-void WebCoreFlushCookiesToDisk();
-
-// ---- 0.2.0 Web Platform baseline:profile 存储 ----
-// 浏览器 profile 根目录(LocalState\profile)。localStorage 落 <profile>\storage,
-// IndexedDB 落 <profile>\indexeddb。须在第一次建页面之前调(SetupRuntimeEnv 里,
-// 和 WebCoreSetCookieJsonPath 一起);不调 = 两者都退化为进程内非持久(能用,关掉就没了)。
-void WebCoreSetProfilePath(const char* path);
-
-// localStorage 落盘。StorageAreaImpl 平时攒批异步刷,UWP 挂起前不刷会丢最后一批写入。
-// 切后台时和 WebCoreFlushCookiesToDisk 一起调。
-void WebCoreFlushStorage();
-
-// 存储子系统实况一行:是否真持久化、实际目录、SQLite 还缺哪些系统调用。
-// 真机没有控制台,"IndexedDB 到底落没落盘"只能靠这行看。返回写入字节数(不含 NUL)。
-int WebCoreGetStorageDiag(char* buf, int len);
-
-// ---- M4 step 1: per-phase timing (opt-in) ----
-// Switch per-phase timing on and point it at a CSV file (one row per completed
-// nav/scroll/tick/click operation). The App Container only lets us write inside
-// LocalState and the engine cannot discover that path itself, so the harness
-// passes it in — and only when LocalState\perf.txt exists, mirroring the
-// imedebug.txt opt-in. Unset/"" = off (shipping default, one branch per probe).
-// Engine-thread call; call before the first navigation.
-void WebCoreSetPerfLogPath(const char* path);
-
-// Drain the in-memory perf ring to that CSV. Rows otherwise reach disk only on
-// navigation completion or when the ring fills, so call this before suspend
-// (UWP can terminate a suspended app without notice). No-op when off.
-void WebCorePerfFlush(void);
-// Apotheosis (0.2.6 诊断): 最近一次导航的人读性能摘要(total/ttfb/样式布局/渲染更新/绘制/帧数/子资源)。引擎线程调。
-int WebCorePerfLastNav(char* out, int len);
-
-// ---- crash reporting (always on) ----
-// Point the engine at a crash log file (LocalState\crash.txt) and arm all three
-// crash legs: the WTF crash hook (fires before the trap, carries the failing
-// assertion's file/line), a vectored exception handler for the fatal SEH codes,
-// and signal(SIGABRT) for abort(). Each crash appends a timestamped entry with
-// the reason, the host module base/size and up to 48 stack frames as
-// "module +0xRVA". Needed because Windows 10 Mobile's WER writes no dump for
-// fast-fail / breakpoint-trap terminations. Not opt-in. Engine-thread call;
-// call it as early as possible (SetupRuntimeEnv).
-void WebCoreSetCrashLogPath(const char* path);
-
-// Append one "reason:" line plus the current stack to that crash log from outside the
-// engine. The harness runs on its own CRT instance (C++/CX, MSVC v143, exceptions on),
-// so the engine's terminate/new/invalid-parameter/purecall handlers never see the
-// harness' own fatal paths — Application::UnhandledException and its std::terminate use
-// this instead, so those aborts stop looking like a silent OS memory kill. No-op until
-// WebCoreSetCrashLogPath() has run. Callable from any thread, including a dying one.
-void WebCoreCrashNote(const char* reason);
-
-// ---- network resolve mode ----
-// Force the curl backend to resolve names to IPv4 only (1) or let it use whatever
-// the resolver returns (0, the default). The phone has global IPv6 addresses and on
-// some links the v6 path is a black hole: first contact with a host then stalls for
-// 14-22 s before the main resource commits, while an immediate reload takes 0.4 s.
-// Takes effect for the next request, so call it before starting a navigation.
-// Measure the effect with the net_dns/net_connect/net_tls/net_ttfb columns of the
-// perf CSV. Engine-thread call.
-void WebCoreSetIPv4Only(int enable);
-
-// 取回上次 WebCoreLoadUrl 失败时记录的网络错误(curl 错误码 + 描述 + URL)。
-// 写入 buf(最多 len 字节,含 NUL),返回写入字节数(不含 NUL)。无错误则为空串。
-int WebCoreGetLastError(char* buf, int len);
-
-// 取上次 WebCoreLoadUrl 的渲染诊断(最终URL/标题/内容尺寸/非白像素数),用于定位白屏。
-int WebCoreGetDiag(char* buf, int len);
-
-// 取最近加载页面的标题(UTF-8),供历史/书签显示。返回写入字节数。
-int WebCoreGetTitle(char* buf, int len);
-
-// 取最近渲染文档的最终 URL(UTF-8)。会话内点击触发导航后,用它检测 URL 变化以同步地址栏/前进后退栈。
-int WebCoreGetUrl(char* buf, int len);
-
-// 直接下载 url 到 outPath(独立 curl,不渲染,复用 CA blob)。成功返回 HTTP 状态码(如 200),
-// 失败返回负数。须先经一次网络初始化(SetupRuntimeEnv 已触发 curl 全局初始化)。
-int WebCoreDownload(const char* url, const char* outPath);
-
-// 当前页链接命中表(渲染时提取):数量 + 取第 i 个的矩形(位图坐标)和 URL。
-// 用于网页点击交互:UI 点击时判断点中哪个链接矩形 → 导航。
-int WebCoreGetLinkCount();
-int WebCoreGetLink(int i, int* x, int* y, int* w, int* h, char* url, int len);
-
-// ---- 常驻交互会话(live interactive session)----------------------------------
-// 把一次性快照升级为常驻 Page:点击转发真实鼠标事件(按钮/表单/链接统一),滚动触发懒加载图片。
-// 必须串行在单引擎线程上调用。返回 0 成功,负数失败(-12 无会话 / -13 忙 / -14 帧丢失,其余同上)。
-
-// 加载 URL 并建立常驻会话(替代 WebCoreLoadUrl,用于需要后续交互的页面)。
-int WebCoreSessionLoad(const char* url, int width, int height, uint8_t* outBuf);
-
-// 关闭并销毁当前会话(导航到本地主页 / 挂起时调用)。
+// ---- live interactive session (persistent Page + event forwarding) ----
+// Load a URL into a persistent session, then forward clicks/scroll to the live
+// document so buttons/forms/links work via real events and lazy images load on
+// scroll. All calls must be serialized on the single engine thread. 0 on success.
+int WebCoreSessionLoad(const char* url, int w, int h, uint8_t* outRGBA);
 void WebCoreCloseSession();
-
-// 在 (x,y)(位图/视口像素)点一下:命中测试 + 默认动作(导航/提交/onclick),然后重绘到 outBuf。
-int WebCoreClickAt(int x, int y, uint8_t* outBuf);
-
-// Apotheosis(双击缩放,2026-09-09):同 WebCoreClickAt,但派发的 mousedown/mouseup 带 clickCount
-// (而非隐含的 1)——WebCore 的 EventHandler 在释放事件 clickCount>=2 时,'click' 后接着派发
-// 'dblclick'(见 PlatformMouseEvent::clickCount())。用于 harness 判定"不缩放"(WebCoreTapPolicyAt
-// 答 not-zoomable)的第二次点击,让双击语义的页面仍能收到真正的 dblclick。WebCoreClickAt 不变
-// (等价于 clickCount=1)。
-int WebCoreClickAtCount(int x, int y, int clickCount, uint8_t* outBuf);
-
-// 垂直滚动 dy 像素(正=向下),触发懒加载图片后重绘到 outBuf。
-int WebCoreScrollBy(int dx, int dy, uint8_t* outBuf);   // dx>0 右,dy>0 下
+int WebCoreClickAt(int x, int y, uint8_t* outRGBA);   // (x,y) = bitmap/viewport px
+// Apotheosis (double-tap zoom, 2026-09-09): like WebCoreClickAt, but the dispatched mousedown/
+// mouseup carry clickCount instead of an implicit 1 — WebCore's EventHandler dispatches 'dblclick'
+// after 'click' when the release's clickCount is >= 2 (PlatformMouseEvent::clickCount()). Used for
+// the second tap of a double tap the harness decided is NOT a zoom (WebCoreTapPolicyAt said
+// not-zoomable), so the page still gets the real dblclick a two-click page expects.
+// WebCoreClickAt above is unchanged (equivalent to clickCount=1).
+int WebCoreClickAtCount(int x, int y, int clickCount, uint8_t* outRGBA);
+int WebCoreScrollBy(int dx, int dy, uint8_t* outRGBA); // dx>0 right, dy>0 down
 
 // Apotheosis (instant pan): where the main frame actually is. The harness applies a touch pan to
 // the presenting XAML element immediately and only needs the engine to tell it how far it has
@@ -212,39 +226,46 @@ int WebCoreScrollBy(int dx, int dy, uint8_t* outBuf);   // dx>0 右,dy>0 下
 // there is no session/view. Engine thread only.
 int WebCoreGetScrollState(int* x, int* y, int* contentW, int* contentH, int* viewW, int* viewH);
 
-// 嵌套滚动支持(cookie 同意浮层/模态框/iframe):WebCoreScrollBy 只会移动主帧,这两个走 WebCore
-// 真实的 wheel 事件滚动目标查找,让点下方的 overflow:auto 容器/模态框/iframe 自己滚,而不是滚到
-// 它背后的整页。(x,y) = 位图/视口像素,同 WebCoreClickAt/WebCoreScrollBy 约定。
+// Nested-scroll support (cookie-consent overlays, modals, iframes): unlike WebCoreScrollBy, which
+// only ever moves the main frame, these route through WebCore's real wheel-event scroll targeting
+// so an overflow:auto container/modal/iframe under the point scrolls instead of the page behind it.
+// (x,y) = viewport/bitmap px, same convention as WebCoreClickAt/WebCoreScrollBy.
 //
-// WebCoreIsScrollableAt:只命中测试,不派发事件。点下方有可滚动祖先(或 iframe)返回 1,否则 0。
-// 手势开始时调一次,决定走这条路还是直接 WebCoreScrollBy 快路径。
+// WebCoreIsScrollableAt: hit test only, no event dispatched. Returns 1 if a scrollable ancestor
+// (or an iframe) is under the point, else 0. Call at gesture start to pick the fast path.
 int WebCoreIsScrollableAt(int x, int y);
-// WebCoreWheelAt:派发一次合成 wheel 事件(delta 像素,granularity=ScrollByPixelWheelEvent)。
-// phase:0 none / 1 began / 2 changed / 3 ended(此 port 上目前不生效,见 WebCoreDriver.cpp)。
-// 返回 1 = 被嵌套滚动体消费(下一个 delta 继续调它),0 = 未消费(无论哪种情况主帧滚动位置都不变——
-// 返回 0 时 harness 必须自己为这个 delta 调 WebCoreScrollBy)。返回 1 时已经把这帧合成/呈现进 outBuf
-// (与 WebCoreScrollBy 相同的 paintToRGBA 调用)——harness 不需要再补一次呈现才能看到嵌套滚动体动。
-int WebCoreWheelAt(int x, int y, float deltaX, float deltaY, int phase, uint8_t* outBuf);
+// WebCoreWheelAt: dispatches one synthetic wheel event (delta in px, granularity
+// ScrollByPixelWheelEvent). phase: 0 none / 1 began / 2 changed / 3 ended (currently inert on this
+// port, see WebCoreDriver.cpp). Returns 1 if a nested scroller consumed it (call again with the
+// next delta), 0 if it did not (main-frame scroll position is left unchanged either way — on a 0
+// return the harness must call WebCoreScrollBy itself for this delta). On a 1 return this already
+// composited/presented the frame into outRGBA (same paintToRGBA call WebCoreScrollBy makes) — the
+// harness does not need a follow-up call to see the nested scroller move.
+int WebCoreWheelAt(int x, int y, float deltaX, float deltaY, int phase, uint8_t* outRGBA);
 
-// Apotheosis(拖拽即指针事件):地图类控件(Leaflet / MapLibre / canvas 应用)
-// 自己监听 pointerdown/mousedown 并移动自身内容,不滚动任何可滚动盒 —— 对它们来说
-// WebCoreScrollBy 和 WebCoreWheelAt 都是错的路。下面两个导出让 harness 把这种手势按真实鼠标
-// 拖拽交给页面。
+// Apotheosis (drag as pointer events): map widgets (Leaflet, MapLibre, canvas
+// apps) pan by handling pointerdown/mousedown themselves and moving their own content — they
+// scroll no scrollable box, so neither WebCoreScrollBy nor WebCoreWheelAt does anything useful
+// over them. These two let the harness hand such a gesture to the page as a real mouse drag.
 //
-// WebCoreWantsDragAt:仅命中测试,不派发事件,足够便宜可在手势开始时调(与 WebCoreIsScrollableAt
-// 并列)。返回 1 = (x,y) 下的元素或其 <body> 以下的祖先带 pointerdown/mousedown/touchstart/
-// pointermove/touchmove 监听器、是 <canvas>、或 CSS touch-action 非 auto/manipulation。
+// WebCoreWantsDragAt: hit test only, no event dispatched, cheap enough for gesture start (run it
+// next to WebCoreIsScrollableAt). 1 = the element under (x,y) or an ancestor below <body> has a
+// pointerdown/mousedown/touchstart/pointermove/touchmove listener, is a <canvas>, or sets CSS
+// touch-action to something other than auto/manipulation.
 int WebCoreWantsDragAt(int x, int y);
-// WebCoreDragAt:把手势按左键鼠标拖拽派发(引擎会一并生成 pointerdown/pointermove/pointerup)。
-// phase:0=按下 / 1=移动 / 2=抬起 / 3=取消;(x,y)=视口/位图像素,同 WebCoreClickAt/WebCoreScrollBy。
-// 返回 1 = 这次手势归页面所有,0 = 不归(harness 把余下手势走回正常滚动路径)。只有按下这一步做决定:
-// 按下未被消费时 phase 1-3 直接返回 0 且不派发,故某个页面不理会的 mousemove 不会在拖拽中途把手势夺走。
-// Apotheosis (2026-09-04): the press is owned when EITHER the engine reported it handled OR the
-// point is still a drag widget (the WebCoreWantsDragAt walk, re-run here). A map that listens for
-// pointerdown without calling preventDefault - a map site does exactly that - answers "not
-// handled" and would otherwise lose the whole gesture on its first event.
-// 返回 1 时已按 WebCoreWheelAt 的方式合成/呈现到 outBuf;outBuf 可为 null(则不呈现)。
-int WebCoreDragAt(int phase, int x, int y, uint8_t* outBuf);
+// WebCoreDragAt: dispatch the gesture as a left-button mouse drag (which the engine also turns
+// into pointerdown/pointermove/pointerup). phase: 0 = press, 1 = move, 2 = release, 3 = cancel;
+// (x,y) = viewport/bitmap px, same convention as WebCoreClickAt/WebCoreScrollBy. Returns 1 while
+// the page owns the gesture, 0 when it does not (the harness then routes the rest of the gesture
+// down its normal scroll path). Only the press decides: phases 1-3 are inert — and answer 0 —
+// unless the press was consumed, so an individual mousemove that the page ignores never yanks the
+// gesture away mid-pan. Apotheosis (2026-09-04): the press is owned when EITHER the engine reported
+// it handled OR the point is still a drag widget (the WebCoreWantsDragAt walk, re-run here). A map
+// that listens for pointerdown without calling preventDefault - a map site does exactly that -
+// answers "not handled" and would otherwise lose the whole gesture on its first event. On a 1
+// return the frame is already composited/presented into outRGBA the
+// way WebCoreWheelAt does it; outRGBA may be null (no present attempted).
+int WebCoreDragAt(int phase, int x, int y, uint8_t* outRGBA);
 // Apotheosis (map-site pin, 2026-09-06): LONG PRESS on a drag widget. ENABLE_TOUCH_EVENTS is 0
 // on this port and nothing synthesises Touch/Pointer input, so a touch long press cannot be
 // delivered as one; what this does deliver is everything a page can key a long press off with a
@@ -260,26 +281,41 @@ int WebCoreDragAt(int phase, int x, int y, uint8_t* outBuf);
 #define WEBCORE_LONGPRESS_CONTEXTMENU      1   // also send a 'contextmenu' event after the release
 #define WEBCORE_LONGPRESS_NO_CLICK         2   // suppress the DOM 'click' the release would fire
 #define WEBCORE_LONGPRESS_DRAG_WIDGET_ONLY 4   // do nothing unless (x,y) is a canvas / touch-action:none
-int WebCoreLongPressAt(int x, int y, int holdMs, int flags, uint8_t* outBuf);
+int WebCoreLongPressAt(int x, int y, int holdMs, int flags, uint8_t* outRGBA);
 
 // ---- Clipboard (Apotheosis 2026-10-08) --------------------------------------
-// The engine's copy/paste chain was a hard no-op (platform/win/PasteboardWin.cpp
-// and WCDataObject.cpp are dropped: OLE IDataObject is unavailable under
-// WINAPI_FAMILY_APP). The WebCore editing chain itself works - execCommand('copy')
-// reaches Editor::performCutOrCopy - it just had nowhere to go. The stubs now talk
-// to an engine-thread clipboard buffer; the shell shuttles it in/out through these
-// calls because UWP's DataPackage is UI-thread-only. The engine never blocks.
+// The engine's own copy/paste path used to be a hard no-op (stubs-pasteboard.cpp):
+// platform/win/PasteboardWin.cpp and WCDataObject.cpp are dropped from
+// PlatformWinUWP.cmake (OLE IDataObject is unavailable under WINAPI_FAMILY_APP), so
+// every Pasteboard::write*/read* was an empty stub. The WebCore editing chain itself
+// IS compiled and works - execCommand('copy') reaches Editor::performCutOrCopy,
+// paste reaches Editor::paste - it just had nowhere to go.
+//
+// This adds the "somewhere": an ENGINE-THREAD-LOCAL U8 clipboard buffer that the
+// stubs now talk to. The real system clipboard lives behind UWP's DataPackage,
+// which only the UI thread may touch, so the shell shuttles the buffer in and out
+// through these two calls (from its own thread, before/after it uses DataPackage).
+// The engine never blocks and never waits on the UI thread.
 //
 //   copy:    WebCoreCopySelection()  -> engine writes the buffer
 //            shell: WebCoreClipboardGetText() -> DataPackage::SetText
 //            paste:  shell: DataPackage::GetView -> text
 //                    -> WebCoreClipboardSetText(text)
 //                    -> WebCorePaste()
-// WebCoreClipboardGetText returns the byte length written, or -1 when empty.
+//
+// WebCoreCopySelection / WebCorePaste / WebCoreSelectAll drive the live document
+// (Editor::performCutOrCopy / Editor::paste / FrameSelection::selectAllOnDocument);
+// the clipboard buffer itself is drained/filled by the Get/Set pair. Returns 0 on
+// success, negative on the usual driver error codes (no session, busy, ...).
 int WebCoreCopySelection(void);
 int WebCoreCutSelection(void);
 int WebCorePaste(void);
 int WebCoreSelectAll(void);
+
+// Engine-thread clipboard buffer accessors (UTF-8). Both are engine-thread only:
+// the shell reaches them through the C ABI the harness already serializes onto the
+// single engine thread. WebCoreClipboardGetText returns the byte length written, or
+// -1 when the buffer is empty; WebCoreClipboardSetText replaces the buffer.
 int WebCoreClipboardGetText(char* outUtf8, int cap);
 int WebCoreClipboardSetText(const char* utf8);
 
@@ -289,75 +325,86 @@ int WebCoreClipboardSetText(const char* utf8);
 // scales a picture of the map (old tiles, blurry labels), while the wheel asks the map itself for
 // the next zoom level around the point. Returns 1 if the page took the wheel, 0 if nothing did (the
 // caller can then fall back to page zoom). The document never scrolls on this path; on a 1 the
-// frame is already composited/presented into outBuf the way WebCoreWheelAt does it.
-int WebCoreZoomWheelAt(int x, int y, int notches, uint8_t* outBuf);
+// frame is already composited/presented into outRGBA the way WebCoreWheelAt does it.
+int WebCoreZoomWheelAt(int x, int y, int notches, uint8_t* outRGBA);
 
-// Apotheosis(双击缩放,2026-09-09):命中测试 (x,y),回答这里的第二次点击是否应该缩放页面
-// (Safari/移动 Chrome 语义)而不是被当成普通的第二次点击转发。只读:不派发事件,不改会话/文档
-// 状态——可以在 harness 还没决定要不要真的点击之前,在"按住"路径里调用。
-// 判定顺序(0.1.9.39;规则 1 在 0.1.9.50 改为对称):
-//   1. 当前页面尺度与 1:1 相差超过 5%(两个方向都算,= harness 自己的捏合缩放)一律优先:
-//      zoomable=1、target=1.0,不管页面怎么说。双击必须永远能撤销一次捏合,否则关掉双击
-//      缩放的页面会把用户困在捏合留下的尺度上。两个方向都要,因为本 harness 也会提交小于
-//      1:1 的页面尺度(捏出去的"总览"视图,最低 0.5);0.1.9.50 之前这条只判 > 1.05,于是
-//      在用户捏小了的页面上双击会落到规则 2-5 被拒绝。
-//   2. 页面整体关闭缩放(viewport meta user-scalable=no,或 minimum-scale == maximum-scale):不缩放。
-//   3. 页面是移动端优化的(viewport meta 带 width=device-width,或未设 width 而 initial-scale=1)
-//      —— 即 Blink 的 WebViewImpl::ShouldDisableDesktopWorkarounds():不缩放。这条让所有规矩的
-//      移动站点点击立即生效,因为 harness 只在真可能缩放的地方才付双击等待间隔。
-//   4. 命中元素或某个祖先的 CSS touch-action 非 auto:不缩放(镜像 WebKit 自己的
-//      Element::allowsDoubleTapGesture(),此 port 因 ENABLE_TOUCH_EVENTS=0 被编掉,故在此重新实现)。
-//   5. 否则可缩放,目标尺度见下。
-//   *outZoomable:1=此处适用双击缩放,0=不适用(含无会话/未命中,也含"目标尺度不会真的改变
-//     页面"的情况,见下)。
-//   *outTargetScale:双击应动画到的尺度(已钳到本驱动自己的双击区间 [1.25, 3.0],是
-//     WebCoreSetPageScale [0.5, 6.0] 的子区间):上面第 1 条答 1.0;否则答 视口宽度 /
-//     (命中点最内层、宽度小于布局视口 90% 的块级祖先宽度)(Safari 的"缩放到栏"启发式),
-//     没有这样的祖先时答 2.0。宽度在视口 90% 以上的块是页面自己的整宽布局而非栏,缩放到它
-//     等于什么都不做。与当前尺度相差不到 ±5% 的目标永远不会被返回——那种情况改答 zoomable=0,
-//     调用方转发 clickCount=2 的点击,而不是动画到原地。
-//   *outAnchorX/*outAnchorY:这次缩放的锚点,同 WebCoreSetPageScale 的 focalX/focalY 一样的
-//     视口/位图像素。*outAnchorY 总是 y(点击 y)——竖直方向点击点始终留在手指下。*outAnchorX
-//     是 x(点击 x),除非目标尺度来自上面的"缩放到栏"分支——此时是那一栏自己的水平中心
-//     (0.1.9.40):Safari 把窄栏居中显示,而不是锚定在点击点在栏内的任意位置,否则点在栏边缘
-//     会缩放到栏的大半截跑出屏幕外。两种情况下调用方都不必在按住间隔内自己记着点击点。
-//     规则 1 的"已缩小"那一半(0.1.9.51)另有一条:*outAnchorX 是能让这次回到 1:1 的缩放
-//     正好停在提交后真实滚动位置上的那个锚点——总览位置下就是文档自己的左边缘(0),于是内容
-//     只是向右长大直到填满屏幕,而不是绕着点击点长大、再因为 WebCoreSetPageScale 钳掉它要不到
-//     的滚动位置而横向滑一下。不需要钳的点击(1:1 下仍比视口宽的页面)照旧用点击 x。此时
-//     *outAnchorY 同样是点击 y:放大回去在竖直方向永远不需要修正。
-//   *outReason (0.1.9.40):上面哪条规则决定了答案——0=可缩放(已算出 target),1=已放大
-//     (规则 1),7=已缩小(规则 1 的另一半,0.1.9.50),2=命中点下无元素,3=viewport 关闭缩放
-//     (规则 2),4=移动端优化 viewport(规则 3),5=touch-action opt-out(规则 4),6=目标与当前
-//     尺度相差不到 5%(不值得动画)。负数(错误)返回时留 -1——无会话/忙/无文档不是规则决定。
-// 任一输出指针可为 null。返回 kOK,或负数错误(无会话时也把 outZoomable 置 0,只查它的调用方
-// 照样安全降级)。
+// Apotheosis (double-tap zoom, 2026-09-09): hit-test (x,y) and answer whether a double tap there
+// should zoom the PAGE (Safari/mobile-Chrome semantics) instead of the harness treating it as two
+// ordinary clicks. Read-only: no event dispatched, no session/frame mutated, safe to call from the
+// tap-hold path before deciding whether to actually click.
+// The rules, in the order they are applied (0.1.9.39, rule 1 made symmetric in 0.1.9.50):
+//   1. Current page scale more than 5 % away from 1:1 IN EITHER DIRECTION — the harness' own
+//      pinch zoom — always wins: zoomable=1, target 1.0, whatever the page says. A double tap
+//      must always be able to undo a pinch, or an opted-out page traps the user at the scale the
+//      pinch left behind. Both directions, because this harness commits page scales below 1:1
+//      too (the pinch-out overview, down to 0.5); until 0.1.9.50 the test was scale > 1.05 and a
+//      double tap on a page the user had zoomed OUT fell through to rules 2-5 and was refused.
+//   2. Page opted out of zooming altogether (viewport meta user-scalable=no, or
+//      minimum-scale == maximum-scale): not zoomable.
+//   3. Page is mobile-optimised (viewport meta with width=device-width, or width unset with
+//      initial-scale=1) — Blink's WebViewImpl::ShouldDisableDesktopWorkarounds(): not zoomable.
+//      This is what makes taps immediate on every well-behaved mobile site, because the harness
+//      only pays the double-tap hold interval where a zoom could actually happen.
+//   4. CSS touch-action other than auto on the hit element or an ancestor: not zoomable
+//      (mirrors WebKit's own Element::allowsDoubleTapGesture(), compiled out on this port
+//      since ENABLE_TOUCH_EVENTS=0).
+//   5. Otherwise zoomable, at the target below.
+//   *outZoomable: 1 if double-tap-to-zoom applies here, 0 otherwise (including no session and
+//     no hit, and including a target that would not move the page, see below).
+//   *outTargetScale: the scale a double tap here should animate to, clamped to the driver's own
+//     [1.25, 3.0] double-tap range (a subrange of WebCoreSetPageScale's [0.5, 6.0]): 1.0 in
+//     case 1 above; otherwise viewport-width / (width of the innermost block-level ancestor of
+//     the hit point narrower than 90 % of the layout viewport — Safari's "zoom to column"
+//     heuristic), or 2.0 when no such ancestor exists. A block from 90 % of the viewport upwards
+//     is the page's own full-width layout, not a column: zooming to it is a no-op.
+//     A target within ±5 % of the current scale is never returned - it is reported as
+//     zoomable=0 instead, so the caller forwards a clickCount=2 click rather than animating
+//     to where it already is.
+//   *outAnchorX/*outAnchorY: the anchor for that zoom, in the same viewport/bitmap px
+//     WebCoreSetPageScale takes as focalX/focalY. *outAnchorY is always y (the tap y): vertically
+//     the tapped point stays under the finger. *outAnchorX is x (the tap x) UNLESS the target
+//     scale came from the "zoom to column" case above, in which case it is the column's own
+//     horizontal centre (0.1.9.40) — Safari centres a narrower column instead of anchoring on
+//     wherever inside it was tapped, so a tap near a column's edge does not zoom in with most of
+//     the column off-screen. The caller does not have to remember the tap point across the hold
+//     interval either way.
+//     In the zoomed-OUT half of rule 1 (0.1.9.51) *outAnchorX is instead the anchor that makes the
+//     zoom back to 1:1 END on the scroll position the commit will settle on — the document's own
+//     left edge (0) at the usual overview position, so the content simply grows to the right until
+//     it fills the screen instead of growing around the tap point and then sliding sideways once
+//     WebCoreSetPageScale clamps the position it was asked for. A tap that needs no clamping (a
+//     page still wider than the viewport at 1:1) keeps the tap x. *outAnchorY is the tap y here
+//     too: zooming back UP can never need a vertical correction.
+//   *outReason (0.1.9.40): which rule above decided the answer — 0 = zoomable (target computed),
+//     1 = zoomed IN (rule 1), 7 = zoomed OUT (rule 1's other half, 0.1.9.50), 2 = no element under
+//     the point, 3 = viewport disables zoom (rule 2), 4 = mobile-optimised viewport (rule 3),
+//     5 = touch-action opt-out (rule 4), 6 = target within 5% of the current scale (not worth
+//     animating). Left at -1 on a negative (error) return — no session/busy/no document, not a
+//     rule decision.
+// Any output pointer may be null. Returns kOK, or a negative error (no session prints
+// outZoomable=0 as well, so a caller that only checks *outZoomable still degrades safely).
 int WebCoreTapPolicyAt(int x, int y, int* outZoomable, float* outTargetScale, int* outAnchorX, int* outAnchorY, int* outReason);
 
-// Apotheosis(链接上下文菜单 0.1.9.42):(x,y)(视口/位图像素,同 WebCoreClickAt)处最内层 <a> 的
-// 绝对 http(s) 链接,UTF-8 + NUL 写入 outUrl。只读:不派发事件、不改会话/帧,可在长按路径上先问
-// 它,再决定这次长按是弹菜单还是照旧转发给页面。
-//   * 命中测试与 WebCoreTapPolicyAt 走同一套客户端像素换算,故任意页面缩放下都正确,并且尊重
-//     z-order —— 这是 WebCoreGetLink 那张矩形表做不到的(它是布局后的一次性采集,看不见谁盖住了链接)。
-//   * 可拖拽控件优先:命中 canvas / touch-action:none(dragWidgetAtPoint,与捏合/拖拽/点击路由同一
-//     探针)时报"无链接",那里的长按行为一如既往 —— 该手势归控件所有。
-//   * 只报 http(s);javascript:、mailto:、纯 fragment 锚点新标签页打不开。
-// 返回 1=已写入链接,0=此处无链接(outUrl 置空),负数=常规驱动错误(kErrNoSession/kErrBusy/
-// kErrNoDocument,或 cap 装不下 URL 时 kErrBadArgs)。
+// Apotheosis (link context menu, 0.1.9.42): the absolute http(s) href of the innermost <a> under
+// (x,y) (viewport/BITMAP px, WebCoreClickAt's convention), written UTF-8/NUL-terminated into
+// outUrl. Read-only: no event dispatched, no session or frame mutated, safe to call from the
+// long-press route before deciding whether the hold opens a menu or goes to the page.
+//   * The hit test goes through the same client-px conversion as WebCoreTapPolicyAt, so it is
+//     correct at any page scale, and it respects z-order - unlike the WebCoreGetLink rectangle
+//     table, which is a post-layout harvest that cannot see what covers a link.
+//   * A drag widget wins: over a canvas / touch-action:none element (dragWidgetAtPoint, the probe
+//     the pinch/drag/tap routes share) this reports no link, so a hold there keeps behaving as it
+//     always did - the widget owns that gesture.
+//   * Only http(s) is reported; javascript:, mailto: and fragment-only anchors are not openable.
+// Returns 1 = link written, 0 = no link here (outUrl emptied), negative = the usual driver errors
+// (kErrNoSession / kErrBusy / kErrNoDocument, or kErrBadArgs when cap is too small for the URL).
 int WebCoreLinkAt(int x, int y, char* outUrl, int cap);
 
-// 滚动停止后刷新链接命中表(滚动期间为提速跳过了链接提取)。轻量:仅布局+提取,不绘制。返回 0。
-int WebCoreSyncLinks();
-// 诊断:最近一次 WebCoreTypeText 的可编辑/聚焦/插入状态(排查"打字不进框")。
-int WebCoreEditDebug(char* out, int cap);
-
-// M4 捏合缩放:把页面缩放因子设为 scale(钳 [0.5,6.0]),以屏幕焦点 (focalX,focalY) 锚定,重栅格(文字清晰)后重绘到 outBuf。返回 0。
-int WebCoreSetPageScale(float scale, int focalX, int focalY, uint8_t* outBuf);
-// M4:当前页面缩放因子 ×1000(1000=1.0x)。
-int WebCoreGetPageScale();
-
-// 不交互,仅按当前会话状态重绘到 outBuf。
-int WebCoreSessionPaint(uint8_t* outBuf);
+int WebCoreSyncLinks();                // refresh link hit-table after scroll settles (layout+extract, no paint)
+int WebCoreEditDebug(char* out, int cap); // diag: last WebCoreTypeText canEdit/focus/insert state
+int WebCoreSetPageScale(float scale, int focalX, int focalY, uint8_t* outRGBA); // M4 pinch zoom: set pageScaleFactor anchored at focal
+int WebCoreGetPageScale();             // M4: current pageScaleFactor ×1000
+int WebCoreSessionPaint(uint8_t* outRGBA);
 
 // Apotheosis (landscape/rotation, 0.1.9.41): re-establish the engine viewport at w*h. Call it
 // whenever the presenting panel changes size - a device rotation is the case that matters, but a
@@ -400,77 +447,72 @@ int WebCoreSessionPaint(uint8_t* outBuf);
 //                     for the interaction entry points, not as a resize to retry.
 int WebCoreResize(int w, int h, int* outSurfaceW, int* outSurfaceH, uint8_t* outRGBA);
 
-// 视口底部被"引擎看不见的东西"遮住多少引擎像素——实为屏幕键盘:它是覆盖在窗口之上的系统浮层,
-// 并不改变 harness 交给引擎的视口大小。粘性设置,0(默认)=整个视口都可见。引擎在需要把东西
-// 露给用户看时读它(目前是 WebCoreResize 的聚焦框回滚)。
+// How many engine px at the BOTTOM of the viewport are covered by something the engine cannot see -
+// the on-screen keyboard, which is an OS overlay over the window and does not change the viewport
+// the harness hands us. Sticky; 0 (the default) means the whole viewport is visible. Read wherever
+// the engine has to reveal something to the USER (currently WebCoreResize's focused-field reveal).
 void WebCoreSetBottomOcclusion(int enginePx);
 
-// Apotheosis (0.1.9.46): 单独执行 WebCoreResize 里的"聚焦框回滚",不做 resize。
-// 旋转后屏幕键盘在新方向下的矩形要晚几拍才到(壳先回答上一个方向的矩形,
-// 0.1.9.44 会拒绝它),所以 resize 当时那次回滚是按遮挡 0 算的,输入框仍在键盘后面。
-// 等真矩形到手后:先 WebCoreSetBottomOcclusion(),再调这个(引擎线程)。
-// 开销很小:文档不脏就不重排,也不自己合成(滚动会点亮下一帧)。
-// 返回 kOK(没有聚焦可编辑元素也是 kOK)/ kErrNoSession / kErrBusy。
+// Apotheosis (0.1.9.46): run WebCoreResize's focused-field reveal on its own, without a resize.
+// The occlusion above is only correct a few dispatcher hops AFTER a rotation - the shell answers
+// with the previous orientation's keyboard rectangle first, and a rectangle that cannot belong to
+// the current window must not be believed - so the reveal that ran inside the resize ran without a
+// margin and left the field at the bottom edge, behind the keyboard. Call this once the real
+// rectangle is in, right after WebCoreSetBottomOcclusion(), on the engine thread. Cheap: layout
+// only if the document is dirty, no composite of its own (the scroll arms the next tick's).
+// Returns kOK - also when nothing editable is focused - or kErrNoSession / kErrBusy.
 int WebCoreRevealFocusedElement(void);
 
-// ---- 输入法/键盘 ----
-// 当前是否有可编辑元素聚焦(输入框/textarea/contenteditable)→ 据此弹/收屏幕键盘。返回 1/0。
-int WebCoreFocusedEditable();
-// 向聚焦的可编辑元素插入文本(UTF-8),重绘到 outBuf。返回 0 成功。
-int WebCoreTypeText(const char* utf8, uint8_t* outBuf);
-// 特殊键:0=退格,1=回车(可能触发表单提交导航),重绘到 outBuf。返回 0 成功。
-int WebCoreKeyAction(int action, uint8_t* outBuf);
-
-// UA 切换:mobile=1 移动 iPhone UA(默认),0 桌面 Edge UA。切后需重新加载页面生效。
-void WebCoreSetUserAgentMobile(int mobile);
-// 自定义 UA:非空覆盖 mobile/desktop(绕开按 UA 拦截的站点如 microsoft);空串=清除回退开关。切后重载生效。
-void WebCoreSetUserAgentString(const char* ua);
-
-// Apotheosis（隐私审查）：推测预取（<script type="speculationrules">）开关，默认关。
-// enabled!=0 时网页可预取用户未点击的 URL。仅引擎线程调；对当前会话和新建会话都生效。
-void WebCoreSetSpeculativePrefetch(int enabled);
-// Apotheosis（实验性 JIT 开关）：运行期开/关 JSC 基线 JIT。引擎按 ENABLE_JIT=ON 构建；
-// 关掉后不再做新的 JIT 编译（纯 LLInt 解释），已编译代码继续跑（软切换）。harness 在
-// 启动、首次加载页面之前应用持久化值；仅引擎线程调。
+int WebCoreGetUrl(char* buf, int len);
+int WebCoreFocusedEditable();                         // 1 if an editable element is focused
+int WebCoreTypeText(const char* utf8, uint8_t* outRGBA);   // insert text into focused editable
+int WebCoreKeyAction(int action, uint8_t* outRGBA);   // 0=Backspace, 1=Enter
+void WebCoreSetUserAgentMobile(int mobile);           // 1=mobile iPhone UA (default), 0=desktop Edge UA
+void WebCoreSetUserAgentString(const char* ua);       // custom UA override (non-empty wins over mobile/desktop; empty clears)
+void WebCoreSetSpeculativePrefetch(int enabled);      // <script type="speculationrules"> prefetch, default off; sticky (live page + new sessions)
+// Apotheosis (experimental JIT switch): runtime on/off of JSC's baseline JIT. The engine is
+// built with ENABLE_JIT=ON; turning it off stops NEW JIT compilation (pure LLInt), already
+// compiled code keeps running (soft switch). The harness applies the persisted value at
+// startup, before the first page load. Engine thread only.
 void WebCoreSetJitEnabled(int enabled);
-int  WebCoreGetJitEnabled(void);   // 1 = JIT 生效中,0 = 纯解释 / 构建无 JIT
+int  WebCoreGetJitEnabled(void);   // 1 = JIT active, 0 = pure interpreter / built without JIT
 
-// Apotheosis (page width, 0.1.9.58): the page-width factor = the engine's device scale factor.
-// The engine lays a page out at (engine px / factor) CSS px, so 1.5 gives a 480 CSS px layout
-// viewport on a 720 engine px wide portrait panel - a phone-sized viewport instead of a tablet
-// one - while tiles still raster at the full engine resolution, so text stays sharp. Clamped to
-// [1.0, 2.0]; the default is 1.5. Stores the value only: it reaches a live page through the next
-// WebCoreResize() (which re-lays the document out at the new CSS viewport) or through the next
-// WebCoreSessionLoad()/WebCoreRenderHtml(). Engine thread only, like every other setter here.
+// Apotheosis (page width, 0.1.9.58): the page-width factor, which is the engine's DEVICE SCALE
+// FACTOR. The engine lays a page out at (engine px / factor) CSS px, so on a 720 engine px wide
+// portrait panel a factor of 1.5 gives a 480 CSS px layout viewport - phone-sized, where 1.0 gave a
+// 720 px one every site answers with its tablet layout and half-height text. Raster resolution is
+// unchanged: a composited layer's contentsScale is pageScaleFactor * deviceScaleFactor, so tiles
+// are still painted at the full engine resolution and text stays as sharp as it was. This is not
+// page zoom and not text autosizing, both of which only enlarge a layout that is still a wide one.
+// window.devicePixelRatio becomes the factor.
+//
+// Nothing else in this ABI changes: every coordinate in and out of the driver is still viewport/
+// BITMAP px, and the driver converts at the boundary.
+//
+// Range [1.0, 2.0], default 1.5; anything outside falls back to the default. Stores the value only
+// - it reaches a live document through the next WebCoreResize() (which relays the page out at the
+// new CSS viewport, re-clamps the scroll position and forces a full repaint) and a new one through
+// WebCoreSessionLoad()/WebCoreRenderHtml(). Engine thread, like every other setter here.
 void WebCoreSetPageWidthFactor(float factor);
-
-// Apotheosis (M4): warm up an origin before the user navigates to it — call it while a URL is
-// being typed (debounced, e.g. once per suggestion update) so the DNS lookup is already done when
-// Enter arrives. Accepts a full URL or a bare host ("example.com"); anything else is ignored. DNS only:
-// libcurl cannot open a reusable connection ahead of time (see WebCoreDriver.cpp). Non-blocking
-// (resolves on a work queue), idempotent per host, engine thread.
+// Apotheosis (M4): warm up an origin before the user navigates to it — call it while a URL is being
+// typed (debounced) so the DNS lookup is done when Enter arrives. Full URL or bare host ("example.com");
+// anything else ignored. DNS only: libcurl cannot open a reusable connection ahead of time (see
+// WebCoreDriver.cpp). Non-blocking (work queue), idempotent per host, engine thread.
 void WebCorePreconnect(const char* url);
+int WebCoreEnableCompositing();                       // M1: 1 if GPU compositing is live (root GraphicsLayer attached)
+int WebCoreGpuInit(void* nativeWindow, int w, int h); // M2: init GPU present (engine thread). nativeWindow=SwapChainPanel PropertySet IInspectable*; nullptr=offscreen(readback)
+int WebCoreComposite();                               // M2: composite current session layer tree to the window surface (swapBuffers)
+int WebCoreCompositeReadback(uint8_t* outRGBA);       // M2: offscreen composite + readback RGBA (verify), shown via existing WriteableBitmap path
+void WebCoreGpuSetFlip(int flipH, int flipV);         // M2 debug: set readback flip (find correct orientation); repaint to apply
+int WebCoreGpuLayerInfo(char* outBuf, int len);       // M2 debug: FrameView scroll/contents + layerTreeAsText dump
 
-// M1:GPU 合成是否在跑(根 GraphicsLayer 已附)。加载后查,返回 1/0。
-int WebCoreEnableCompositing();
-
-// M2:GPU 合成呈现(引擎线程调)。详见 WebCoreDriver.cpp。
-// nativeWindow=SwapChainPanel 的 PropertySet 的 IInspectable*(直呈现);nullptr=离屏(仅 readback)。成功后引擎对网络会话开合成。
-int WebCoreGpuInit(void* nativeWindow, int w, int h);
-// 把当前会话图层树直呈现到窗口表面(eglSwapBuffers)。仅 GpuInit(nativeWindow!=null) 后有意义。返回 0 成功。
-int WebCoreComposite();
-// 离屏合成 + readback 出 RGBA 到 outBuf(>= w*h*4),用现有 WriteableBitmap 显示。返回 0 成功。
-int WebCoreCompositeReadback(uint8_t* outBuf);
-// 调试:设离屏 readback 翻转(找正确朝向)。flipH/flipV 非0=反转列/行。设完重绘当前帧生效。
-void WebCoreGpuSetFlip(int flipH, int flipV);
-// 调试:把 FrameView 滚动/内容尺寸 + 合成图层树文本写入 outBuf(定位背景丢失/滚动失效)。返回 0 成功。
-int WebCoreGpuLayerInfo(char* outBuf, int len);
-
-// Apotheosis：事件驱动呈现。引擎在“有东西需要重新呈现”时
-// （调度渲染更新 / 图片加载完 / 异步栅格化瓦片落地 / 一次 tick 结束时仍脏）回调它，代替
-// harness 固定 200ms 轮询。每次合成最多回调一次（WebCoreLiveTick 开头重新武装）。
-// ★ 回调可能在引擎线程或栅格化工作线程上跑：不得阻塞、不得反过来调引擎，只能投队列。
-// 传 nullptr = 取消注册（回到纯轮询）。引擎线程上注册一次，首次导航前。
+// Apotheosis: event-driven present. Register a wake-up the
+// engine calls whenever something wants to be presented (rendering update scheduled, image
+// loaded, off-thread raster tile finished, a tick that ended still dirty) instead of having the
+// harness poll on a fixed timer. Fired at most once per composite; disarmed at the top of every
+// WebCoreLiveTick. THE CALLBACK MAY RUN ON THE ENGINE THREAD OR ON A RASTER WORKER: it must not
+// block and must not call back into the engine - post to a queue and return. nullptr unregisters
+// (back to pure polling). Register from the engine thread, once, before the first navigation.
 void WebCoreSetPresentRequestCallback(void (*cb)(void* ctx), void* ctx);
 // Apotheosis (package 5): the pan present handshake is gone - WebCoreSetPanGesture /
 // WebCorePresent / WebCoreGetOwedSwapScroll / WebCorePresentFrame. It let a gesture take the
@@ -478,85 +520,124 @@ void WebCoreSetPresentRequestCallback(void (*cb)(void* ctx), void* ctx);
 // the harness drew a pan with; that preview is deleted, and it was the only caller the mode ever
 // had. The engine presents every composite as it makes it.
 
+int WebCoreEvalJS(const char* script, char* out, int len);  // run JS in the session, result as string
+int WebCoreLiveTick(uint8_t* outRGBA);                // advance + repaint one animation/SPA frame
+int WebCoreGetPendingResourceCount();                 // pending cached resources in the current document
+unsigned WebCoreGetFrameHash();                       // pixel hash of the last frame (idle detection)
 
-// 在当前会话主世界执行 JS,结果转字符串写入 out。诊断/注入用。返回 0 成功。
-int WebCoreEvalJS(const char* script, char* out, int len);
-
-// 实时一帧:推进动画/rAF/SPA 一帧并重绘到 outBuf(供低帧率定时器驱动,让动画动起来、SPA 渐进挂载)。
-int WebCoreLiveTick(uint8_t* outBuf);
-// 当前文档仍处于 Pending/Unknown 的缓存资源数。用于图片/解码未完成时保持实时 tick。
-int WebCoreGetPendingResourceCount();
-// 最近一帧像素哈希:实时模式比较连续帧,画面静止则停帧省电。
-unsigned WebCoreGetFrameHash();
-
-// ---- 异步 UI 请求(0.1.9)----
-// 引擎线程绝不能同步等 UI 线程,所以 WebCore 要真 UI 的地方(现在:<input type=file>、
-// window.alert)一律排队而不是直接调。任何可能跑到页面脚本的引擎调用之后
-// (加载/点击/按键/实时帧)都在引擎线程上轮询一次这个。
-// 返回请求类型,0=没有:
-//   1 = 文件选择。payload = "<是否多选 0|1>\t<accept>\t<accept>...",accept 是页面原样写的
-//       MIME 或 ".扩展名"。shell **必须**最终用 WebCoreCompleteFileChooser(id,...) 回话。
-//   2 = alert。payload = 消息文本,不需要回话。
-//   3 = confirm。payload = 消息文本。**引擎线程正 park 着等** WebCoreCompleteConfirm(id, ok)
-//       ——shell 必须回(确定或取消);请求经 WebCoreSetUIRequestCallback 的唤醒在 UI 线程上用
-//       WebCoreTakeUIRequestUI 取。
-//   4 = prompt。payload = "<消息>\t<默认值>"。同样 park;用 WebCoreCompletePrompt(id, text)
-//       回答,text 传 nullptr = 取消。
-//   8 = 在新标签打开。payload = URL(window.open() / target=_blank)。不需要回话:
-//       标签模型归 shell 管。⚠ 新标签没有 opener(等价 rel="noopener"),原因见
-//       port/PortChromeClient.h ——本 port 是"一个热 Page + 快照"模型,给不出第二个
-//       同时在跑的 Page,也就给不出可用的 WindowProxy。
+// ---- asynchronous engine -> shell UI requests (0.1.9) ----
+// The engine thread must never block on the UI thread, so anything WebCore wants
+// from real UI (today: <input type=file>; window.alert) is queued instead of
+// called. Poll this right after any engine call that could have run page script
+// (load / click / key / live tick), on the engine thread.
+//
+// Returns the request kind, 0 when there is nothing pending:
+//   1 = file chooser. payload = "<multiple 0|1>\t<accept>\t<accept>..." where each
+//       accept is a MIME type or ".ext" exactly as the page wrote it. The shell
+//       MUST eventually answer with WebCoreCompleteFileChooser(id, ...).
+//   2 = alert.        payload = the message. No reply expected.
+//   3 = confirm.      payload = the message. The ENGINE THREAD IS PARKED waiting
+//       for WebCoreCompleteConfirm(id, ok) — the shell must answer (OK or Cancel),
+//       and it takes the request from the UI thread via WebCoreTakeUIRequestUI
+//       after the WebCoreSetUIRequestCallback wake fires.
+//   4 = prompt.       payload = "<message>\t<default>". Same parking; answer with
+//       WebCoreCompletePrompt(id, text), where a null text means Cancel.
+//   8 = open in new tab. payload = the URL (window.open() / target=_blank).
+//       No reply expected: the shell owns the tab model. Note the new tab has no
+//       opener — see PortChromeClient.h for why this port cannot hand JS a live
+//       WindowProxy for a second, simultaneously-running Page.
+//   5 = <select> popup (Apotheosis 0.2.5.15). payload =
+//       "<selected row>\t<row text>\t<row text>...", where a row starting with \x01
+//       is "<x01>separator" / "<x01>label\t<text>" / "<x01>disabled\t<text>" and
+//       anything else is plain enabled item text. The shell MUST eventually answer
+//       with WebCoreCompleteSelectPopup(id, index), where index < 0 means the user
+//       cancelled. Rows are capped at 200 by the driver (a layout guard on the
+//       shell card, not a semantic limit).
+//   6 = <input type=color> (Apotheosis 0.2.5.16). payload =
+//       "<#rrggbb|#rrggbbaa>\t<suggested>\t..." OR, when the page changed the value
+//       while the chooser was open, "\x02current\t<#rrggbb|#rrggbbaa>" - the same
+//       request id, so the shell updates the card it already shows instead of
+//       opening a second one. Answer with WebCoreCompleteColorChooser(id, css);
+//       a null css means the user cancelled.
+//   7 = <input type=date/time/date-time> (Apotheosis 0.2.5.16). payload =
+//       "<input type>\t<current value>\t<min ms>\t<max ms>" where min/max are epoch
+//       milliseconds (0 = unset) and the shell should bound its own control by
+//       them. Answer with WebCoreCompleteDateTimeChooser(id, value) - the value is
+//       passed back VERBATIM because WebCore validates it, so do not reformat.
+//       A null value means the user cancelled.
 int WebCoreTakeUIRequest(unsigned long long* outId, char* payload, int len);
 
-// WebCoreTakeUIRequest 的 UI 线程版,confirm/prompt 唤醒路径专用(引擎已 park,跑不了自己的
-// drain)。同队列同 payload 约定;shell 取到什么就答什么。
+// UI-thread twin of WebCoreTakeUIRequest, used by the confirm/prompt wake path
+// (the engine is parked and cannot run its own drain). Same queue, same payload
+// conventions; the shell answers everything it takes.
 int WebCoreTakeUIRequestUI(unsigned long long* outId, char* payload, int len);
 
-// 回复文件选择请求。pathsUtf8 里是 count 个连续的、各自以 NUL 结尾的 UTF-8 绝对路径;
-// count==0 表示用户取消。传过期的 id 也安全(已导航走/会话已销毁)——直接丢弃。
-// ⚠ 路径必须是引擎进程读得到的:UWP 下即 app 自己的目录,所以 shell 要先把选中的文件
-//   复制进 LocalState 再交给引擎。
+// Answer a file-chooser request. `pathsUtf8` holds `count` NUL-terminated UTF-8
+// absolute paths back to back; count == 0 means the user cancelled. Safe to call
+// with a stale id (navigated away, session torn down) — it is dropped.
+// The paths must be readable by the engine process: on UWP that means files the
+// app itself owns, so the shell copies picked files into LocalState first.
 void WebCoreCompleteFileChooser(unsigned long long id, const char* pathsUtf8, int count);
-// Apotheosis (0.2.5.15): answer a <select> popup. listIndex < 0 = cancelled.
+
+// Apotheosis (0.2.5.15): answer a <select> popup. listIndex < 0 = the user
+// cancelled; >= 0 = the row they picked, handed to PopupMenuClient::valueChanged()
+// on the engine thread. Engine thread only; a stale id is dropped.
 void WebCoreCompleteSelectPopup(unsigned long long id, int listIndex);
-// Apotheosis (0.2.5.16): <input type=color> / <input type=date/time> choosers.
-// A null css/value means the user cancelled. The date value is passed back
-// VERBATIM (WebCore validates it) - do not reformat it.
+
+// Apotheosis (0.2.5.16): answer an <input type=color> chooser. `cssUtf8` is a CSS
+// colour string ("#rgb"/"#rrggbb"/"#rrggbbaa"); a null pointer means the user
+// cancelled and the page keeps its old value. A stale id is dropped.
 void WebCoreCompleteColorChooser(unsigned long long id, const char* cssUtf8);
+
+// Apotheosis (0.2.5.16): answer an <input type=date/time> chooser. `valueUtf8` is
+// the value string for that input type ("yyyy-mm-dd", "yyyy-mm-ddThh:mm", ...),
+// passed back VERBATIM - WebCore validates it, so the shell must not reformat.
+// A null pointer means the user cancelled. A stale id is dropped.
 void WebCoreCompleteDateTimeChooser(unsigned long long id, const char* valueUtf8);
 
-// 回答 confirm() 对话框。ok!=0=确定(脚本以 true 继续),0=取消。引擎 park 期间可从 UI 线程
-// 调;过期 id(对话框已超时)是 no-op。返回 1=答案被接收。
+// Answer a confirm() dialog. ok != 0 = OK (script continues with true), 0 =
+// Cancel. May be called from the UI thread while the engine is parked; a stale id
+// (dialog already timed out) is a no-op. Returns 1 when the answer was taken.
 int WebCoreCompleteConfirm(unsigned long long id, int ok);
 
-// 回答 prompt() 对话框。text==nullptr 表示取消;否则是用户输入的 UTF-8。同线程/过期规则。
+// Answer a prompt() dialog. text == nullptr (or empty-with-null) means Cancel;
+// otherwise it is the UTF-8 the user typed. Same threading/staleness rules.
 int WebCoreCompletePrompt(unsigned long long id, const char* text);
 
-// confirm/prompt 排队时引擎→壳的唤醒:引擎线程即将 park,没法再跑壳平时的 drain。回调在
-// **引擎线程**上调用——先 marshal 回 UI 线程再碰 XAML,然后调 WebCoreTakeUIRequestUI。
+// Engine->shell wake used when a confirm/prompt is queued: the engine thread is
+// about to park, so it cannot run the shell's usual drain. The callback is
+// invoked ON THE ENGINE THREAD — marshal to the UI thread before touching XAML,
+// then call WebCoreTakeUIRequestUI.
 void WebCoreSetUIRequestCallback(void (*callback)(void*), void* context);
 
-// ---- 页内查找 find-in-page ----
-// 标记并高亮全部匹配 + 选中第一个,滚动到它,重绘到 outBuf。matchCase!=0 区分大小写;wrap!=0 回绕。
-// 空串=清除高亮。返回匹配数(>=0)或负错误码。
-int WebCoreFindString(const char* utf8, int matchCase, int wrap, uint8_t* outBuf);
-// 沿用上次查找词查下一个/上一个(不重新标记)。forward!=0 向下。返回 1=命中 / 0=无 / 负=错误。
-int WebCoreFindNext(int forward, uint8_t* outBuf);
-// 清除查找高亮/选区,重绘。返回 0 成功。
-int WebCoreFindClear(uint8_t* outBuf);
+// ---- find-in-page ----
+int WebCoreFindString(const char* utf8, int matchCase, int wrap, uint8_t* outRGBA); // mark+highlight all, select first; returns match count (>=0) or neg error
+int WebCoreFindNext(int forward, uint8_t* outRGBA);   // next/prev with last query (no re-mark); 1=hit, 0=none, neg=error
+int WebCoreFindClear(uint8_t* outRGBA);               // clear find highlight + selection
 
-// ---- 媒体音频 media-mf(Apotheosis 2026-10-09) ----
-// 引擎侧解码出的音频放在驱动自己的有界队列里(port/PortMediaAudio.cpp);设备客户端由壳持有 ——
-// App Container 里拿 IAudioClient 要走 WinRT 激活,那是 C++/CX 侧的事。
-// out 收 frames 帧交错 float32(声道数取 WebCoreMediaAudioChannels());队列不足的部分补零并把
-// *underran 置 1(起始与 seek 后的 underrun 是正常的)。任意线程可调,绝不阻塞解码线程。
-// 返回实际可用的帧数。
+// ---- media audio (media-mf) ----
+// Apotheosis: pull decoded audio for the harness's device worker. WebCore's WinUWP media
+// backend decodes <video>/<audio> audio into a bounded queue owned by the driver
+// (port/PortMediaAudio.cpp); the harness owns the actual device client, because obtaining
+// one in an App Container needs WinRT activation and that belongs to the C++/CX side.
+//
+// `out` receives up to `frames` interleaved float32 frames using the channel count from
+// WebCoreMediaAudioChannels(); whatever the queue cannot supply is zero-filled and
+// *underran is set to 1 (an underrun is normal at start and after a seek). Safe from any
+// thread and never blocks on the decode thread. Returns the frames actually available.
 int WebCoreMediaAudioTake(float* out, int frames, int* underran);
-// 当前配置流格式;首个流打开前为 0/0。壳据此建(并在变化时重建)设备客户端。
+
+// Format of the stream currently configured; 0/0 until the first stream is opened. The
+// harness builds (and rebuilds) its device client from these, so it must re-read them
+// when they change - two videos in a row need not share a sample rate.
 int WebCoreMediaAudioSampleRate(void);
 int WebCoreMediaAudioChannels(void);
-// stage.txt 用的一行媒体摘要(队列深度、PCM 推入/消费/丢弃、视频解码/呈现帧数、协商到的视频子类型、
-// 最后一次 Media Foundation 失败)。总是 NUL 结尾(缓冲至少 256 字节)。任意线程可调。
+
+// One-line media summary for stage.txt: queue depth, PCM pushed/consumed/dropped, video
+// frames decoded/presented, the negotiated video subtypes and the last Media Foundation
+// failure. Always NUL-terminates (pass a buffer of at least 256 bytes). Any thread.
 void WebCoreMediaDiagnostics(char* out, int outBytes);
 
-}
+#ifdef __cplusplus
+} // extern "C"
+#endif

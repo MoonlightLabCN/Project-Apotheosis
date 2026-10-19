@@ -470,6 +470,12 @@ int WebCoreKeyAction(int action, uint8_t* outRGBA);   // 0=Backspace, 1=Enter
 void WebCoreSetUserAgentMobile(int mobile);           // 1=mobile iPhone UA (default), 0=desktop Edge UA
 void WebCoreSetUserAgentString(const char* ua);       // custom UA override (non-empty wins over mobile/desktop; empty clears)
 void WebCoreSetSpeculativePrefetch(int enabled);      // <script type="speculationrules"> prefetch, default off; sticky (live page + new sessions)
+// Apotheosis (experimental JIT switch): runtime on/off of JSC's baseline JIT. The engine is
+// built with ENABLE_JIT=ON; turning it off stops NEW JIT compilation (pure LLInt), already
+// compiled code keeps running (soft switch). The harness applies the persisted value at
+// startup, before the first page load. Engine thread only.
+void WebCoreSetJitEnabled(int enabled);
+int  WebCoreGetJitEnabled(void);   // 1 = JIT active, 0 = pure interpreter / built without JIT
 
 // Apotheosis (page width, 0.1.9.58): the page-width factor, which is the engine's DEVICE SCALE
 // FACTOR. The engine lays a page out at (engine px / factor) CSS px, so on a 720 engine px wide
