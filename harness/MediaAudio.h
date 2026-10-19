@@ -65,6 +65,12 @@ private:
     // ~5 minutes of pulling from an empty ring. The graph is stopped once the ring has
     // been empty for this long (GetTickCount64, ms); the next EnsureStarted rebuilds it.
     unsigned long long m_lastNonEmptyQuantum { 0 };
+    // Apotheosis (media, 2026-10-19): the idle stop is DEFERRED. Tearing the graph down
+    // (AudioGraph::Stop + unhooking QuantumStarted) from inside the QuantumStarted
+    // callback itself crashes inside Windows.Media.Audio.dll - crash.txt 2026-10-19
+    // 23:20:26 tid=1788, and the app dies with it (follow-on AV on the UI thread). The
+    // handler only raises this flag; EnsureStarted (UI thread) executes the Stop.
+    bool m_idleStopRequested { false };
 };
 
 } // namespace Harness

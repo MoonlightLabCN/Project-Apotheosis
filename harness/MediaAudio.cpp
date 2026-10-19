@@ -62,6 +62,17 @@ void MediaAudio::EnsureStarted()
     if (!g_instance)
         g_instance = ref new MediaAudio();
 
+    // Apotheosis (media, 2026-10-19): execute the quantum handler's deferred idle stop
+    // HERE, on the UI thread. Doing it inside the callback crashed the app (see the flag's
+    // declaration). EnsureStarted runs on every present wake, so this lands within a frame
+    // or two of the request.
+    if (g_instance->m_idleStopRequested) {
+        g_instance->m_idleStopRequested = false;
+        AudioLog("idle-stop: executing deferred Stop() on the UI thread");
+        g_instance->Stop();
+        return;
+    }
+
     if (g_instance->m_creating || g_instance->m_failed) {
         AudioLog("EnsureStarted: early-return (creating=" + std::to_string(g_instance->m_creating ? 1 : 0)
                  + " failed=" + std::to_string(g_instance->m_failed ? 1 : 0) + ")");
@@ -228,17 +239,27 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
                     const int taken = WebCoreMediaAudioTake(reinterpret_cast<float*>(data), required, &underran);
                     filled = true;
                     ++m_quanta;
-                    // Apotheosis (media, 2026-10-18): null-sink guard. The device round
+                    // Apotheosis (media, 2026-10-19): null-sink guard. The device round
                     // showed the graph spinning on an empty ring (~17x realtime) and then
                     // faulting inside Windows.Media.Audio.dll minutes later. Once the ring
-                    // has been empty for 3 s there is nothing left to play: stop the graph
-                    // (the next EnsureStarted rebuilds it) instead of spinning on it.
+                    // has been empty for 3 s there is nothing left to play: request a stop
+                    // (DEFERRED to the UI thread - tearing the graph down from inside this
+                    // callback is what crashed the app, crash.txt 2026-10-19 23:20:26).
                     if (taken > 0)
                         m_lastNonEmptyQuantum = GetTickCount64();
                     else if (m_quanta > 100 && GetTickCount64() - m_lastNonEmptyQuantum > 3000) {
-                        AudioLog("idle-stop: ring empty >3s -> Stop() (null-sink guard)");
-                        Stop();
-                        return;
+                        AudioLog("idle-stop: ring empty >3s -> stop requested (deferred to UI thread)");
+                        m_idleStopRequested = true;
+                    }
+                    // Apotheosis (media, 2026-10-19): live decode-side counters. The
+                    // 23:20 round showed the ring empty during playback - the graph was
+                    // asking and the decoder was not pushing - and the media line (a
+                    // per-navigation snapshot at load time) was written long before that.
+                    // These lines show whether PCM is flowing at all.
+                    if (m_quanta % 5000 == 0) {
+                        char diag[512] = "";
+                        WebCoreMediaDiagnostics(diag, sizeof diag);
+                        AudioLog(std::string("media-diag #") + std::to_string(m_quanta) + ": " + diag);
                     }
                     // An underrun at start-up or right after a seek is expected and looks
                     // like silence; counting them is how we tell "starved" from "broken".
