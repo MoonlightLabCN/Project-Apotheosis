@@ -106,19 +106,11 @@ void appendMediaDiagnostics(char* out, int outBytes)
     // subtype values are GUID::Data1 of the negotiated video media types; RGB32 is 0x16,
     // NV12 is 0x3231564E, H264 is 0x34363248. Enough to tell "we got RGB32 out of the
     // Video Processor" from "the transform never engaged" on device.
-    // Apotheosis (media, 2026-10-18): dxva reports the PROBE result (the main reader is on
-    // the software path - setting the D3D manager on it broke reader creation on 15254, see
-    // MediaPlayerPrivateWinUWP.cpp). probe-hw = a manager reader produced D3D-texture
-    // frames (hardware decode verified, worth building the DXGI->CPU copy); probe-sw =
-    // reader created but frames were system memory; probe-fail = reader creation with the
-    // manager failed; noprobe = device exposes no video decode / probe not run.
-    const char* dxvaText = "noprobe";
-    switch (WebCore::WinUWPMediaDiagnostics::dxvaProbe()) {
-    case 1:  dxvaText = "probe-hw";   break;
-    case 2:  dxvaText = "probe-sw";   break;
-    case 0:  dxvaText = "probe-fail"; break;
-    default: dxvaText = "noprobe";    break;
-    }
+    // Apotheosis (media, 2026-10-18/19): dxva reports the MAIN decode path, which is
+    // software: the DXVA experiment is closed (the D3D manager cannot be handed to the MF
+    // decoder on 15254 - see MediaPlayerPrivateWinUWP.cpp). What the device DOES expose
+    // (decoder profile count, feature level, H.264 profile) is in dxvaprof/dxvafl/h264.
+    const char* dxvaText = "sw";
     std::snprintf(out, static_cast<size_t>(outBytes),
         "media readers=%u frames=%llu/%llu pcm=%llu/%llu/%llu q=%d@%dHz/%dch"
         " native=0x%X out=0x%X dxva=%s err=0x%08lX at=%s"

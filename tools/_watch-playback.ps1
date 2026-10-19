@@ -20,18 +20,18 @@ for($i=0;$i -lt ($WaitMinutes*2);$i++){
       if($new -match 'evt-playing|t12|evt-ended'){
         Say 'PLAYBACK CONFIRMED (playing/t12 seen)'
         # 设备在线就把 stage.txt / mediaaudio.txt 也抓回来(音频端点探测的答案在里面)
-        $ip='192.168.3.159'; $base="https://${ip}:443"; $jar="$env:TEMP\wdp-jar.txt"
+        $ip='192.168.3.159'; $wbase="https://${ip}:443"; $jar="$env:TEMP\wdp-jar.txt"
         try{
           Remove-Item $jar -ErrorAction SilentlyContinue
-          & curl.exe -sk --max-time 10 -c $jar -o NUL "$base/api/os/info" 2>$null
-          $pkgs=(& curl.exe -sk --max-time 15 -b $jar "$base/api/app/packagemanager/packages" 2>$null)|ConvertFrom-Json
+          & curl.exe -sk --max-time 10 -c $jar -o NUL "$wbase/api/os/info" 2>$null
+          $pkgs=(& curl.exe -sk --max-time 15 -b $jar "$wbase/api/app/packagemanager/packages" 2>$null)|ConvertFrom-Json
           $pkg=$pkgs.InstalledPackages | Where-Object { $_.PackageFullName -match 'Harness' } | Sort-Object { $v=($_.PackageFullName -split '_')[1]; $p=$v -split '\.'; [int]$p[0]*1000000+[int]$p[1]*10000+[int]$p[2]*100+[int]$p[3] } -Descending | Select-Object -First 1
           if($pkg){
             $pfnE=[uri]::EscapeDataString($pkg.PackageFullName)
-            $st=(& curl.exe -sk --max-time 20 -b $jar "$base/api/filesystem/apps/file?knownfolderid=LocalAppData&packagefullname=$pfnE&path=%5CLocalState&filename=stage.txt" 2>$null)
+            $st=(& curl.exe -sk --max-time 20 -b $jar "$wbase/api/filesystem/apps/file?knownfolderid=LocalAppData&packagefullname=$pfnE&path=%5CLocalState&filename=stage.txt" 2>$null)
             Say '--- stage.txt media/media-state lines ---'
             ($st -split "`n") | Where-Object { $_ -match '^\s*media |media-state' } | Select-Object -Last 3 | ForEach-Object { Say "  $_" }
-            $ma=(& curl.exe -sk --max-time 20 -b $jar "$base/api/filesystem/apps/file?knownfolderid=LocalAppData&packagefullname=$pfnE&path=%5CLocalState&filename=mediaaudio.txt" 2>$null)
+            $ma=(& curl.exe -sk --max-time 20 -b $jar "$wbase/api/filesystem/apps/file?knownfolderid=LocalAppData&packagefullname=$pfnE&path=%5CLocalState&filename=mediaaudio.txt" 2>$null)
             Say '--- mediaaudio.txt (endpoint probe / idle-stop / quanta) ---'
             ($ma -split "`n") | Where-Object { $_ -notmatch 'quantum #' } | Select-Object -Last 12 | ForEach-Object { Say "  $_" }
             $qm=($ma -split "`n") | Where-Object { $_ -match 'quantum #' }
