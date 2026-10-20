@@ -1,0 +1,140 @@
+===== auto round start 2026-10-18 15:47:49 ver=0.2.5.30 =====
+[15:47:49] waiting for device (up to 240 min)...
+[15:50:09]   ...still offline (2 min)
+[15:52:29]   ...still offline (4 min)
+[15:54:49]   ...still offline (6 min)
+[15:57:10]   ...still offline (8 min)
+[15:59:30]   ...still offline (10 min)
+[16:01:50]   ...still offline (12 min)
+[16:04:10]   ...still offline (14 min)
+[16:06:30]   ...still offline (16 min)
+[16:08:50]   ...still offline (18 min)
+[16:11:10]   ...still offline (20 min)
+[16:13:30]   ...still offline (22 min)
+[16:15:50]   ...still offline (24 min)
+[16:18:10]   ...still offline (26 min)
+[16:20:31]   ...still offline (28 min)
+[16:22:51]   ...still offline (30 min)
+[16:25:11]   ...still offline (32 min)
+[16:27:31]   ...still offline (34 min)
+[16:29:51]   ...still offline (36 min)
+[16:32:11]   ...still offline (38 min)
+[16:34:31]   ...still offline (40 min)
+[16:36:51]   ...still offline (42 min)
+[16:39:11]   ...still offline (44 min)
+[16:41:32]   ...still offline (46 min)
+[16:43:52]   ...still offline (48 min)
+[16:46:12]   ...still offline (50 min)
+[16:48:32]   ...still offline (52 min)
+[16:50:52]   ...still offline (54 min)
+[16:53:12]   ...still offline (56 min)
+[16:55:32]   ...still offline (58 min)
+[16:57:52]   ...still offline (60 min)
+[17:00:12]   ...still offline (62 min)
+[17:02:33]   ...still offline (64 min)
+[17:04:53]   ...still offline (66 min)
+[17:07:13]   ...still offline (68 min)
+[17:09:33]   ...still offline (70 min)
+[17:11:53]   ...still offline (72 min)
+[17:14:13]   ...still offline (74 min)
+[17:16:33]   ...still offline (76 min)
+[17:18:53]   ...still offline (78 min)
+[17:21:13]   ...still offline (80 min)
+[17:23:34]   ...still offline (82 min)
+[17:25:54]   ...still offline (84 min)
+[17:28:14]   ...still offline (86 min)
+[17:30:34]   ...still offline (88 min)
+[17:32:54]   ...still offline (90 min)
+[17:35:14]   ...still offline (92 min)
+[17:37:34]   ...still offline (94 min)
+[17:39:54]   ...still offline (96 min)
+[17:42:15]   ...still offline (98 min)
+[17:44:35]   ...still offline (100 min)
+[17:46:55]   ...still offline (102 min)
+[17:49:15]   ...still offline (104 min)
+[17:51:35]   ...still offline (106 min)
+[17:53:55]   ...still offline (108 min)
+[17:56:15]   ...still offline (110 min)
+[17:58:35]   ...still offline (112 min)
+[18:00:55]   ...still offline (114 min)
+[18:03:15]   ...still offline (116 min)
+[18:05:36]   ...still offline (118 min)
+[18:07:56]   ...still offline (120 min)
+[18:10:16]   ...still offline (122 min)
+[18:12:36]   ...still offline (124 min)
+[18:14:56]   ...still offline (126 min)
+[18:17:16]   ...still offline (128 min)
+[18:19:36]   ...still offline (130 min)
+[18:21:56]   ...still offline (132 min)
+[18:24:16]   ...still offline (134 min)
+[18:26:37]   ...still offline (136 min)
+[18:28:52] device ONLINE (waited ~138 min)
+[18:28:52] --- installing 0.2.5.30 ---
+设备在线
+  安装重试 0(连接断)
+安装请求(1): 202
+✅ 已安装 EdgeHTMLReborn.Harness_0.2.5.30_arm__x0rqga78m2mgc
+启动: 200
+[18:33:38] install-only rc=0
+[18:33:41] --- media round ---
+installed: EdgeHTMLReborn.Harness_0.2.5.30_arm__x0rqga78m2mgc
+terminate: 200
+
+===== testurl.txt readback (app navigates to this at startup) =====
+http://192.168.3.108:8099/values.html
+launch: 200
+waiting 45s...
+
+===== stage.txt: media line(s) =====
+(no media line yet)
+
+===== stage.txt: media-state =====
+
+===== stage.txt: timeline =====
+
+===== stage.txt: static-render / before-load =====
+static-render why=navdone eng=1080x1670 len=2553
+
+===== console.txt: MEDIADIAG/PROBE tail =====
+05:22:40.465 error :0 Not allowed to navigate top frame to data URL 'data:text/html;charset=utf-8,%3Cbody%3E%3Cscript%3E%0Afunction%20L%28m%29%7Bconsole.log%28%27MEDIADIAG%20%27%2Bm%29%7D%0AL%28%27HME%3D%27%2B%28typeof%20HTMLMediaElement%29%2B%27%20MS%3D%27%2B%28typeof%20MediaSource%29%29%3B%0Avar%20p%3Ddocument.createElement%28%27video%27%29%3B%0AL%28%27canPlayType%20video%2Fmp4%3D%27%2B%28p.canPlayType%3F%28%27%5B%27%2Bp.canPlayType%28%27video%2Fmp4%27%29%2B%27%5D%27%29%3A%27NOFN%27%29%29%3B%0AL%28%27canPlayType%20video%2Fwebm
+05:25:17.590 log http://192.168.3.108:8099/diag.html:6 MEDIADIAG HME=function MS=undefined MP=undefined
+05:25:17.590 log http://192.168.3.108:8099/diag.html:6 MEDIADIAG canPlayType video/mp4=[NOFN]
+05:25:17.590 log http://192.168.3.108:8099/diag.html:6 MEDIADIAG canPlayType video/webm=[-]
+05:25:17.590 log http://192.168.3.108:8099/diag.html:6 MEDIADIAG UA=Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1
+05:28:56.759 log http://192.168.3.108:8099/probe.html:12 PROBE HME=function HV=function MS=undefined MP=undefined
+05:28:56.759 log http://192.168.3.108:8099/probe.html:12 PROBE createElement(video).canPlayType=undefined mp4=[-]
+05:28:56.759 log http://192.168.3.108:8099/probe.html:12 PROBE instanceof HTMLVideoElement=false hasLoad=undefined hasPlay=undefined
+05:28:56.759 log http://192.168.3.108:8099/probe.html:12 PROBE initial rs=undefined ns=undefined ct=undefined err=- src=-
+05:28:56.759 log http://192.168.3.108:8099/probe.html:12 PROBE load() threw: TypeError: v.load is not a function. (In 'v.load()', 'v.load' is undefined)
+05:29:02.962 log http://192.168.3.108:8099/probe.html:12 PROBE t6  rs=undefined ns=undefined ct=undefined err=- src=-
+
+===== crash.txt tail =====
+total lines: 5401
+frame  9: Windows.Media.Audio.dll +0x000b6a09
+frame 10: Windows.Media.Audio.dll +0x000b06cd
+frame 11: Windows.Media.Audio.dll +0x000b05d7
+frame 12: Windows.Media.Audio.dll +0x00085497
+frame 13: Windows.Media.Audio.dll +0x0004251d
+frame 14: ntdll.dll +0x0003d235
+frame 15: ntdll.dll +0x00030cb1
+frame 16: ntdll.dll +0x00060c63
+
+===== server log (device requests) =====
+[01:44:04.102] 192.168.3.159:52346 GET /val-t=boot~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=1~ended=0~err=-~seeking=0~buf=none.png -> 404
+[01:44:04.115] 192.168.3.159:52347 GET /val-t=afterPlayCall~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
+[01:44:04.126] 192.168.3.159:52348 GET /val-t=evt-loadstart~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
+[01:44:04.139] 192.168.3.159:52349 GET /val-t=evt-waiting~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
+[01:44:04.404] 192.168.3.159:52350 GET /test.mp4 -> 206 Partial Content (range=bytes=0- bytes=0+788493/788493)
+[01:44:04.472] 192.168.3.159:52351 GET /test.mp4 -> 206 Partial Content (range=bytes=770048-788492 bytes=770048+18445/788493)
+[01:44:04.614] 192.168.3.159:52352 GET /test.mp4 -> 200 OK (range=- bytes=0+788493/788493)
+[01:44:04.625] 192.168.3.159:52353 GET /val-t=evt-loadedmetadata~rs=1~ns=2~ct=0.000~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:04.823] 192.168.3.159:52354 GET /val-t=evt-loadeddata~rs=2~ns=2~ct=0.000~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:06.292] 192.168.3.159:52355 GET /val-t=t2~rs=2~ns=2~ct=0.000~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:06.303] 192.168.3.159:52356 GET /val-t=evt-canplay~rs=3~ns=2~ct=0.001~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:06.313] 192.168.3.159:52357 GET /val-t=evt-playing~rs=3~ns=2~ct=0.003~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:08.394] 192.168.3.159:52358 GET /val-t=evt-waiting~rs=2~ns=2~ct=2.101~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:09.329] 192.168.3.159:52359 GET /val-t=evt-stalled~rs=2~ns=2~ct=3.035~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[01:44:10.263] 192.168.3.159:52360 GET /val-t=t6~rs=2~ns=2~ct=3.967~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
+[18:34:54] round rc=0
+[18:34:56] VERDICT: NO device requests in the last 5 min -> app did not navigate. Most likely the phone screen is OFF (app suspended at startup). Wake/unlock the phone and rerun _deploy-and-round.ps1
+[18:34:56] DONE

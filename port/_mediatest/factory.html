@@ -1,0 +1,28 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>factory probe</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">factory probe</h3>
+<script>
+// Discriminator: in the generated HTMLElementFactory, `source` has NO mediaEnabled() check
+// (only #if ENABLE(VIDEO)), while video/audio/track have both. So:
+//   source -> HTMLSourceElement  => ENABLE(VIDEO) cases are compiled in
+//   video  -> HTMLUnknownElement => the mediaEnabled() runtime check failed
+//   source -> HTMLUnknownElement => the ENABLE(VIDEO) cases are NOT in the binary at all
+function ctor(name) { try { return document.createElement(name).constructor.name; } catch (e) { return 'THREW'; } }
+var parts = [
+  'video=' + ctor('video'),
+  'audio=' + ctor('audio'),
+  'source=' + ctor('source'),
+  'track=' + ctor('track'),
+  'canvas=' + ctor('canvas'),
+  'div=' + ctor('div'),
+  'bogus=' + ctor('bogus-tag-xyz'),
+  'iframe=' + ctor('iframe'),
+  'img=' + ctor('img'),
+  'a=' + ctor('a'),
+  'parsedVideo=' + (function () { try { var d = document.createElement('div'); d.innerHTML = '<video></video>'; return d.firstChild.constructor.name; } catch (e) { return 'THREW'; } })(),
+  'winHVE=' + (typeof HTMLVideoElement)
+];
+try { var img = new Image(); img.src = 'fac-' + parts.join('~') + '.txt'; }
+catch (e) { try { var i2 = new Image(); i2.src = 'fac-SENDEXC.txt'; } catch (e2) { } }
+</script>
+</body></html>

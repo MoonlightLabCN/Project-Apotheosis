@@ -1,0 +1,54 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>media probe</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">media probe</h3>
+<video id="v" src="test.mp4" controls autoplay width="320"></video>
+<script>
+// Every field is computed through safe(): the previous revision died on
+// v.currentTime.toFixed because <video> here does not behave like a media element, and a
+// single throw cost the whole report. The report travels in a request name, so the
+// server log carries the device's own answer.
+function safe(fn) { try { var r = fn(); return (r === undefined) ? 'undef' : (r === null ? 'null' : String(r)); } catch (e) { return 'THREW'; } }
+function report(tag, extra) {
+  var v = null;
+  try { v = document.getElementById('v'); } catch (e) { }
+  var made = null;
+  try { made = document.createElement('video'); } catch (e) { }
+  var parts = [
+    't=' + tag,
+    'win.HTMLElement=' + safe(function () { return typeof HTMLElement; }),
+    'win.HTMLMediaElement=' + safe(function () { return typeof HTMLMediaElement; }),
+    'win.HTMLVideoElement=' + safe(function () { return typeof HTMLVideoElement; }),
+    'win.MediaSource=' + safe(function () { return typeof MediaSource; }),
+    'win.MediaPlayer=' + safe(function () { return typeof MediaPlayer; }),
+    'gotv=' + safe(function () { return (v === null) ? 'NULL' : 'ok'; }),
+    'v.tagName=' + safe(function () { return v.tagName; }),
+    'v.ctor=' + safe(function () { return v.constructor && v.constructor.name; }),
+    'v.instHVE=' + safe(function () { return (typeof HTMLVideoElement !== 'undefined') && (v instanceof HTMLVideoElement) ? 1 : 0; }),
+    'v.instHE=' + safe(function () { return (typeof HTMLElement !== 'undefined') && (v instanceof HTMLElement) ? 1 : 0; }),
+    'v.ty-currentTime=' + safe(function () { return typeof v.currentTime; }),
+    'v.ty-readyState=' + safe(function () { return typeof v.readyState; }),
+    'v.ty-networkState=' + safe(function () { return typeof v.networkState; }),
+    'v.ty-play=' + safe(function () { return typeof v.play; }),
+    'v.ty-load=' + safe(function () { return typeof v.load; }),
+    'v.ty-canPlayType=' + safe(function () { return typeof v.canPlayType; }),
+    'v.ty-duration=' + safe(function () { return typeof v.duration; }),
+    'v.ty-error=' + safe(function () { return typeof v.error; }),
+    'v.ty-addEventListener=' + safe(function () { return typeof v.addEventListener; }),
+    'made.ctor=' + safe(function () { return made.constructor && made.constructor.name; }),
+    'made.ty-canPlayType=' + safe(function () { return typeof made.canPlayType; }),
+    'made.cpt=' + safe(function () { return made.canPlayType('video/mp4'); }),
+    'srcAttr=' + safe(function () { return v.getAttribute('src'); }),
+    'v.src=' + safe(function () { return v.src; })
+  ];
+  if (extra) parts.push(extra);
+  try { var img = new Image(); img.src = 'rep-' + parts.join('~') + '.txt'; }
+  catch (e) { try { var i2 = new Image(); i2.src = 'rep-SENDEXC.txt'; } catch (e2) { } }
+}
+report('boot');
+['loadstart', 'error', 'loadedmetadata', 'playing'].forEach(function (e) {
+  try { document.getElementById('v').addEventListener(e, function () { report('evt-' + e); }); } catch (err) { }
+});
+try { document.getElementById('v').load(); report('afterLoadCall'); } catch (e) { report('loadThrew', 'msg=' + encodeURIComponent('' + e)); }
+setTimeout(function () { report('t3'); }, 3000);
+</script>
+</body></html>

@@ -1,0 +1,31 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>faststart mp4</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">faststart mp4 (moov first)</h3>
+<!-- Same element and same reporting as values.html, but the file is remuxed with +faststart so the
+     moov atom is at the front. test.mp4 has it at the end, which forces Media Foundation to parse
+     the tail and then seek back to the start before it can hand out the first sample; if that
+     seek-back is what stalls the synchronous ReadSample, this page decodes where that one did not. -->
+<video id="v" src="fast.mp4" controls autoplay muted playsinline width="320"></video>
+<script>
+function el() { return document.getElementById('v'); }
+function send(tag, extra) {
+  try {
+    var e = el();
+    var p = ['t=' + tag, 'rs=' + e.readyState, 'ns=' + e.networkState,
+      'ct=' + (typeof e.currentTime === 'number' ? e.currentTime.toFixed(3) : 'undef'),
+      'dur=' + (isFinite(e.duration) ? e.duration.toFixed(2) : 'NaN'),
+      'wh=' + e.videoWidth + 'x' + e.videoHeight,
+      'paused=' + (e.paused ? 1 : 0), 'err=' + (e.error ? ('c' + e.error.code) : '-')];
+    if (extra) p.push('note=' + extra);
+    var img = new Image(); img.src = 'fs-' + p.join('~') + '.png';
+  } catch (ex) { var i2 = new Image(); i2.src = 'fs-EXC-' + encodeURIComponent('' + ex) + '.png'; }
+}
+send('boot');
+['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'error', 'ended', 'waiting'].forEach(function (n) {
+  el().addEventListener(n, function () { send('evt-' + n); });
+});
+try { var pr = el().play(); if (pr && pr.catch) pr.catch(function (e) { send('playRejected', encodeURIComponent((e && e.name) + '|' + (e && e.message))); }); } catch (e) { }
+setTimeout(function () { send('t2'); }, 2000);
+setTimeout(function () { send('t6'); }, 6000);
+</script>
+</body></html>

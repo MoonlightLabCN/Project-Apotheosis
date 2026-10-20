@@ -1,0 +1,13 @@
+Source/ThirdParty/sml/LICENSE_1_0.txt
+Source/ThirdParty/sml/README-apotheosis.md
+Source/ThirdParty/sml/sml.hpp
+Source/WTF/wtf/ApoLoadPhase.h
+Source/WTF/wtf/ApoLoadThrottle.h
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridCore.cpp
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridCore.h
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridMachines.h
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridModel.cpp
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridModel.h
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridStore.cpp
+Source/WebCore/platform/graphics/texmap/TextureMapperTileGridStore.h
+Source/WebCore/platform/graphics/texmap/TextureMapperTiledStore.h

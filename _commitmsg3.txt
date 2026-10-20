@@ -1,0 +1,34 @@
+feat: <select> 下拉弹窗(PortUIBridge UIRequestSelect + harness 原生 ListView)
+
+createPopupMenu() 一直 return nullptr,点下拉什么都不弹;给 showPopup 补判空只是
+让它不崩,功能仍然没有。现在 WebCore 的契约被完整满足:它拿到一个真的 PopupMenu
+并对其调 show(),请求经 PortUIBridge 异步到壳,壳用原生卡回答。
+
+引擎/桥(port/):
+- PortUIBridge.h: UIRequestSelect = 5(当初就给它留的编号,现在 live);新增
+  queueSelectPopup(client, outId) —— createPopupMenu 要的形态:入队 + 交回对象;
+  cancelSelectPopup(id) —— 页面自己关弹窗/元素没了时收尾。
+- PortUIBridge.cpp: enqueueSelectPopup 组 payload("<选中行>\t<行文本>...",
+  行首 \x01 标 separator/label/disabled,200 行上限是给壳卡片的布局护栏而非语义
+  上限);PortSelectPopupMenu 实现 PopupMenu 四个虚函数,show() 刻意空转(请求
+  在 createPopupMenu 里已入队,再入一次会双份),hide() 走 cancelSelectPopup。
+  completeSelectPopup 按会话代数判陈旧,dead <select> 碰不到
+  (PopupMenuClient 本身是 AbstractRefCountedAndCanMakeWeakPtr)。
+  clearPendingUIRequests 也收尾 select:否则元素永远停在 open 态。
+- PortChromeClient: createPopupMenu 从 nullptr 改为桥接(const final 与基类一致)。
+  createSearchPopupMenu 保持 nullptr —— datalist 是另一个缺口
+  (FEATURE-GAPS §1),而且它没有"点了什么都没反应"的可见断裂,宁缺勿半成品。
+
+harness(harness/):
+- MainPage.xaml: SelectPopup overlay,照 PromptBox/MessageDialog 的自绘模式;
+  选项 ListView(虚拟化,超长可滚 + 初始高亮),遮照点击=取消。
+- MainPage.xaml.cpp: ShowSelectPopup 拆 payload(分隔符/标签/禁用行各自渲染),
+  AnswerSelectPopup 回 WebCoreCompleteSelectPopup(id, index);disabled 行 Tag=nullptr,
+  选中也不作答。行下标 == 引擎 listIndex(驱动按引擎顺序发,每类行都占一格),
+  所以索引直接映射。
+- gen-xaml-codebehind.ps1: EVMAP 补 SelectionChanged(ListView 不是 Button,
+  这个事件是承重墙 —— 用户选哪行就是答案)。
+- MainPage.g.h 手补 3 个字段(fallback XAML 工具链不自动补)。
+
+两份 WebCoreDriver.h 已同步(新增 WebCoreCompleteSelectPopup + kind 5 的 payload
+约定)。真机验证待做:装了 0.2.5.15 后点一个 <select> 应弹原生列表、选一行能改页面。

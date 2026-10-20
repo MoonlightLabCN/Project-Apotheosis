@@ -1,0 +1,37 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>playback values</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">playback values</h3>
+<!-- Unlike the earlier probe, this reports VALUES, not typeof: the question now is whether the
+     element actually reaches HAVE_CURRENT_DATA and whether the clock advances. -->
+<video id="v" src="test.mp4" controls autoplay width="320"></video>
+<script>
+function v() { return document.getElementById('v'); }
+function snap(tag) {
+  try {
+    var e = v();
+    var parts = [
+      't=' + tag,
+      'rs=' + e.readyState,
+      'ns=' + e.networkState,
+      'ct=' + (typeof e.currentTime === 'number' ? e.currentTime.toFixed(3) : 'undef'),
+      'dur=' + (isFinite(e.duration) ? e.duration.toFixed(2) : 'NaN'),
+      'wh=' + e.videoWidth + 'x' + e.videoHeight,
+      'paused=' + (e.paused ? 1 : 0),
+      'ended=' + (e.ended ? 1 : 0),
+      'err=' + (e.error ? ('c' + e.error.code) : '-'),
+      'seeking=' + (e.seeking ? 1 : 0),
+      'buf=' + (e.buffered && e.buffered.length ? e.buffered.length + '@' + e.buffered.end(0).toFixed(2) : 'none')
+    ];
+    var img = new Image(); img.src = 'val-' + parts.join('~') + '.png';
+  } catch (ex) { var i2 = new Image(); i2.src = 'val-EXC-' + encodeURIComponent('' + ex) + '.png'; }
+}
+snap('boot');
+['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'progress', 'error', 'ended', 'waiting', 'stalled'].forEach(function (n) {
+  v().addEventListener(n, function () { snap('evt-' + n); });
+});
+try { v().play(); snap('afterPlayCall'); } catch (e) { snap('playThrew'); }
+setTimeout(function () { snap('t2'); }, 2000);
+setTimeout(function () { snap('t6'); }, 6000);
+setTimeout(function () { snap('t12'); }, 12000);
+</script>
+</body></html>

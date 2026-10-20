@@ -1,0 +1,211 @@
+==> ARM32 UWP ������ע�� (MSVC=14.44.35207, cl=C:\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\arm, SDK=10.0.22621.0, target=ARM32/Thumb-2 UWP)
+    cl �Լ�: ���� ARM �� Microsoft (R) C/C++ �Ż������� 19.44.35228 ��
+==> configure GPU build (build-clang-gpu, Release, JIT+TextureMapper+ANGLE)
+-- The C compiler identification is Clang 22.1.7 with MSVC-like command-line
+-- The CXX compiler identification is Clang 22.1.7 with MSVC-like command-line
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/LLVM/bin/clang-cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/LLVM/bin/clang-cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- The CMake build type is: Release
+-- Found Perl: C:/Program Files/Git/usr/bin/perl.exe (found suitable version "5.42.3", minimum required is "5.10.0")
+-- Found PerlModules: TRUE  found components: English FindBin JSON::PP
+-- Found Python: C:/Python313/python.exe (found version "3.13.7") found components: Interpreter
+-- Ruby interpreter executable
+-- Ruby interpreter executable - C:/Ruby33-x64/bin/ruby.exe (version: 3.3.6)
+-- Enabling ccache: Couldn't find ccache program. Not enabling it.
+-- Performing Test C_COMPILER_SUPPORTS_-fdebug-types-section
+-- Performing Test C_COMPILER_SUPPORTS_-fdebug-types-section - Failed
+-- Performing Test CXX_COMPILER_SUPPORTS_-fdebug-types-section
+-- Performing Test CXX_COMPILER_SUPPORTS_-fdebug-types-section - Failed
+-- Performing Test C_COMPILER_SUPPORTS_-gsimple-template-names
+-- Performing Test C_COMPILER_SUPPORTS_-gsimple-template-names - Failed
+-- Performing Test CXX_COMPILER_SUPPORTS_-gsimple-template-names
+-- Performing Test CXX_COMPILER_SUPPORTS_-gsimple-template-names - Failed
+-- Performing Test C_COMPILER_SUPPORTS_-mllvm -dwarf-linkage-names__Abstract
+-- Performing Test C_COMPILER_SUPPORTS_-mllvm -dwarf-linkage-names__Abstract - Failed
+-- Performing Test CXX_COMPILER_SUPPORTS_-mllvm -dwarf-linkage-names__Abstract
+-- Performing Test CXX_COMPILER_SUPPORTS_-mllvm -dwarf-linkage-names__Abstract - Failed
+-- Performing Test C_COMPILER_SUPPORTS_-fno-strict-aliasing
+-- Performing Test C_COMPILER_SUPPORTS_-fno-strict-aliasing - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-fno-strict-aliasing
+-- Performing Test CXX_COMPILER_SUPPORTS_-fno-strict-aliasing - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wformat-security
+-- Performing Test C_COMPILER_SUPPORTS_-Wformat-security - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wmissing-format-attribute
+-- Performing Test C_COMPILER_SUPPORTS_-Wmissing-format-attribute - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wpointer-arith
+-- Performing Test C_COMPILER_SUPPORTS_-Wpointer-arith - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wundef
+-- Performing Test C_COMPILER_SUPPORTS_-Wundef - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wformat-security
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wformat-security - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wmissing-format-attribute
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wmissing-format-attribute - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wpointer-arith
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wpointer-arith - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wundef
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wundef - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Qunused-arguments
+-- Performing Test C_COMPILER_SUPPORTS_-Qunused-arguments - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-parentheses-equality
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-parentheses-equality - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-misleading-indentation
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-misleading-indentation - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-psabi
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-psabi - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-nullability-completeness
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-nullability-completeness - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Qunused-arguments
+-- Performing Test CXX_COMPILER_SUPPORTS_-Qunused-arguments - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-parentheses-equality
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-parentheses-equality - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-misleading-indentation
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-misleading-indentation - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-psabi
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-psabi - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-nullability-completeness
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-nullability-completeness - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-noexcept-type
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-noexcept-type - Success
+-- Performing Test C_COMPILER_SUPPORTS_-pipe
+-- Performing Test C_COMPILER_SUPPORTS_-pipe - Failed
+-- Performing Test CXX_COMPILER_SUPPORTS_-pipe
+-- Performing Test CXX_COMPILER_SUPPORTS_-pipe - Failed
+-- Performing Test C_COMPILER_SUPPORTS_-Werror__undefined-inline
+-- Performing Test C_COMPILER_SUPPORTS_-Werror__undefined-inline - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Werror__undefined-internal
+-- Performing Test C_COMPILER_SUPPORTS_-Werror__undefined-internal - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Werror__undefined-inline
+-- Performing Test CXX_COMPILER_SUPPORTS_-Werror__undefined-inline - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Werror__undefined-internal
+-- Performing Test CXX_COMPILER_SUPPORTS_-Werror__undefined-internal - Success
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-character-conversion
+-- Performing Test C_COMPILER_SUPPORTS_-Wno-character-conversion - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-character-conversion
+-- Performing Test CXX_COMPILER_SUPPORTS_-Wno-character-conversion - Success
+-- Performing Test C_COMPILER_SUPPORTS_-fcolor-diagnostics
+-- Performing Test C_COMPILER_SUPPORTS_-fcolor-diagnostics - Success
+-- Performing Test C_COMPILER_SUPPORTS_-fdiagnostics-color__always
+-- Performing Test C_COMPILER_SUPPORTS_-fdiagnostics-color__always - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-fcolor-diagnostics
+-- Performing Test CXX_COMPILER_SUPPORTS_-fcolor-diagnostics - Success
+-- Performing Test CXX_COMPILER_SUPPORTS_-fdiagnostics-color__always
+-- Performing Test CXX_COMPILER_SUPPORTS_-fdiagnostics-color__always - Success
+-- Performing Test ATOMICS_ARE_BUILTIN
+-- Performing Test ATOMICS_ARE_BUILTIN - Success
+-- Performing Test STD_FILESYSTEM_IS_AVAILABLE
+-- Performing Test STD_FILESYSTEM_IS_AVAILABLE - Failed
+-- Performing Test STD_EXPERIMENTAL_FILESYSTEM_IS_AVAILABLE
+-- Performing Test STD_EXPERIMENTAL_FILESYSTEM_IS_AVAILABLE - Failed
+-- Performing Test HAVE_FLOAT16
+-- Performing Test HAVE_FLOAT16 - Success
+-- Performing Test ARM_THUMB2_DETECTED
+-- Performing Test ARM_THUMB2_DETECTED - Success
+-- Linker variant in use: UNKNOWN 
+--   Linker supports thin archives - FALSE
+--   Linker supports split debug info - FALSE
+--   Linker supports --gdb-index - FALSE
+--   Linker supports --disable-new-dtags - FALSE
+--   Linker supports --gc-sections - FALSE
+-- Archiver variant in use: 
+--   Archiver supports thin archives - FALSE
+-- Performing Test CXX_STDLIB_IS_LIBCPP
+-- Performing Test CXX_STDLIB_IS_LIBCPP - Failed
+-- Performing Test CXX_STDLIB_IS_GLIBCXX
+-- Performing Test CXX_STDLIB_IS_GLIBCXX - Failed
+-- C++ standard library in use: UNKNOWN
+--   Assertions disabled, USE_CXX_STDLIB_ASSERTIONS=OFF
+-- Looking for features.h
+-- Looking for features.h - not found
+-- Looking for errno.h
+-- Looking for errno.h - found
+-- Looking for langinfo.h
+-- Looking for langinfo.h - not found
+-- Looking for sys/mman.h
+-- Looking for sys/mman.h - not found
+-- Looking for pthread_np.h
+-- Looking for pthread_np.h - not found
+-- Looking for sys/param.h
+-- Looking for sys/param.h - not found
+-- Looking for sys/time.h
+-- Looking for sys/time.h - not found
+-- Looking for sys/timeb.h
+-- Looking for sys/timeb.h - found
+-- Looking for linux/memfd.h
+-- Looking for linux/memfd.h - not found
+-- Looking for _aligned_malloc
+-- Looking for _aligned_malloc - found
+-- Looking for localtime_r
+-- Looking for localtime_r - not found
+-- Looking for malloc_trim
+-- Looking for malloc_trim - not found
+-- Looking for statx
+-- Looking for statx - not found
+-- Looking for timegm
+-- Looking for timegm - not found
+-- Looking for timerfd_create
+-- Looking for timerfd_create - not found
+-- Looking for vasprintf
+-- Looking for vasprintf - not found
+-- Looking for regexec
+-- Looking for regexec - not found
+-- Looking for pthread_main_np
+-- Looking for pthread_main_np - not found
+-- Looking for MAP_ALIGNED
+-- Looking for MAP_ALIGNED - not found
+-- Looking for SHM_ANON
+-- Looking for SHM_ANON - not found
+-- Looking for timingsafe_bcmp
+-- Looking for timingsafe_bcmp - not found
+-- Looking for SIGTRAP
+-- Looking for SIGTRAP - not found
+-- Performing Test HAVE_STAT_BIRTHTIME_value
+-- Performing Test HAVE_STAT_BIRTHTIME_value - Failed
+-- Performing Test HAVE_TM_GMTOFF_value
+-- Performing Test HAVE_TM_GMTOFF_value - Failed
+-- Performing Test HAVE_TM_ZONE_value
+-- Performing Test HAVE_TM_ZONE_value - Failed
+-- Performing Test INT128_IS_USABLE
+-- Performing Test INT128_IS_USABLE - Failed
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Found Threads: TRUE
+-- WinUWP: 未找到 ARM clang_rt.builtins, 依赖 MSVC CRT 的 ARM helper
+-- Disabling ENABLE_VIDEO_USES_ELEMENT_FULLSCREEN since ENABLE_VIDEO is disabled.
+-- Disabling USE_SKIA_ENCODERS since USE_SKIA is disabled.
+-- Found ICU: C:/icu-arm-uwp/include (found suitable version "78.3", minimum required is "70.1") found components: data i18n uc
+CMake Error at C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:138 (set):
+  Syntax error in cmake code at
+
+    C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:138
+
+  when parsing string
+
+    C:/vcpkg/installed/arm-uwp/lib;\vcpkg\installed\arm-uwp\lib\pkgconfig/../../lib
+
+  Invalid character escape '\v'.
+Call Stack (most recent call first):
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:178 (_pkgconfig_set)
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:194 (_pkgconfig_invoke)
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:679 (_pkgconfig_invoke_dyn)
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:873 (_pkg_check_modules_internal)
+  Source/cmake/FindHarfBuzz.cmake:69 (pkg_check_modules)
+  Source/cmake/OptionsWinUWP.cmake:228 (find_package)
+  Source/cmake/WebKitCommon.cmake:332 (include)
+  CMakeLists.txt:22 (include)
+
+
+-- Configuring incomplete, errors occurred!
+==> configure �˳��� 1
+CONFIGURE-EXIT=0

@@ -1,0 +1,45 @@
+feat: 引擎侧复制粘贴 + 长按上下文菜单(harness 原生卡)
+
+原本"复制/剪切/粘贴/长按选字/右键菜单"全部不可用。审计结论
+(docs/FEATURE-GAPS-2026-10-08.md)断点在两处:port 的 pasteboard 全 no-op 桩,
+以及入口层为零。本提交补齐两头。
+
+引擎侧(port/stubs-pasteboard.cpp):
+- Pasteboard::read(PasteboardPlainText&) 从引擎侧 buffer 作答;writePlainText 写入
+  该 buffer;writeSelection 自己序列化选中文本(plainText(range));clear 清空。
+  此前它们是空实现/ no-op。
+- 补 Pasteboard::documentFragment() —— 它唯一的定义在被 DROP 的
+  platform/win/PasteboardWin.cpp 里,所以链接器从来没要过它:整条编辑链是死的,
+  没人调用。现在 Editor::pasteWithPasteboard 要它,从 buffer 经 createFragmentFromText
+  建 fragment(纯文本分支;原实现的 CF_HTML 分支在 buffer 里无对应物)。
+- Editor::pasteWithPasteboard:照抄 editing/win/EditorWin.cpp:41(该文件同样被 DROP,
+  这才是当初必须打桩的原因)。它调用的 shouldInsertFragment / pasteAsFragment /
+  canSmartReplaceWithPasteboard 都在库里,只缺平台文件。selectedRange() 是 Editor 私有,
+  用公开等价 document().selection().selection().firstRange()。
+- apoClipboardRead/apoClipboardWrite(extern "C"):给驱动 C ABI 用的 U8 访问器。
+  刻意不用 C++ namespace 访问器 —— 驱动那些函数在 extern "C" 块里,C++ 命名空间
+  声明在那种上下文里链接不到(裸符号 text/setText),踩过一次。
+
+驱动侧(port/WebCoreDriver.cpp,+ 两份头同步):
+- 新增 kErrEditingRefused(-15)。
+- WebCoreCopySelection/CutSelection/Paste/SelectAll:走 Document::execCommand()
+  公开入口(Editor::performCutOrCopy 是 private),壳和页面 document.execCommand('copy')
+  完全同一条路、同一套 enable/selection 检查。Paste 前先探 buffer 空,避免插空串。
+- WebCoreClipboardGetText/SetText:引擎 buffer 的 U8 视图,壳用它搬 UWP DataPackage。
+
+harness 侧(harness/, Win10 Fluent 风格):
+- 长按卡从"只有新标签页打开"扩成通用上下文卡,复用同一张 LinkMenuCard:
+  复制链接 / 复制 / 全选 / 分享四个行,图标 Segoe MDL2,文案每次弹出按语言重写(L8),
+  行可见性在卡片 Measure 之前设好(否则量的还是旧高度)。link 长按显示链接行,
+  纯文本长按隐藏。
+- OnPageHolding 分流:非链接且非 drag widget(canvas / touch-action:none)时不再
+  走 WebCoreLongPressAt 的 DRAG_WIDGET_ONLY 早退(那会 return kOK 什么都不做),
+  改为 rc=0 + 开卡片 —— 全程不向页面派发任何事件,所以"长按不会误导航"这条原有
+  安全性不变,只是原来什么都不做的那一半现在有菜单了。
+- 剪贴板搬运:ClipboardPushToSystem(引擎 post -> 读 buffer -> DataPackage::SetText)
+  和 ClipboardPullFromSystem(DataPackage::GetTextAsync via ppltasks -> post 回填 ->
+  post WebCorePaste)。两条都是异步 post,引擎从头到尾不阻塞、不等 UI 线程 ——
+  这是本 port 的铁律(ANGLE 把 surface 工作marshal回面板 dispatcher,等就死锁)。
+- MainPage.g.h 手补 8 个新控件字段(fallback XAML 工具链不自动补)。
+
+诚实标注:真机验证还没做(见下)。这一轮只做到编译+链接零错误。

@@ -1,0 +1,50 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>muted autoplay</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">muted autoplay</h3>
+<!-- The play promise is rejected with AbortError, which is the media session refusing playback
+     (clientWillBeginPlayback -> false). The usual reason in WebKit is the autoplay policy: audible
+     media needs a user gesture. Muted media is exempt, so if THIS page decodes, the gate is the
+     policy and not the pipeline. Same reporting as the other probes. -->
+<video id="v" src="test.mp4" controls autoplay muted width="320"></video>
+<script>
+function v() { return document.getElementById('v'); }
+var pState = 'none';
+function snap(tag) {
+  try {
+    var e = v();
+    var parts = [
+      't=' + tag,
+      'rs=' + e.readyState,
+      'ns=' + e.networkState,
+      'ct=' + (typeof e.currentTime === 'number' ? e.currentTime.toFixed(3) : 'undef'),
+      'dur=' + (isFinite(e.duration) ? e.duration.toFixed(2) : 'NaN'),
+      'wh=' + e.videoWidth + 'x' + e.videoHeight,
+      'paused=' + (e.paused ? 1 : 0),
+      'muted=' + (e.muted ? 1 : 0),
+      'vol=' + e.volume,
+      'ended=' + (e.ended ? 1 : 0),
+      'err=' + (e.error ? ('c' + e.error.code) : '-'),
+      'p=' + pState,
+      'buf=' + (e.buffered && e.buffered.length ? e.buffered.length + '@' + e.buffered.end(0).toFixed(2) : 'none')
+    ];
+    var img = new Image(); img.src = 'muted-' + parts.join('~') + '.png';
+  } catch (ex) { var i2 = new Image(); i2.src = 'muted-EXC-' + encodeURIComponent('' + ex) + '.png'; }
+}
+function watch(promise, label) {
+  if (promise && promise.then) {
+    promise.then(function () { pState = label + ':resolved'; },
+                 function (e) { pState = label + ':rejected:' + (e && e.name ? e.name : '?'); });
+  } else { pState = label + ':noPromise'; }
+}
+['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'waiting', 'stalled', 'error', 'ended'].forEach(function (n) {
+  v().addEventListener(n, function () { snap('evt-' + n); });
+});
+v().muted = true;
+snap('boot');
+watch(v().play(), 'play1');
+snap('afterPlayCall');
+setTimeout(function () { snap('t2'); }, 2000);
+setTimeout(function () { snap('t6'); }, 6000);
+setTimeout(function () { snap('t12'); }, 12000);
+</script>
+</body></html>

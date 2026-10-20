@@ -1,0 +1,49 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>autoplay policy probe</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">autoplay policy probe</h3>
+<!-- The previous probe left us with paused=1 and readyState stuck at HAVE_METADATA. Two very
+     different causes look identical from there: play() being refused (no user gesture), or our
+     decoder producing no frames. This page separates them: it reports the play() promise's
+     outcome (a refusal arrives as a named rejection) and also tries muted playback, which
+     WebKit's autoplay policy normally allows without a gesture. -->
+<video id="v" src="test.mp4" controls autoplay muted playsinline width="320"></video>
+<script>
+function el() { return document.getElementById('v'); }
+function send(tag, extra) {
+  try {
+    var e = el();
+    var p = [
+      't=' + tag,
+      'rs=' + e.readyState,
+      'ns=' + e.networkState,
+      'ct=' + (typeof e.currentTime === 'number' ? e.currentTime.toFixed(3) : 'undef'),
+      'dur=' + (isFinite(e.duration) ? e.duration.toFixed(2) : 'NaN'),
+      'wh=' + e.videoWidth + 'x' + e.videoHeight,
+      'paused=' + (e.paused ? 1 : 0),
+      'muted=' + (e.muted ? 1 : 0),
+      'vol=' + e.volume,
+      'err=' + (e.error ? ('c' + e.error.code + ':' + (e.error.message || '')) : '-')
+    ];
+    if (extra) p.push('note=' + extra);
+    var img = new Image(); img.src = 'ap-' + p.join('~') + '.png';
+  } catch (ex) { var i2 = new Image(); i2.src = 'ap-EXC-' + encodeURIComponent('' + ex) + '.png'; }
+}
+send('boot');
+['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'error', 'ended', 'waiting', 'stalled'].forEach(function (n) {
+  el().addEventListener(n, function () { send('evt-' + n); });
+});
+// 1. the promise outcome is the direct answer: resolved, or rejected with a name.
+try {
+  var pr = el().play();
+  if (pr && pr.then) {
+    pr.then(function () { send('playResolved'); }, function (e) { send('playRejected', encodeURIComponent((e && e.name ? e.name : '?') + '|' + (e && e.message ? e.message : ''))); });
+  } else { send('playNoPromise'); }
+} catch (e) { send('playThrew', encodeURIComponent('' + e)); }
+// 2. a document-level click handler records whether a gesture ever arrives (the user tapping the
+//    page would be one), so a later 'still blocked' result is unambiguous.
+document.addEventListener('click', function () { send('gesture-click'); try { el().play(); } catch (e) { } });
+setTimeout(function () { send('t1'); }, 1000);
+setTimeout(function () { send('t4'); }, 4000);
+setTimeout(function () { send('t9'); }, 9000);
+</script>
+</body></html>

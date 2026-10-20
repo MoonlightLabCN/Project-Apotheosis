@@ -1,0 +1,58 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>replay probe</title></head>
+<body style="margin:0;background:#101418;color:#e8e8e8;font:16px sans-serif">
+<h3 style="padding:10px">replay probe</h3>
+<!-- The device shows reads=1 with phase=6, which has two readings we must tell apart:
+     (a) the decode thread is blocked on the player lock, or
+     (b) it broke out of the push loop because m_paused was still true and is now parked
+         waiting for playback - i.e. MediaPlayer::play() never reached the player.
+     Calling pause() then play() again separates them: if (b), reads climbs and the page keeps
+     reporting; if (a), the engine thread blocks inside play() and the reports stop dead. The
+     promise state is reported too, because a play() promise that never settles is exactly what
+     a never-called completePlayInternal() looks like. -->
+<video id="v" src="test.mp4" controls autoplay width="320"></video>
+<script>
+function v() { return document.getElementById('v'); }
+var pState = 'none';
+function snap(tag) {
+  try {
+    var e = v();
+    var parts = [
+      't=' + tag,
+      'rs=' + e.readyState,
+      'ns=' + e.networkState,
+      'ct=' + (typeof e.currentTime === 'number' ? e.currentTime.toFixed(3) : 'undef'),
+      'dur=' + (isFinite(e.duration) ? e.duration.toFixed(2) : 'NaN'),
+      'wh=' + e.videoWidth + 'x' + e.videoHeight,
+      'paused=' + (e.paused ? 1 : 0),
+      'ended=' + (e.ended ? 1 : 0),
+      'err=' + (e.error ? ('c' + e.error.code) : '-'),
+      'p=' + pState,
+      'buf=' + (e.buffered && e.buffered.length ? e.buffered.length + '@' + e.buffered.end(0).toFixed(2) : 'none')
+    ];
+    var img = new Image(); img.src = 'replay-' + parts.join('~') + '.png';
+  } catch (ex) { var i2 = new Image(); i2.src = 'replay-EXC-' + encodeURIComponent('' + ex) + '.png'; }
+}
+function watch(promise, label) {
+  if (promise && promise.then) {
+    promise.then(function () { pState = label + ':resolved'; },
+                 function (e) { pState = label + ':rejected:' + (e && e.name ? e.name : '?'); });
+  } else {
+    pState = label + ':noPromise';
+  }
+}
+['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'waiting', 'stalled', 'error', 'ended'].forEach(function (n) {
+  v().addEventListener(n, function () { snap('evt-' + n); });
+});
+snap('boot');
+watch(v().play(), 'play1');
+snap('afterPlayCall');
+setTimeout(function () { v().pause(); snap('t4-pause'); }, 4000);
+setTimeout(function () {
+  try { watch(v().play(), 'play2'); snap('t6-replay'); }
+  catch (ex) { pState = 'threw:' + ex; snap('t6-replayThrew'); }
+}, 6000);
+setTimeout(function () { snap('t8'); }, 8000);
+setTimeout(function () { snap('t12'); }, 12000);
+setTimeout(function () { snap('t16'); }, 16000);
+</script>
+</body></html>

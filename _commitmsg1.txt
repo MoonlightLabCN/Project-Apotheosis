@@ -1,0 +1,49 @@
+fix: 0.2.4.4->0.2.5.x 交互闪退三部曲（jitStubs / RunLoop / select popup）
+
+0.2.5.8 "打开任意网站就崩" 的根因链与修复，全部真机验证过（Lumia 950）：
+
+1) VM::jitStubs == nullptr 却被解引用（原回归，已修+验证）
+   VM::VM 只在 if (Options::useJIT()) 时创建 jitStubs，但 JITThunks 的消费者
+   根本不看 useJIT：VM::getCTIStub() 无 useJIT 守卫、VM::getHostFunction() 的
+   守卫是针对整个分流的、InlineCacheCompiler::emitExplicitExceptionHandler()
+   直接调 getCTIStub。harness 的 ApplyJitSetting() 往引擎线程 post
+   WebCoreSetJitEnabled 与首个 Page/VM 创建竞态 -> VM 建在 useJIT==0 时不建
+   jitStubs -> 后续任何走 thunk 的路径空指针。
+   minidump 实证：JITThunks::hostFunctionStub with this==nullptr，
+   ldr r0,[r10] 于 m_hostFunctionStubs 偏移 0x3C0（m_commonThunks 为 0x44）。
+   修复：ENABLE(JIT) 下改为 Options::useJIT() || ExecutableAllocator::
+   singleton().isValid() —— 可执行池可用就必须有 JITThunks（它不是 JIT
+   执行期专属，LLInt 的 IC/异常 thunk 和 host function 桩都在里面）。
+   池无效仍跳过，保住 0.2.4.3 的教训。
+
+2) RunLoopGeneric ScheduledTask 生命周期（次生崩溃，防护已加）
+   "checked-ptr: ScheduledTask deleted with 1 CheckedPtr(s) outstanding" ->
+   "released a CheckedPtr to an already-deleted object" -> SIGABRT。
+   在 ~TimerBase() 末尾补 detachScheduledTaskWithLock()：按真实成员关系走
+   m_schedules 树摘节点，而不是 isScheduled() 旗标的副本；触发时写 stage.txt
+   留痕。注：该诊断行在真机上未出现，说明悬垂 CheckedPtr 不在树里，
+   根因假设尚未证实——防护有效但问题本身仍开放。
+
+3) HTMLSelectElement::showPopup 空 popup 解引用（apple.com 机型对比，已修+验证）
+   PortChromeClient::createPopupMenu() 返回 nullptr（上游 EmptyChromeClient
+   返回 no-op 的 EmptyPopupMenu，port 的 nullptr 违背上游假设），
+   protect(m_popup) 在 null RefPtr 上构造 Ref，析构无条件 ptr->deref()。
+   修复：show(...) 前补 !m_popup 与 optionToListIndex()<0 两道判空。
+   0.2.5.15 真机 180 秒零崩溃（原约 40 秒必崩）。
+
+驱动侧配套：
+- ensureWebCoreInitialized() 在 JSC::initialize() 后立刻钉死 useJIT 状态，
+  不再依赖 harness 那个竞态的 post；diagnostic mode 优先于 shipping 默认。
+- kDefaultJitDiagnosticMode = 1：1.0.0.0 前调试默认开，取 "JIT thunks 全在、
+  baseline 关" 这个 VM.cpp 修复后最安全的形态（0.2.4.4 等价行为）。
+- markJitSessionStarted()：建过 session 后拒绝迟到的 JIT 启用。
+
+文档：
+- docs/JIT-ARM32-R9-ROOT-CAUSE-2026-10-07.md：补 showPopup 根因修正与
+  0.2.5.15 验证结果（含对早前错误反汇编/符号化的作废声明）。
+- docs/FEATURE-GAPS-2026-10-08.md：新增。stub/空实现/编译期关掉的完整缺口
+  清单 + 长按选字/复制粘贴/右键菜单为何不可用的三层断点分析 + 视频音频方案。
+- docs/CONSULT-2026-10-07.md：新增。会诊材料（含 OOM 实测数据：非内存问题，
+  峰值 778MB/1536MB，压力全程 Low）。
+
+版本 0.2.5.15。

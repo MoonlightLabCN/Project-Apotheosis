@@ -1,0 +1,32 @@
+fix: 软件回退路径不再丢 UI —— PortChromeClient 无条件装配,gate 下沉到合成钩子
+
+FEATURE-GAPS §0① / §4-1 排第一的结构性问题:ChromeClient 原来按 g_gpuActive 取舍,
+GPU 起不来时整个页面跑上游 EmptyChromeClient,于是 alert/confirm/prompt 静默、
+<input type=file> 点了没反应、<select>/color/date 一个都弹不出来(这些在
+EmptyChromeClient 里全是空实现)。软件回退路是 harness 明确保留的(GpuInit 失败 →
+照旧走 Cairo),所以这不是罕见分支。
+
+修法:ChromeClient 改为无条件装配,把 gate 从"整个 client"下沉到"需要真合成的那几个
+钩子"(PortChromeClient::requestPresent() 经新增的 setCompositingPathActive(g_gpuActive)
+控制;WebCoreGpuInit 成功时也置位,让已建好的软件会话立刻开始呈现,不必等下次导航)。
+
+为什么安全(逐项核对过,不是想当然):
+- PortChromeClient 的 UI 工作全走 PortUIBridge 异步请求/响应,**不碰 GL/EGL/ANGLE**；
+- 合成开关本来就已单独 gate:setAcceleratedCompositingEnabled(g_gpuActive) /
+  setForceCompositingMode(g_gpuActive),原来那层 chromeClient 门是多余的;
+- 与 EmptyChromeClient 的**合成侧**差异全部核对为等价:
+  · scheduleRenderingUpdate() 上游默认即 false(PortChromeClient 也返回 false)
+    → Page::scheduleRenderingUpdateInternal 两边都走 RenderingUpdateScheduler,
+    行为一致(Page.cpp:2145-2150 实证);
+  · attachRootGraphicsLayer 只在开合成时才被调(软件路径收 null 或不调);
+  · triggerRenderingUpdate / setNeedsOneShotDrawingSynchronization /
+    didFinishLoadingImageForElement 都收口在 requestPresent(),gate 后即空操作;
+  · allowsAcceleratedCompositing() / allowedCompositingTriggers() /
+    graphicsLayerFactory() / isEmptyChromeClient() 与 ChromeClient 上游默认逐值相同。
+  → 软件路径的 present 行为逐字节不变(仍是驱动自己的 tick 在驱动),这是在 0.1.7.1
+    闪退教训之后敢动这条路径的前提。
+- paintToRGBA 的 GPU 分支本来就要求 g_gpuActive && root != nullptr(3414 行),
+  不会因为 chrome 非空就误走 GPU 路径。
+
+文档:FEATURE-GAPS §0① 与 §4-1 标记为已修并保留"为什么是这个顺序"的记录。
+版本 0.2.5.17。真机验证待做(见 docs/HANDOFF-2026-10-08.md)。

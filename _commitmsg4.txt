@@ -1,0 +1,47 @@
+feat: <input type=color> 与 date/time 选择器(桥 + harness 原生卡)
+
+FEATURE-GAPS §1 表单缺口里的剩下两项:createColorChooser / createDateTimeChooser
+一直 return nullptr。照 <select> 那条已验证的 PortUIBridge 异步路接上。
+
+引擎/桥(port/):
+- PortUIBridge.h: UIRequestColor=6 / UIRequestDateTime=7(编号当初就预留的);
+  queueColorChooser(client, current) / queueDateTimeChooser(client) +
+  completeColorChooser / completeDateTimeChooser / cancelColorChooser /
+  cancelDateTimeChooser。
+- PendingRequest 用三个独立 client 字段而不是 union/void* —— 三种互不相干的
+  refcounted 接口挤一个槽,每次用都要 cast,而 cast 错类型正是 staleness 机制要防的
+  那种 bug。
+- queueColorChooser 在工厂时就入队(当前值已知道):payload
+  "<#rrggbb>\t<suggested>...",reattach/setSelectedColor 又发 "\x02current\t<#rrggbb>"
+  同 id 刷新(壳更新已在显示的卡,不开第二张)。
+- queueDateTimeChooser **只**在工厂交回对象,真正入队在 showChooser(params):
+  DateTimeChooserParameters 到那一刻才知道,工厂时入队只会发给壳一个空请求。
+  payload "<type>\t<current>\t<min ms>\t<max ms>"(min/max 是 double,0=未设,
+  按整数发好让壳解析 trivial)。
+- PortColorChooser/PortDateTimeChooser 自己持原子计数(ColorChooser/
+  DateTimeChooser 是 AbstractRefCounted,纯虚 ref/deref;第二个 RefCounted<> mixin
+  会和基类的 TZoneMalloc operator new 撞 —— "found in multiple base classes",
+  照抄上游 EmptyPaymentCoordinatorClient 的写法反而编不过,它所在的
+  EmptyClients.cpp 本就没编进来)。
+- 日期客户端用 CheckedPtr 不是 RefPtr:DateTimeChooserClient 是
+  CanMakeCheckedPtr 而**不是** refcounted(RefPtr 直接编不过),裸指针在 <input> 死掉
+  时就是悬垂 —— 和 ScheduledTask 崩溃同一课。颜色客户端是 AbstractRefCounted,
+  照常用 RefPtr。
+- 颜色解析手写 #rgb/#rrggbb/#rrggbbaa(本桥自己产的格式,round-trip 精确),
+  不把整个 CSS 颜色 parser + ScriptExecutionContext 拖进驱动;解析失败=无效
+  Color,didChooseColor(无效色) 就是 WebCore 表达"用户没选到可用值"的方式。
+- clearPendingUIRequests 也收尾两个 chooser,否则元素永远停在打开态。
+
+harness(harness/, Win10 Fluent):
+- ColorChooser 卡:6x7 色板(常用色+灰阶)+ 当前色预览,点色块只移预览、确定才提交
+  (Win10 取色器的"选-确认"节奏);取消/点遮罩回 null = 页面保留原值。
+- DateTimeChooser 卡:按 input type 切日期/时间两个框;值**原样**回传
+  (WebCore 会校验,壳本地化/重排就是 "2026-10-8" 被静默丢掉的原因)。
+- ParseWpfColor 辅助(手搓工具链没有 XamlReader/Binding 的转换器;别用
+  designated initializer,harness 不是 /std:c++20)。
+- gen-xaml-codebehind.ps1 无改动(Click/Tapped 已在 EVMAP 里);
+  MainPage.g.h 手补 15 个新控件字段。
+
+两份 WebCoreDriver.h 同步(WebCoreCompleteColorChooser /
+WebCoreCompleteDateTimeChooser + kind 6/7 的 payload 约定)。
+版本 0.2.5.16。真机验证待做(见 docs/HANDOFF-2026-10-08.md)。

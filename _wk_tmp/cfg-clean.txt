@@ -1,0 +1,42 @@
+==> ARM32 UWP ������ע�� (MSVC=14.44.35207, cl=C:\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\arm, SDK=10.0.22621.0, target=ARM32/Thumb-2 UWP)
+    cl �Լ�: �÷�: cl [ ѡ��... ] �ļ���... [ /link ����ѡ��... ]
+==> configure GPU build (build-clang-gpu, Release, JIT+TextureMapper+ANGLE)
+-- The CMake build type is: Release
+-- Ruby interpreter executable
+-- Ruby interpreter executable - C:/Ruby33-x64/bin/ruby.exe (version: 3.3.6)
+-- Enabling ccache: Couldn't find ccache program. Not enabling it.
+-- Linker variant in use: UNKNOWN 
+--   Linker supports thin archives - FALSE
+--   Linker supports split debug info - FALSE
+--   Linker supports --gdb-index - FALSE
+--   Linker supports --disable-new-dtags - FALSE
+--   Linker supports --gc-sections - FALSE
+-- Archiver variant in use: 
+--   Archiver supports thin archives - FALSE
+-- C++ standard library in use: UNKNOWN
+--   Assertions disabled, USE_CXX_STDLIB_ASSERTIONS=OFF
+-- WinUWP: 未找到 ARM clang_rt.builtins, 依赖 MSVC CRT 的 ARM helper
+CMake Error at C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:138 (set):
+  Syntax error in cmake code at
+
+    C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:138
+
+  when parsing string
+
+    C:/vcpkg/installed/arm-uwp/lib;\vcpkg\installed\arm-uwp\lib\pkgconfig/../../lib
+
+  Invalid character escape '\v'.
+Call Stack (most recent call first):
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:178 (_pkgconfig_set)
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:194 (_pkgconfig_invoke)
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:679 (_pkgconfig_invoke_dyn)
+  C:/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FindPkgConfig.cmake:873 (_pkg_check_modules_internal)
+  Source/cmake/FindHarfBuzz.cmake:69 (pkg_check_modules)
+  Source/cmake/OptionsWinUWP.cmake:228 (find_package)
+  Source/cmake/WebKitCommon.cmake:332 (include)
+  CMakeLists.txt:22 (include)
+
+
+-- Configuring incomplete, errors occurred!
+==> configure �˳��� 1
+CONFIGURE-EXIT=0
