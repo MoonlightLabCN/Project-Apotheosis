@@ -59,7 +59,9 @@ jobs:
             echo "release 已存在,更新 notes"
             gh release edit "$TAG" --title "v$ver" --notes "$notes"
           fi
-          echo "### 记得从构建机附上手资产:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "gh release upload $TAG Harness_${ver}_ARM.appx Harness_${ver}_ARM.cer --clobber" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### 记得从构建机附上手资产:"
+            echo '```'
+            echo "gh release upload $TAG Harness_${ver}_ARM.appx Harness_${ver}_ARM.cer --clobber"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
