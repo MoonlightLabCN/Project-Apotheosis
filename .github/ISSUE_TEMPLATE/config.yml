@@ -1,4 +1,4 @@
-blank_issues_allowed: false
+blank_issues_enabled: false
 contact_links:
   - name: 先读交接单再开工
     url: https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/docs/HANDOFF-VIDEO-AUDIO-2026-10-13.md
@@ -6,3 +6,6 @@ contact_links:
   - name: 工程约束（AGENTS.md）
     url: https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/AGENTS.md
     about: ASCII 路径 / 三套工具链 / 异常关闭 / WK_WINUWP 守卫 / 版本号纪律——违反必踩坑
+  - name: 安全漏洞（私下报告）
+    url: https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/SECURITY.md
+    about: 请不要公开提安全 Issue；按 SECURITY.md 私下联系维护者

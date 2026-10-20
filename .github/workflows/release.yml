@@ -8,28 +8,58 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要创建/更新 release 的 tag（例如 v0.2.5.38）'
+        required: true
+
+permissions:
+  contents: write
 
 jobs:
   release:
+    name: 创建 / 更新 Release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 按模板创建 release
+      - name: 确认 tag 存在且可解析
+        id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          sha=$(git rev-parse --short HEAD)
+          set -e
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          git rev-parse "refs/tags/$tag" >/dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: 按模板创建 / 更新 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -e
+          ver="${TAG#v}"
+          sha=$(git rev-parse --short "$TAG^{commit}")
           notes=$(sed -e "s/{VERSION}/$ver/g" \
                        -e "s/{YYYY-MM-DD}/$(date +%F)/" \
                        -e "s/{SHA}/$sha/g" \
                        .github/RELEASE_TEMPLATE.md)
-          if ! gh release create "$GITHUB_REF_NAME" --target media-mf --title "v$ver" --notes "$notes"; then
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target media-mf --title "v$ver" --notes "$notes"
+          else
             echo "release 已存在,更新 notes"
-            gh release edit "$GITHUB_REF_NAME" --title "v$ver" --notes "$notes"
+            gh release edit "$TAG" --title "v$ver" --notes "$notes"
           fi
-          echo "### 记得从构建机附上手资产:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "gh release upload $GITHUB_REF_NAME Harness_${ver}_ARM.appx Harness_${ver}_ARM.cer --clobber" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### 记得从构建机附上手资产:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh release upload $TAG Harness_${ver}_ARM.appx Harness_${ver}_ARM.cer --clobber" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

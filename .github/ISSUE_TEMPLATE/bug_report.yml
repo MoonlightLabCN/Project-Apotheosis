@@ -1,0 +1,100 @@
+name: 缺陷报告 / Bug report
+description: 真机或构建机的缺陷。请附环境与证据——没有证据的缺陷报告很难定位。
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提 Issue 前请先读 [AGENTS.md](https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/AGENTS.md)
+        和 [docs/CAPABILITIES.md](https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/docs/CAPABILITIES.md)。
+        **真机问题必须附证据**（stage.txt / crash.txt / 服务器日志），否则很难复现。
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: 设备机型
+      options:
+        - Lumia 950
+        - Lumia 950 XL
+        - Lumia 930
+        - Lumia 920
+        - 其他 Windows 10 Mobile 设备
+        - 仅构建机（x64）
+    validations:
+      required: true
+
+  - type: input
+    id: os_build
+    attributes:
+      label: 系统版本
+      description: Device Portal 首页或 stage.txt 里的 OS build（例如 10.0.15254.603）
+      placeholder: "10.0.15254.603"
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: App 版本
+      description: harness/Package.appxmanifest 的 Version
+      placeholder: "0.2.5.38"
+    validations:
+      required: true
+
+  - type: input
+    id: branch_commit
+    attributes:
+      label: 分支 / 提交
+      description: 例如 media-mf @ 6eb00b1
+      placeholder: "media-mf @ 6eb00b1"
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 现象
+      description: 一句话：看到什么，预期是什么
+      placeholder: "打开某页面后……；预期应……"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 …
+        2. 点击 …
+        3. 观察到 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: 预期 vs 实际
+
+  - type: checkboxes
+    id: evidence
+    attributes:
+      label: 证据（真机问题必填）
+      description: 用 tools/pull-file.ps1 可从设备 LocalState 拉取
+      options:
+        - label: stage.txt（含 media / media-state / gpu-gate / timeline 行）
+        - label: crash.txt（若有闪退，注意崩溃时间戳）
+        - label: console.txt（页面 JS 自报）
+        - label: LAN 测试服务器日志（port/_mediatest/server.log，媒体问题必附）
+        - label: mediaaudio.txt（音频问题必附）
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 关键日志
+      description: 粘贴关键行即可，不要贴整份文件
+      render: shell
+
+  - type: textarea
+    id: ruled_out
+    attributes:
+      label: 已排除的可能
+      description: 参考 docs/HANDOFF-VIDEO-AUDIO-2026-10-13.md 的"被证伪的假设"表，避免重复踩坑

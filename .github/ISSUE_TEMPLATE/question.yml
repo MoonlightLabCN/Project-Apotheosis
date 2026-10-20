@@ -1,0 +1,26 @@
+name: 使用问题 / Question
+description: 构建、部署或使用上的问题（不是缺陷报告）。
+title: "[Q] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提问前请先读 [README.md](https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/README.md)
+        与 [docs/HARNESS-BUILD.md](https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/docs/HARNESS-BUILD.md)。
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 你的问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 环境与已尝试的步骤
+      placeholder: |
+        设备 / 系统 / 工具链版本：
+        已尝试：
+        相关日志：

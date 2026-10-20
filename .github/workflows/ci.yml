@@ -5,6 +5,10 @@ on:
     branches: [media-mf]
   pull_request:
     branches: [media-mf]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 # 本仓库的引擎构建需要 GB 级 WebKit 源码树 + ARM32 UWP 工具链 + 真机，CI 跑不了构建
 # （见 AGENTS.md）。CI 守的是那些"踩过才知道"的纪律——每一项都对应一次真实的事故：
@@ -13,9 +17,11 @@ on:
 #   · .ps1 语法错误         → 部署链路在设备在线的那几分钟里才暴露
 #   · 同版本号重复提交      → 同版重装是静默 no-op，设备继续跑旧二进制
 #   · 补丁结构损坏          → WebKit/ 改动丢失（不在仓库，补丁是唯一入库方式）
+#   · 文档/模板缺失         → 新贡献者无从下手
 
 jobs:
   discipline:
+    name: 工程纪律 / Discipline
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +34,8 @@ jobs:
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
             $base = "${{ github.event.pull_request.base.sha }}"
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $base = git rev-parse HEAD~1
           } else {
             $base = git rev-parse HEAD~1
           }
@@ -110,3 +118,142 @@ jobs:
             exit 1
           }
           Write-Host "version bump OK"
+
+      - name: PR 必须指向 media-mf
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          if ("${{ github.event.pull_request.base.ref }}" -ne "media-mf") {
+            Write-Host "::error::PR 目标分支必须是 media-mf（gpu-path1 / master 为存档只读）"
+            exit 1
+          }
+          Write-Host "PR base branch OK"
+
+  powershell:
+    name: PowerShell 全量语法 / Syntax
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 解析所有跟踪的 .ps1
+        shell: pwsh
+        run: |
+          $files = git ls-files '*.ps1'
+          $fail = $false
+          foreach ($f in $files) {
+            $errs = $null
+            [System.Management.Automation.PSParser]::Tokenize((Get-Content $f -Raw), [ref]$errs) | Out-Null
+            if ($errs.Count) {
+              Write-Host "::error file=$f::语法错误 $($errs.Count) 处"
+              $errs | Select-Object -First 3 | ForEach-Object { Write-Host "  line $($_.Token.StartLine): $($_.Message)" }
+              $fail = $true
+            }
+          }
+          if ($fail) { exit 1 }
+          Write-Host "all $($files.Count) tracked .ps1 parse OK"
+
+  docs:
+    name: 文档与模板 / Docs & templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 必备文档存在
+        run: |
+          set -e
+          for f in README.md LICENSE NOTICE CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md \
+                   .github/PULL_REQUEST_TEMPLATE.md .github/ISSUE_TEMPLATE/config.yml \
+                   .github/ISSUE_TEMPLATE/bug_report.yml .github/ISSUE_TEMPLATE/feature_request.yml; do
+            if [ ! -f "$f" ]; then echo "::error file=$f::缺少必备文件"; exit 1; fi
+          done
+          echo "required docs OK"
+
+      - name: Markdown 相对链接可解析（仅已跟踪文件）
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess, sys
+          root = os.getcwd()
+          files = subprocess.check_output(['git','ls-files','*.md']).decode('utf-8','replace').splitlines()
+          bad = []
+          for rel in files:
+              path = os.path.join(root, rel)
+              if not os.path.exists(path):
+                  continue
+              text = open(path, encoding='utf-8', errors='replace').read()
+              # 去掉代码块，避免误报
+              text = re.sub(r'```.*?```', '', text, flags=re.S)
+              for m in re.finditer(r'\[[^\]]*\]\(([^)]+)\)', text):
+                  target = m.group(1).strip()
+                  if target.startswith(('http://','https://','#','mailto:','<')):
+                      continue
+                  target = target.split('#',1)[0].split('?',1)[0]
+                  if not target or target.startswith('/'):
+                      continue
+                  resolved = os.path.normpath(os.path.join(os.path.dirname(path), target))
+                  if not os.path.exists(resolved):
+                      bad.append(f"{rel} -> {m.group(1)}")
+          if bad:
+              for b in bad[:50]:
+                  print(f"::error::{b}")
+              sys.exit(1)
+          print(f"markdown relative links OK ({len(files)} files)")
+          PY
+
+      - name: Issue 表单 YAML 合法
+        run: |
+          python3 - <<'PY'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML missing; installing")
+              import subprocess
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pyyaml"])
+              import yaml
+          bad = False
+          for f in glob.glob('.github/ISSUE_TEMPLATE/*.yml'):
+              try:
+                  data = yaml.safe_load(open(f, encoding='utf-8'))
+              except Exception as e:
+                  print(f"::error file={f}::YAML 解析失败: {e}")
+                  bad = True
+                  continue
+              if not isinstance(data, dict):
+                  print(f"::error file={f}::顶层必须是 mapping")
+                  bad = True
+                  continue
+              if f.endswith('config.yml'):
+                  if 'blank_issues_enabled' not in data and 'contact_links' not in data:
+                      print(f"::error file={f}::config.yml 需要 blank_issues_enabled 或 contact_links")
+                      bad = True
+              else:
+                  for k in ('name','description','body'):
+                      if k not in data:
+                          print(f"::error file={f}::缺少必需字段 {k}")
+                          bad = True
+                  if isinstance(data.get('body'), list):
+                      for i, item in enumerate(data['body']):
+                          if 'type' not in item:
+                              print(f"::error file={f}::body[{i}] 缺少 type")
+                              bad = True
+          if bad:
+              sys.exit(1)
+          print("issue forms OK")
+          PY
+
+      - name: PR 模板含关键检查项
+        run: |
+          set -e
+          for k in "media-mf" "Package.appxmanifest" "WebCoreDriver.h" "版本号"; do
+            if ! grep -q "$k" .github/PULL_REQUEST_TEMPLATE.md; then
+              echo "::error file=.github/PULL_REQUEST_TEMPLATE.md::缺少关键检查项: $k"
+              exit 1
+            fi
+          done
+          echo "PR template OK"
+
+  workflows:
+    name: Actions 语法 / actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: raven-actions/actionlint@v2

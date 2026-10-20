@@ -1,0 +1,9 @@
+# CODEOWNERS
+# 默认由项目维护者审阅；可按子系统细分。
+*                       @Jimmyxiao2009
+
+/port/                  @Jimmyxiao2009
+/harness/               @Jimmyxiao2009
+/tools/                 @Jimmyxiao2009
+/docs/                  @Jimmyxiao2009
+/.github/               @Jimmyxiao2009

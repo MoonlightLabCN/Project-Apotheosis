@@ -1,0 +1,46 @@
+name: 功能请求 / Feature request
+description: 新能力或移植缺口。提之前先看能力清单与交接单的 DoD 表。
+title: "[FEAT] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认这不是 [docs/CAPABILITIES.md](https://github.com/MoonlightLabCN/Project-Apotheosis/blob/media-mf/docs/CAPABILITIES.md)
+        里已标注"未开始/已证伪"的项。
+
+  - type: input
+    id: summary
+    attributes:
+      label: 想要什么
+      placeholder: "一句话描述"
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 为什么 / 谁需要
+      description: 真实站点场景？哪个 DoD 项？
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 已知的上游 / 平台约束
+      description: 例如 MSE 需要 parameters.platformType != FileOrHLS；硬件解码已结论不通
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: 验收标准
+      options:
+        - label: 真机（Lumia 950, 15254）可复现
+        - label: 有 stage.txt / 服务器日志级证据
+        - label: 不回退软渲染底座（GPU 路失败时零回归）
