@@ -5,6 +5,50 @@ Version numbers are the packaging counter the work was tested under on a
 Lumia 950 (Windows 10 Mobile 15254.603); the app manifest carries the
 project's own version.
 
+
+## 0.8.0.0 (2026-10-20) — 最终发布准备
+
+> 版本号策略调整：从 `0.2.5.x` 直接进入 `0.8.0.0`，作为最终发布准备基线。
+> 发布后重点转向**视频/音频**与**体验优化**。
+
+### 发布工程
+
+- `harness/Package.appxmanifest` 版本提升至 `0.8.0.0`。
+- 新增 `port/build-0.8.0.0.ps1`：一条命令完成 WebCore → GPU 驱动 → appx 全链构建。
+- 新增 `docs/RELEASE-0.8.0.0.md`：发布清单、真机验证矩阵、资产与回滚流程。
+- README 重写：项目定位、架构、能力矩阵、构建/部署/测试、文档地图、分支策略与贡献指南。
+- 社区协作：Issue 表单（bug/feature/question）、PR 模板、CONTRIBUTING、CODE_OF_CONDUCT、SECURITY、CODEOWNERS。
+- CI 加固：ABI 双头一致、ASCII 路径、补丁结构、全量 `.ps1` 语法、版本号纪律、PR 目标分支、文档/模板校验、actionlint。
+
+### 引擎与平台（自 0.2.0.0 起）
+
+- WebKit 2.54.0 重基线：`wk-winuwp.patch` 167 文件、+13703/−108。
+- ARM32 / Thumb-2 适配：offlineasm Windows COFF、指令缓存刷新、LLInt PC 寄存器修正。
+- ARM32 JIT 研究：PutByVal DataIC 寄存器冲突修复（`GPRInfo::metadataTableRegister`）、
+  baseline-only JIT 的 DFG 变体裁剪；**JIT 仍为实验性，未在出货构建启用**。
+- AppContainer 平台适配：libcurl/OpenSSL TLS、Public Suffix List blob 注入、
+  Cookie SameSite、WebSocket、WinRT 文件/证书/线程/计时器替换。
+- 图形：ANGLE（D3D11 FL9_3）+ TextureMapper GPU 合成直呈现 `SwapChainPanel`；
+  Lumia 920/930（WDDM 1.x）设备身份门自动降级 Cairo 软件渲染。
+- 媒体：Media Foundation SourceReader H.264 软解（→ Video Processor → RGB32 → 合成）；
+  音频输出接线进行中；DXVA 硬件解码结论为 App Container 内不可用。
+- 交互：`confirm()`/`prompt()` 真模态、`<select>` 原生下拉、`<input type=color/date>` 选择器、
+  复制粘贴与长按上下文菜单。
+- TileGrid v2（0.1.9.48）：瓦片簿记重构为纯模型 + WebCore 适配层。
+
+### 已知限制
+
+- JSC JIT 为实验性，出货构建未启用。
+- `<video>`/`<audio>` 声音输出未完成。
+- MSE / Web Audio / WebRTC 未开始。
+- DXVA 硬件解码在 App Container 内不可用（已证伪）。
+- 真机验证依赖 Lumia 设备；x64 构建机无法运行 ARM32 appx。
+
+### 下一步
+
+- 视频/音频：声音输出、播放生命周期、缓冲/seek 稳定性。
+- 体验优化：滚动/缩放手感、页面加载、内存与功耗。
+
 ## 0.1.9.48 (2026-09-10) — TileGrid v2 and mobile interaction
 
 ### Engine and tiling

@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要创建/更新 release 的 tag（例如 v0.2.5.38）'
+        description: '要创建/更新 release 的 tag（例如 v0.8.0.0）'
         required: true
 
 permissions:

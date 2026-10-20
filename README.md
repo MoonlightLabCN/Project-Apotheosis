@@ -5,10 +5,11 @@
 [![CI](https://github.com/MoonlightLabCN/Project-Apotheosis/actions/workflows/ci.yml/badge.svg?branch=media-mf)](https://github.com/MoonlightLabCN/Project-Apotheosis/actions/workflows/ci.yml)
 
 - **当前开发分支**：`media-mf`
-- **当前 App 版本**：`0.2.5.38`（`harness/Package.appxmanifest`）
+- **当前 App 版本**：`0.8.0.0`（`harness/Package.appxmanifest`，最终发布准备中）
 - **当前补丁基线**：`webkitgtk-2.54.0`（早期开发线为 `2.52.4`）
 - **目标设备**：Lumia 950 / 950 XL（Windows 10 Mobile 15254，ARM32）
 - **仓库性质**：只包含**移植层与宿主**；GB 级上游 WebKit 源码树不在仓库内
+- **发布状态**：`0.8.0.0` 最终发布准备中；发布后重点转向**视频/音频**与**体验优化**
 
 ---
 
@@ -307,7 +308,7 @@ CI 还守着一批"踩过才知道"的纪律：C ABI 两份头一致、路径全
 **Windows 10 Mobile (ARM32 / UWP / App Container)**, targeting devices such as
 the Lumia 950 / 950 XL (Windows 10 Mobile 15254).
 
-- **Active branch**: `media-mf` (default) · **App version**: `0.2.5.38`
+- **Active branch**: `media-mf` (default) · **App version**: `0.8.0.0` (final release prep)
 - **WebKit baseline**: `webkitgtk-2.54.0` (early lines used `2.52.4`)
 - **Repository scope**: port layer + UWP host + tooling + patches only; the
   multi-gigabyte WebKit tree is not included.

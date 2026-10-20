@@ -38,7 +38,7 @@ body:
     attributes:
       label: App 版本
       description: harness/Package.appxmanifest 的 Version
-      placeholder: "0.2.5.38"
+      placeholder: "0.8.0.0"
     validations:
       required: true
 

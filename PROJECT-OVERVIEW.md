@@ -6,7 +6,18 @@ Apotheosis（EdgeHTML Reborn）是在 Windows 10 Mobile ARM32/UWP 上运行现�
 
 仓库只维护移植层、UWP 宿主和部署工具。上游 `WebKit/`、构建目录、第三方预编译库和字体不属于仓库的可审查源码，必须按本机环境重新准备。
 
-## 当前基线（2026-07-25）
+## 当前基线（2026-10-20，0.8.0.0 发布准备）
+
+- 当前分支：`media-mf`（GitHub 默认分支）。
+- App manifest 版本：`0.8.0.0`。
+- 目标系统：Windows 10 Mobile `14393+`，ARM32。
+- 引擎：WebKit 2.54.0（`wk-winuwp.patch`，167 文件）。
+- 发布构建入口：`port/build-0.8.0.0.ps1`。
+- 发布清单：`docs/RELEASE-0.8.0.0.md`。
+- 已知限制：JIT 实验性（出货未启用）、音频未完成、DXVA 不可用、MSE/WebAudio/WebRTC 未开始。
+- 发布后重点：视频/音频 + 体验优化。
+
+## 历史基线（2026-07-25）
 
 - 当前分支：`gpu-path1`，开发配置：`build-clang-gpu`。
 - App manifest 版本：`0.1.8.11`，目标系统：Windows 10 Mobile `14393+`，ARM32。
