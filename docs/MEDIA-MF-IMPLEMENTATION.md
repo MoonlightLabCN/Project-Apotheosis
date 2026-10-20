@@ -651,3 +651,97 @@ New root cause found from this round: every decoded frame called
 clock kept running only because ``potentiallyPlaying()`` has the ``m_readyStateMaximum`` fallback
 (HTMLMediaElement.cpp:6465). Fixed in 0.2.5.30: while playing, a frame reports HaveFutureData and
 the state only ever rises there. See HANDOFF-VIDEO-AUDIO-2026-10-13.md section 10.
+
+---
+
+## Device round 7 (2026-10-20, 0.2.5.36→0.2.5.38) — the audio pipeline is PROVEN end to end; the graph's output binding is the wall
+
+User was present for the first time in several rounds and reported three things in one go:
+picture ✅, **no audio**, and **the app exits when the video finishes**.
+
+### The exit was my own idle-stop (introduced in 0.2.5.33)
+
+Three files, same second:
+
+| file | line |
+|---|---|
+| ``mediaaudio.txt`` | ``23:20:26 idle-stop: ring empty >3s -> Stop() (null-sink guard)`` |
+| ``crash.txt`` | ``23:20:26.335 tid=1788  reason: pc in Windows.Media.Audio.dll +0x000b6a09`` |
+| ``crash.txt`` (next) | ``SEH code=0xc0000005`` on the UI thread, stack in ``CoreUIComponents.dll`` |
+
+Tearing an AudioGraph down (``AudioGraph::Stop`` + unhooking ``QuantumStarted``) from inside the
+``QuantumStarted`` callback faults inside the audio stack and takes the app with it. The user said
+"when the video finishes" but ``ct`` was only ~4 s — it died mid-playback (the 10 s file never
+finished). 0.2.5.36 moved the stop to the next ``EnsureStarted`` (UI thread).
+
+### 0.2.5.36 (round at 00:32) — the deferral was incomplete
+
+```
+00:32:12 Reset() quanta=0
+00:32:13 endpoint probe: 2 AudioRender device(s) / graph created / graph STARTED
+00:32:26 idle-stop: ... stop requested (deferred to UI thread)   <- 25621 repeated lines
+00:33:29 last media-diag #45000
+00:33:39 crash.txt tid=3320                                       <- 86 s later, still crashed
+```
+
+Two bugs in my own deferral: the handler did not ``return`` after raising the flag (hence the log
+flood), and the flag was only consumed by ``EnsureStarted`` — which an idle app never calls, so
+**the stop never ran** and the graph spun until it faulted (same as the 19:24 round, ~5 min).
+0.2.5.38 fixes this with an atomic flag + ``return`` + ``CoreDispatcher::RunAsync``.
+
+### The decisive reading: pcm proves the chain works
+
+New live diagnostics (every 5000 quanta, driver counters into ``mediaaudio.txt``):
+
+```
+00:32:16 media-diag #5000 : pcm=128896/128896/39296  q=0@48000Hz/2ch frames=66/19
+00:32:19 media-diag #10000: pcm=277376/277376/39296  q=0@48000Hz/2ch frames=143/61
+00:32:22 media-diag #15000: pcm=415616/415616/39296  q=0@48000Hz/2ch frames=215/75
+00:32:25 media-diag #20000: pcm=480128/480128/39296  q=0@48000Hz/2ch frames=249/79
+00:32:32 media-diag #25000: pcm=480128/480128/39296  <- frozen; the graph now spins
+```
+
+``pcm`` is pushed/consumed/dropped. 480128 / 48000 Hz = 10.003 s = the entire audio track of
+test.mp4, and pushed == consumed at every sample. Consumption tracked wall time (2.68 s of audio in
+3 s); a true null sink would have drained it in ~0.6 s at 17x. Source confirms it was never muted
+(``MediaPlayerPrivateWinUWP.h:206-207``: ``m_volume = 1.0f``, ``m_muted = false``). ``frames=249/79``
+means the whole video decoded too.
+
+So: decoder -> ring -> AudioGraph is complete, full-volume and real-time, yet silent. The graph is
+handing frames to a **null sink** — the wall is the graph's *output binding*, not decode, not the
+ring, not volume. This supersedes the section 11.7 conclusion ("AudioGraph unusable on this
+device"): endpoints do exist and the graph does run on a real clock.
+
+### 0.2.5.38 fix (harness-only, ``6eb00b1``)
+
+``FindAllAsync(DeviceClass::AudioRender)`` now feeds the graph instead of just probing it: log each
+device's name / ``IsDefault`` / ``IsEnabled``, then hand the default one to
+``AudioGraphSettings::PrimaryRenderDevice``. ``StartGraphFor`` split into enumerate ->
+``CreateGraphFor`` so the enumeration completes first. Deferred stop made real (atomic flag,
+``return``, dispatcher post; dispatcher captured from
+``CoreApplication::MainView->Dispatcher`` at graph start).
+
+API verified against the SDK rather than guessed: ``windows.media.audio.h:3981-3984`` has
+``get_/put_PrimaryRenderDevice`` taking ``IDeviceInformation*`` — the very type ``FindAllAsync``
+returns; ``windows.devices.enumeration.h:2703/2706`` has ``get_IsEnabled``/``get_IsDefault``.
+(Compile trap: ``CoreApplication`` lives in ``Windows::ApplicationModel::Core``, not
+``Windows::UI::Core`` — first build died with ``error C2039``.)
+
+**Status: 0.2.5.38 deployed to the device and launched at 01:02, not yet tested by the user.**
+Next round read it with ``tools\_pull-audio-diag.ps1``; the decision table is in the handoff,
+section 14.5.
+
+### Also landed this session (not audio)
+
+The two C ABI header copies had drifted — ``port/WebCoreDriver.h`` was missing
+``WebCoreSetJitEnabled`` / ``WebCoreGetJitEnabled``, which the driver does implement
+(``WebCoreDriver.cpp:7285/7318``); 637 vs 562 lines with different parameter names and comments.
+Synced (port copy is canonical), harness-only rebuild verified, **version bumped to 0.2.5.37** to
+keep the bump discipline. GitHub CI/CD went live with five checks (ABI copies byte-identical,
+all-ASCII paths, patch structure, changed ``.ps1`` parse, manifest bump when harness/port change);
+first run green.
+
+> Parallel work in this repository has since moved the manifest to ``0.8.0.0`` (README/templates/CI
+> rewritten, scratch files committed). The 0.2.5.38 audio code was verified intact afterwards, but
+> the next build must carry a version higher than whatever the device has installed — a same-version
+> reinstall is a silent no-op.

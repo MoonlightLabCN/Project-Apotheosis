@@ -1,19 +1,27 @@
 # 交接：`<video>` / `<audio>` 线（media-mf）
 
-**日期**：2026-10-13
-**分支**：`media-mf`（HEAD = `c99c557`）
+**日期**：2026-10-13（**§14 更新于 2026-10-20**）
+**分支**：`media-mf`（§14 撰写时 HEAD = `4bfdf5b`；音频代码在 `6eb00b1`）
 **上游 WebKit 仓库**：`WebKit/`（gitignored，独立 git repo，分支 `wk-tnew`，全部 port 改动未提交，其中 13 个 `UU` unmerged 条目）
-**真源码在哪**：`WebKit/` 下的改动是**易失的**（不在仓库、未提交）。真正入库的是 `patches/2026-10-09-winuwp-media-mf.patch`（当前 128 KB / 7 文件，反向自检 `git apply --check -R` 通过）。改完 `WebKit/` 必须重新生成补丁再提交，否则工作会丢。
+**真源码在哪**：`WebKit/` 下的改动是**易失的**（不在仓库、未提交）。真正入库的是 `patches/2026-10-09-winuwp-media-mf.patch`（当前 140 KB / 7 文件，反向自检 `git apply --check -R` 通过）。改完 `WebKit/` 必须重新生成补丁再提交，否则工作会丢。
+
+> **2026-10-20 快速指路**：先读 **§14**（音频定位到底 + 本轮仓库工程），再看 §12.7（硬件解码终判）、§13（920/930 适配）。
 
 ---
 
 ## 0. 一句话现状
 
-**"没有画面"的根因已经找到并修好，但修复尚未在真机验证。** 阻塞不在代码，在设备：手机息屏后 WiFi 断开（`192.168.3.159` 一度从 ARP 表消失），导致 0.2.5.29 装不上去。
+**画面已闭环（用户确认"视频能看"）；声音仍未通，但已定位到底层，且方向已反转。**
 
-- **0.2.5.29 已构建**（`harness/AppPackages/Harness/Harness_0.2.5.29_ARM_Test/Harness_0.2.5.29_ARM.appx`，54 MB，07:51:37），**未安装、未验证**。
-- 设备上最后一次成功安装的是 **0.2.5.27**（`IsInWindow` 修复；那个版本修掉了我自己引入的 0.2.5.26 崩溃，页面能正常加载，但仍无帧 —— 因为当时还缺 readyState 那一道修复）。
-- **下一步就是：装 0.2.5.29 → 跑 `/values.html` → 读 `media` 行与 `media-state` 行。**
+- **`<video>` 有画面**：三道门（§1）全开 + `supportsAcceleratedRendering()=false`（§11.3）+
+  readyState 修复（§10.2）后，真机确认画面能动、能播到片尾。
+- **`<audio>` 没声音**：0.2.5.38 的活诊断证明**解码器 → 环 → AudioGraph 全通、全音量、实时**
+  （整部 10 秒音频 `pcm=480128/480128`），声音堵在**图的输出绑定**。0.2.5.38 已改成显式绑定
+  `AudioGraphSettings::PrimaryRenderDevice`，**已部署到真机、待用户验证**（§14.4/§14.5）。
+- **"放完闪退"已定位并修**：是我自己在 `QuantumStarted` 回调里拆音频图（§14.1）；
+  0.2.5.38 用 dispatcher 派发真延迟停止才算修干净（§14.2）。
+- **硬件解码（DXVA）已终判：此路不通**（§12.7）——设备有能力（FL 11_0 + 10 个解码 profile），
+  但 App Container 内 `MF_SOURCE_READER_D3D_MANAGER` 必失败且无优雅退路。探针已摘除（白搭 8 秒元数据延迟）。
 
 ---
 
@@ -196,6 +204,124 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 ## 9. 详细记录
 
 `docs/MEDIA-MF-IMPLEMENTATION.md` —— 按"设备回合 1..5"记录了每一轮的真机读数、被证伪的假设、以及上述三条根因链的完整推导。**下一轮测试结果请追加到那里。**
+
+---
+
+## 14. 音频定位到底：数据链路是通的，堵在输出绑定（2026-10-20，0.2.5.36 → 0.2.5.38）
+
+**这是本次最重要的一节。** 用户在场实测"视频能看、没有声音、放完闪退"，三个现象一条线拉通，
+结论与过去所有推测**相反**。
+
+### 14.1 闪退：是我自己上一版加的"空转自停"（0.2.5.36 已修一半）
+
+用户报"放完视频自动闪退"。真机证据三环同秒：
+
+| 文件 | 内容 |
+|---|---|
+| `mediaaudio.txt` | `23:20:26 idle-stop: ring empty >3s -> Stop() (null-sink guard)` |
+| `crash.txt` | `23:20:26.335 tid=1788`，`reason: pc in Windows.Media.Audio.dll +0x000b6a09` |
+| 后续 | UI 线程跟一个 AV（`SEV code=0xc0000005`，栈在 `CoreUIComponents.dll`）→ app 死 |
+
+**根因：在 `QuantumStarted` 回调内部拆音频图**（`Stop()` = `AudioGraph::Stop()` + 卸事件），
+OS 音频栈不允许，直接炸。另注：用户感知的"放完"其实是 **ct≈4s**（视频 10s 没播完就崩了）。
+
+**0.2.5.36 的修法**（`72d7fdf`）：handler 只置 `m_idleStopRequested`，真正的 `Stop()` 落到
+UI 线程的下一次 `EnsureStarted`。
+
+### 14.2 0.2.5.36 轮（00:32，用户在场）：延迟化"没崩在当下"，但停止从未执行
+
+```
+00:32:12 Reset() quanta=0
+00:32:13 endpoint probe: 2 AudioRender device(s) / graph created / graph STARTED
+00:32:26 idle-stop: ... stop requested (deferred to UI thread)   ← 刷了 25621 行
+00:33:29 最后一条 media-diag #45000
+00:33:39 crash.txt tid=3320                                       ← 86 秒后还是崩了
+```
+
+两个 bug 被我写进去了：
+
+1. **设旗后没 `return`** → handler 继续每量子循环，日志刷 25621 行；
+2. **旗只由 `EnsureStarted` 消费**，而 app 空闲时 `EnsureStarted` 根本不会被调用
+   → **停止永远不执行**，图一直空转，最终仍在 `Windows.Media.Audio.dll` 里 faults。
+
+即：延迟化只是把"立即崩"变成"3 分钟后崩"。（对照 19:24 轮：空转约 5 分钟后才 faults，
+同源。）**0.2.5.38 才用 dispatcher 派发真正修掉。**
+
+### 14.3 音频真相：`pcm` 计数证明整条链是通的（本次最大发现）
+
+同轮新加的活诊断（每 5000 量子把驱动的 pcm 计数打进 `mediaaudio.txt`）给出决定性读数：
+
+```
+00:32:16 media-diag #5000 : pcm=128896/128896/39296  q=0@48000Hz/2ch frames=66/19
+00:32:19 media-diag #10000: pcm=277376/277376/39296  q=0@48000Hz/2ch frames=143/61
+00:32:22 media-diag #15000: pcm=415616/415616/39296  q=0@48000Hz/2ch frames=215/75
+00:32:25 media-diag #20000: pcm=480128/480128/39296  q=0@48000Hz/2ch frames=249/79
+00:32:32 media-diag #25000: pcm=480128/480128/39296  ← 冻结，图开始空转
+```
+
+- `pcm` 是 `pushed/consumed/dropped`。**480128 ÷ 48000Hz = 10.003 秒 = 整部 test.mp4 的音频轨**，
+  且每一步 `pushed == consumed`。
+- 消费速度**与墙上时间一致**（3 秒墙上走了 2.68 秒音频）；若真是空转 null sink 应 0.6 秒抽干
+  —— 说明**图当时是被真实设备时钟驱动的**。
+- 源码确认**没被静音**：`MediaPlayerPrivateWinUWP.h:206-207` → `m_volume = 1.0f`、`m_muted = false`。
+- `frames=249/79` → 整段视频也解完了。
+
+**结论：解码器 → 环 → AudioGraph 全通、全音量、实时；声音却出不去。**
+即图把帧交给了一个 **null sink**——问题在 **AudioGraph 的输出绑定**，不在解码、不在队列、不在音量。
+这推翻了 §11.7 的"AudioGraph 在此设备上不可用"（端点其实是有的，见 14.4）。
+
+### 14.4 0.2.5.38 修法：把端点枚举从"探测"升级为"喂给图"
+
+`6eb00b1`，harness-only：
+
+1. `DeviceInformation::FindAllAsync(DeviceClass::AudioRender)` → 逐个打印
+   **名字 / `IsDefault` / `IsEnabled`**（`endpoint[i]: <名> default=1 enabled=1`）；
+2. 取默认设备交给 **`AudioGraphSettings::PrimaryRenderDevice`**，绑上就打
+   `CreateGraphFor: PrimaryRenderDevice bound to '<名>'`；
+3. `StartGraphFor` 拆成两步：`StartGraphFor`（枚举）→ `CreateGraphFor`（建图），保证枚举先完成；
+4. 延迟停止改成**真延迟**：`std::atomic` 旗 + 设旗后 `return` +
+   `CoreDispatcher::RunAsync` 派发 `MediaAudio::Stop()`；dispatcher 在建图成功时从
+   `CoreApplication::MainView->Dispatcher` 捕获（不再依赖 `EnsureStarted` 被调用）。
+
+**API 已按 SDK 实证，没瞎猜**：`windows.media.audio.h:3981-3984` 有
+`get_/put_PrimaryRenderDevice`，参数类型 `ABI::Windows::Devices::Enumeration::IDeviceInformation*`
+——**就是 `FindAllAsync` 返回的那个类型**；`windows.devices.enumeration.h:2703/2706` 有
+`get_IsEnabled`/`get_IsDefault`。
+（踩坑：`CoreApplication` 在 `Windows::ApplicationModel::Core`，**不是** `Windows::UI::Core`
+——第一次构建 `error C2039` 就死在这。）
+
+**状态**：0.2.5.38 已于 01:02 部署到真机并启动，**用户尚未测**（写本文时设备已离线）。
+
+### 14.5 下一轮怎么读（判据）
+
+手机亮屏 → 地址栏 `http://192.168.3.108:8099/values.html` → 等 15 秒。然后：
+
+```powershell
+pwsh -NoProfile -File E:\Apotheosis\tools\_pull-audio-diag.ps1   # endpoint 详情 + media-diag + 崩溃
+```
+
+| 读到什么 | 结论 / 下一步 |
+|---|---|
+| **有声音了** | 就是隐式绑定问题，音频线收工，回到体验优化 |
+| `PrimaryRenderDevice bound to '<名>'` 名字是**扬声器**但无声 | 绑定对了、输出仍空 → 换 **MF 音频渲染器**（`MFCreateAudioRendererActivate` + SAR，App Container 内 MF 可用）或 `MediaPlayer`+`MediaStreamSource`；§14.3 已证明引擎侧数据随时可取 |
+| `bound to '<名>'` 名字是**蓝牙/其他** | 默认设备选错了 → 按名字/`IsDefault` 过滤挑扬声器 |
+| 没有 `bound to` 行、`endpoint probe: 0 device(s)` | 端点这次不可见 → 回到 §11.7 的 MF 渲染器方案 |
+| `idle-stop: executing deferred Stop()` 出现且**之后无新 crash** | 14.1/14.2 的崩溃链彻底关闭（这条要单独确认） |
+
+### 14.6 本轮顺带的仓库工程（与音频无关但已入库）
+
+- **C ABI 两份头漂移被抓出并修好**（`ac4c7fc`）：`port/WebCoreDriver.h` 少了
+  `WebCoreSetJitEnabled` / `WebCoreGetJitEnabled` 声明，而驱动 `WebCoreDriver.cpp:7285/7318`
+  **确实实现了**这两个导出；两份头 637 vs 562 行、参数名/注释各不相同。以 port 头为准同步，
+  harness-only 重建验证可编译。**升 0.2.5.37** 以守"改 harness 必升版本号"的纪律。
+- **GitHub CI/CD 上线**：`ci.yml` 五项纪律检查（两份 ABI 头逐字节一致 / 跟踪路径全 ASCII /
+  补丁结构完整 / 变更 `.ps1` 语法 / 改 harness·port 必升版本号），首次运行即绿；
+  `release.yml` 打 tag 按 `RELEASE_TEMPLATE.md` 建 release（appx 仍从构建机手附）。
+- 本地 `gpu-path1`/`master` 已删（远程存档保留），`origin/HEAD` → `media-mf`。
+
+> ⚠️ **平行工作已把版本号推进到 `0.8.0.0`**（改了 `Package.appxmanifest`、重写
+> README/模板/CI、提交了全部 scratch）。本文所述的 0.2.5.38 **音频代码未受影响**（已核对），
+> 但**下一次构建必须用高于设备在装版本的号**（同版重装是静默 no-op）。
 
 ---
 
