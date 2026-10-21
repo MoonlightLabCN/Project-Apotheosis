@@ -1,27 +1,3 @@
-===== playback watch start 2026-10-19 16:46:40 =====
-[16:46:40] baseline log lines: 446 (watching for NEW device requests, up to 480 min)
-[23:20:18] NEW device requests (5 lines):
-[23:20:18]   [23:20:10.555] 192.168.3.159:49691 GET /values.html -> 200 OK (range=- bytes=0+1804/1804)
-[23:20:18]   [23:20:13.296] 192.168.3.159:49700 GET /test.mp4 -> 206 Partial Content (range=bytes=352256-788492 bytes=352256+436237/788493)
-[23:20:18]   [23:20:18.508] 192.168.3.159:49696 GET /val-t=boot~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=1~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:18]   [23:20:18.519] 192.168.3.159:49697 GET /val-t=afterPlayCall~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:18]   [23:20:18.625] 192.168.3.159:49705 GET /val-t=t6~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:48] NEW device requests (15 lines):
-[23:20:48]   [23:20:19.190] 192.168.3.159:49703 GET /val-t=evt-stalled~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:48]   [23:20:20.794] 192.168.3.159:49706 GET /test.mp4 -> 206 Partial Content (range=bytes=0- bytes=0+788493/788493)
-[23:20:48]   [23:20:20.865] 192.168.3.159:49707 GET /test.mp4 -> 206 Partial Content (range=bytes=770048-788492 bytes=770048+18445/788493)
-[23:20:48]   [23:20:21.143] 192.168.3.159:49708 GET /test.mp4 -> 206 Partial Content (range=bytes=0- bytes=0+788493/788493)
-[23:20:48]   [23:20:21.185] 192.168.3.159:49709 GET /test.mp4 -> 206 Partial Content (range=bytes=770048-788492 bytes=770048+18445/788493)
-[23:20:48]   [23:20:21.264] 192.168.3.159:49710 GET /test.mp4 -> 200 OK (range=- bytes=0+788493/788493)
-[23:20:48]   [23:20:21.285] 192.168.3.159:49698 GET /val-t=evt-loadstart~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:48]   [23:20:21.298] 192.168.3.159:49699 GET /val-t=evt-waiting~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:48]   [23:20:21.484] 192.168.3.159:49711 GET /test.mp4 -> 200 OK (range=- bytes=0+788493/788493)
-[23:20:48]   [23:20:21.745] 192.168.3.159:49712 GET /val-t=evt-loadedmetadata~rs=1~ns=2~ct=0.000~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
-[23:20:48]   [23:20:21.755] 192.168.3.159:49713 GET /val-t=evt-loadeddata~rs=2~ns=2~ct=0.000~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
-[23:20:48]   [23:20:22.105] 192.168.3.159:49714 GET /val-t=evt-canplay~rs=3~ns=2~ct=0.001~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
-[23:20:48]   [23:20:22.115] 192.168.3.159:49715 GET /val-t=evt-playing~rs=3~ns=2~ct=0.004~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
-[23:20:49]   [23:20:23.429] 192.168.3.159:49702 GET /val-t=t2~rs=0~ns=2~ct=0.000~dur=NaN~wh=0x0~paused=0~ended=0~err=-~seeking=0~buf=none.png -> 404
-[23:20:49]   [23:20:24.245] 192.168.3.159:49716 GET /val-t=t12~rs=3~ns=2~ct=2.138~dur=10.03~wh=320x176~paused=0~ended=0~err=-~seeking=0~buf=1@10.03.png -> 404
-[23:20:49] PLAYBACK CONFIRMED (playing/t12 seen)
-[23:21:55]   
-[23:21:55] watch done
+===== playback watch start 2026-10-21 00:14:54 =====
+[00:14:54] baseline log lines: 513 (watching for NEW device requests, up to 240 min)
+[04:15:00] watch done

@@ -55,6 +55,12 @@ private:
 
     Windows::Media::Audio::AudioGraph^ m_graph;
     Windows::Media::Audio::AudioFrameInputNode^ m_inputNode;
+    // Apotheosis (media, 2026-10-21): the device output node the frame node feeds. Its
+    // absence was the reason everything was silent: an AudioGraph whose input node is not
+    // connected to an output node has no consumer, so it runs at maximum speed and throws
+    // the frames away (the ~17x-realtime spin this project kept reading). Created and
+    // connected before Start().
+    Windows::Media::Audio::AudioDeviceOutputNode^ m_outputNode;
     // Needed to unhook QuantumStarted; a stale handler would keep pulling PCM for a
     // device that no longer exists.
     Windows::Foundation::EventRegistrationToken m_quantumToken { };

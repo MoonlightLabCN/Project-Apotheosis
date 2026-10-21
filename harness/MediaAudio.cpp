@@ -18,6 +18,17 @@
 #include <mutex>
 #include <string>
 
+namespace {
+
+// Apotheosis (media, 2026-10-21): how long the ring may stay empty before the graph is
+// stopped. Was 3 s, which fired mid-playback on device (the graph drains faster than the
+// decoder fills, so brief empty stretches are normal); 20 s cannot happen while audio is
+// actually playing, and still bounds the empty-ring spin that faults inside
+// Windows.Media.Audio.dll after minutes.
+constexpr unsigned long long kIdleStopWindowMs = 20000;
+
+}   // namespace
+
 using namespace concurrency;
 using namespace Microsoft::WRL;
 using namespace Platform;
@@ -133,27 +144,56 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
     // "successfully" but consumed every frame into a null sink (media-diag: pcm
     // pushed == consumed == 480128 = the whole file, at real-time speed, yet silence),
     // so the graph's implicit default-device binding is suspect. The enumeration gives
-    // us the real devices (name / IsDefault / IsEnabled) and the default one is handed
-    // to AudioGraphSettings::PrimaryRenderDevice (its type IS DeviceInformation).
+    // us the real devices (name / IsDefault / IsEnabled) and one of them is handed to
+    // AudioGraphSettings::PrimaryRenderDevice (its type IS DeviceInformation).
+    //
+    // 2026-10-21 device reading: on this Lumia BOTH render endpoints report
+    // IsDefault=0 (Win10M does not populate that property), so an IsDefault-only pick
+    // chose nothing and the graph fell back to the silent implicit binding:
+    //   endpoint[0]: Speakers (QCAUD Real Time (WaveRT) Driver for Qualcomm SoC)  default=0
+    //   endpoint[1]: Internal Handset Speaker (QCAUD ...)                          default=0
+    //   CreateGraphFor: no default AudioRender device enumerated - leaving implicit binding
+    // Selection is now: IsDefault wins if anyone claims it; otherwise prefer the name
+    // that is NOT the handset (a "Speakers" endpoint is the media route); otherwise the
+    // first enabled one. Media playback must never be pinned to the handset earpiece.
     MediaAudio^ self = this;
     concurrency::create_task(Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(
         Windows::Devices::Enumeration::DeviceClass::AudioRender))
         .then([self, sampleRate, channels](
             concurrency::task<Windows::Devices::Enumeration::DeviceInformationCollection^> t) {
             Windows::Devices::Enumeration::DeviceInformation^ chosen = nullptr;
+            Windows::Devices::Enumeration::DeviceInformation^ firstEnabled = nullptr;
+            Windows::Devices::Enumeration::DeviceInformation^ nonHandset = nullptr;
             try {
                 auto devices = t.get();
                 AudioLog(std::string("endpoint probe: ") + std::to_string(devices->Size)
                          + " AudioRender device(s)");
                 for (unsigned i = 0; i < devices->Size; ++i) {
                     auto d = devices->GetAt(i);
-                    AudioLog("  endpoint[" + std::to_string(i) + "]: " + NarrowForLog(d->Name)
+                    const std::string name = NarrowForLog(d->Name);
+                    AudioLog("  endpoint[" + std::to_string(i) + "]: " + name
                              + " default=" + (d->IsDefault ? "1" : "0")
                              + " enabled=" + (d->IsEnabled ? "1" : "0"));
+                    if (!d->IsEnabled)
+                        continue;
+                    if (!firstEnabled)
+                        firstEnabled = d;
                     if (d->IsDefault && !chosen)
                         chosen = d;
+                    // Case-insensitive "handset"/"earpiece" check without <algorithm>:
+                    // lowercase a copy and look for the marker.
+                    std::string lower;
+                    lower.reserve(name.size());
+                    for (char c : name)
+                        lower.push_back(static_cast<char>(::tolower(static_cast<unsigned char>(c))));
+                    if (lower.find("handset") == std::string::npos
+                        && lower.find("earpiece") == std::string::npos
+                        && !nonHandset)
+                        nonHandset = d;
                 }
             } catch (...) { AudioLog("endpoint probe: FindAllAsync threw"); }
+            if (!chosen)
+                chosen = nonHandset ? nonHandset : firstEnabled;
             self->CreateGraphFor(sampleRate, channels, chosen);
         });
 }
@@ -171,7 +211,7 @@ void MediaAudio::CreateGraphFor(int sampleRate, int channels,
         AudioLog("CreateGraphFor: PrimaryRenderDevice bound to '"
                  + NarrowForLog(renderDevice->Name) + "'");
     } else {
-        AudioLog("CreateGraphFor: no default AudioRender device enumerated - leaving the graph's implicit binding");
+        AudioLog("CreateGraphFor: no usable AudioRender device enumerated - leaving the graph's implicit binding");
     }
 
     MediaAudio^ self = this;
@@ -226,13 +266,58 @@ void MediaAudio::CreateGraphFor(int sampleRate, int channels,
         self->m_quantumToken = self->m_inputNode->QuantumStarted += quantumHandler;
         self->m_quantumHooked = true;
 
-        self->m_graph->Start();
-        self->m_quanta = 0;
-        self->m_underruns = 0;
-        self->m_lastNonEmptyQuantum = GetTickCount64();   // idle-stop reference point
-        self->m_uiDispatcher = Windows::ApplicationModel::Core::CoreApplication::MainView->Dispatcher;   // for the deferred idle stop
-        self->m_creating = false;
-        AudioLog("StartGraphFor: graph STARTED (quantum handler hooked)");
+        // Apotheosis (media, 2026-10-21): THE MISSING LINK. Every earlier round created a
+        // frame INPUT node, hooked QuantumStarted and started the graph - but never created
+        // a device OUTPUT node nor connected the two. An AudioGraph with an unconnected
+        // input node has nothing consuming its output, so it pulls frames at maximum speed
+        // and discards them: exactly the ~17x-realtime spin this project has been reading
+        // for days (und == quanta-100 roughly, required=480 always, ring永远被抽干).
+        // It also explains why the decoder's counters looked healthy - the samples really
+        // were being taken - and why FULL VOLUME produced silence: they went nowhere.
+        // Nothing reaches the speaker until the frame node is connected to a device output
+        // node, so the tone test was silent too.
+        //
+        // Both nodes must be created and connected BEFORE graph->Start().
+        create_task(self->m_graph->CreateDeviceOutputNodeAsync())
+            .then([self](task<CreateAudioDeviceOutputNodeResult^> outTask) {
+                CreateAudioDeviceOutputNodeResult^ outResult = nullptr;
+                try { outResult = outTask.get(); } catch (...) { outResult = nullptr; }
+                if (!outResult || outResult->Status != AudioDeviceNodeCreationStatus::Success
+                    || !outResult->DeviceOutputNode) {
+                    // Not m_failed: this is worth retrying (the endpoint can be busy or
+                    // briefly unavailable). Clearing m_graph is what matters - leaving it
+                    // set would make EnsureStarted's sameFormat check early-return forever,
+                    // silently pinning the app to a graph that has no output.
+                    self->m_creating = false;
+                    AudioLog(std::string("StartGraphFor: CreateDeviceOutputNodeAsync FAILED status=")
+                             + (outResult ? std::to_string(static_cast<int>(outResult->Status))
+                                          : std::string("exception"))
+                             + " -> no output node, no sound (will retry)");
+                    if (self->m_graph) {
+                        self->m_graph->Stop();
+                        self->m_graph = nullptr;
+                    }
+                    self->m_inputNode = nullptr;
+                    self->m_sampleRate = 0;
+                    self->m_channels = 0;
+                    return;
+                }
+                self->m_outputNode = outResult->DeviceOutputNode;
+                try {
+                    self->m_inputNode->AddOutgoingConnection(self->m_outputNode);
+                    AudioLog("StartGraphFor: input node CONNECTED to device output node");
+                } catch (...) {
+                    AudioLog("StartGraphFor: AddOutgoingConnection threw -> no sound");
+                }
+
+                self->m_graph->Start();
+                self->m_quanta = 0;
+                self->m_underruns = 0;
+                self->m_lastNonEmptyQuantum = GetTickCount64();   // idle-stop reference point
+                self->m_uiDispatcher = Windows::ApplicationModel::Core::CoreApplication::MainView->Dispatcher;
+                self->m_creating = false;
+                AudioLog("StartGraphFor: graph STARTED (quantum handler hooked)");
+            });
     });
 }
 
@@ -276,13 +361,22 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
                     // callback is what crashed the app, crash.txt 2026-10-19 23:20:26).
                     if (taken > 0)
                         m_lastNonEmptyQuantum = GetTickCount64();
-                    else if (m_quanta > 100 && GetTickCount64() - m_lastNonEmptyQuantum > 3000) {
+                    else if (m_quanta > 100 && GetTickCount64() - m_lastNonEmptyQuantum > kIdleStopWindowMs) {
                         // DEFERRED stop: never tear the graph down from inside this
                         // callback (crash.txt 2026-10-19 23:20:26 - PC inside
                         // Windows.Media.Audio.dll). Raise the flag once, post the Stop to
                         // the UI thread, and stop touching the frame entirely.
+                        //
+                        // 2026-10-21: the window was 3 s and it fired DURING a live
+                        // playback (23:13:52 round: stop posted while frames=499/156 and
+                        // the decoder was still pushing audio), because the graph drains
+                        // faster than the decoder fills and a momentary empty ring is
+                        // normal. A window this long cannot occur while anything is
+                        // playing, and the guard only exists to stop the empty-ring spin
+                        // that eventually faults in Windows.Media.Audio.dll.
                         if (!m_idleStopRequested.exchange(true)) {
-                            AudioLog("idle-stop: ring empty >3s -> posting Stop() to the UI thread");
+                            AudioLog("idle-stop: ring empty >" + std::to_string(kIdleStopWindowMs / 1000)
+                                     + "s -> posting Stop() to the UI thread");
                             auto disp = m_uiDispatcher;
                             if (disp) {
                                 MediaAudio^ self = this;   // handle capture: the lambda outlives this call
@@ -341,8 +435,14 @@ void MediaAudio::Reset()
             m_inputNode->QuantumStarted -= m_quantumToken;
             m_quantumHooked = false;
         }
+        // Disconnect before dropping the node: a connection outliving its endpoint is what
+        // makes the audio stack fault on teardown.
+        if (m_outputNode) {
+            try { m_inputNode->RemoveOutgoingConnection(m_outputNode); } catch (...) { }
+        }
         m_inputNode = nullptr;
     }
+    m_outputNode = nullptr;
 
     if (m_graph) {
         m_graph->Stop();
@@ -352,6 +452,14 @@ void MediaAudio::Reset()
     m_sampleRate = 0;
     m_channels = 0;
     m_creating = false;
+    // Apotheosis (media, 2026-10-21): clear the idle-stop state with the graph. Device log
+    // showed the pair "posting Stop()" then "executing deferred Stop()" TWICE in a row
+    // (23:13:27 and again 23:13:52): the handler could run once more between the post and
+    // the UI-thread execution, raise the flag again, and post a second stop for a graph
+    // that was already gone. Resetting the window here means a rebuilt graph starts a
+    // fresh idle countdown instead of inheriting a stale one.
+    m_idleStopRequested = false;
+    m_lastNonEmptyQuantum = GetTickCount64();
 }
 
 } // namespace Harness
