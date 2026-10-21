@@ -51,10 +51,16 @@ static std::mutex s_audioLogMtx;
 static std::string NarrowForLog(Platform::String^ s)
 {
     if (!s) return {};
-    const int n = WideCharToMultiByte(CP_UTF8, 0, s->Data(), s->Length(), nullptr, 0, nullptr, nullptr);
+    // Apotheosis (media, 2026-10-21): Data() can be null for a non-null but empty
+    // Platform::String, and Length() can be 0. Guarding both keeps this out of the same
+    // null-dereference class as the AudioLog fix above (this is called from it).
+    const wchar_t* data = s->Data();
+    const int len = static_cast<int>(s->Length());
+    if (!data || len <= 0) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, data, len, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
     std::string out(static_cast<size_t>(n), '\0');
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, s->Data(), s->Length(), &out[0], n, nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, data, len, &out[0], n, nullptr, nullptr);
     return out;
 }
 static void AudioLog(const std::string& msg)
@@ -65,8 +71,24 @@ static void AudioLog(const std::string& msg)
         GetLocalTime(&st);
         char ts[32] = "";
         snprintf(ts, sizeof ts, "%02d:%02d:%02d ", st.wHour, st.wMinute, st.wSecond);
-        Windows::Storage::StorageFolder^ folder = Windows::Storage::ApplicationData::Current->LocalFolder;
-        std::string path = NarrowForLog(folder->Path) + "\\mediaaudio.txt";
+        // Apotheosis (media, 2026-10-21): ApplicationData::Current is null at the edges of
+        // the app lifecycle (suspend/resume, page teardown), and so is LocalFolder. This runs
+        // on every present wake via EnsureStarted, so an unguarded dereference there is a
+        // null-pointer fault in Harness.exe - crash.txt 2026-10-21 23:31:26, pc resolving to
+        // Harness::MediaAudio::EnsureStarted+0x231 with r0=0x00000000. The surrounding
+        // try/catch cannot help: this is an SEH access violation, not a C++ exception, and
+        // this project builds with exceptions off (/EHs-c-, _HAS_EXCEPTIONS=0). Checking the
+        // handles is the only defence.
+        Windows::Storage::ApplicationData^ appData = Windows::Storage::ApplicationData::Current;
+        if (!appData)
+            return;
+        Windows::Storage::StorageFolder^ folder = appData->LocalFolder;
+        if (!folder)
+            return;
+        Platform::String^ folderPath = folder->Path;
+        if (!folderPath)
+            return;
+        std::string path = NarrowForLog(folderPath) + "\\mediaaudio.txt";
         std::ofstream f(path, std::ios::app | std::ios::binary);
         if (f) f << ts << msg << "\n";
     } catch (...) {}
@@ -166,10 +188,20 @@ void MediaAudio::StartGraphFor(int sampleRate, int channels)
             Windows::Devices::Enumeration::DeviceInformation^ nonHandset = nullptr;
             try {
                 auto devices = t.get();
+                if (!devices) {
+                    AudioLog("endpoint probe: FindAllAsync returned null collection");
+                    self->CreateGraphFor(sampleRate, channels, nullptr);
+                    return;
+                }
                 AudioLog(std::string("endpoint probe: ") + std::to_string(devices->Size)
                          + " AudioRender device(s)");
                 for (unsigned i = 0; i < devices->Size; ++i) {
                     auto d = devices->GetAt(i);
+                    // A null entry is not worth a null-dereference: skip it and say so.
+                    if (!d) {
+                        AudioLog("  endpoint[" + std::to_string(i) + "]: <null>");
+                        continue;
+                    }
                     const std::string name = NarrowForLog(d->Name);
                     AudioLog("  endpoint[" + std::to_string(i) + "]: " + name
                              + " default=" + (d->IsDefault ? "1" : "0")
