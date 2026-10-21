@@ -745,3 +745,69 @@ first run green.
 > rewritten, scratch files committed). The 0.2.5.38 audio code was verified intact afterwards, but
 > the next build must carry a version higher than whatever the device has installed — a same-version
 > reinstall is a silent no-op.
+
+---
+
+## Device round 8 (2026-10-21, 0.8.0.1 -> 0.8.0.3) — SOUND. The graph never had an output node
+
+**User-confirmed on device: "听到声音了". DoD item 1 is closed (picture + sound).**
+
+### Root cause: no AudioDeviceOutputNode, no AddOutgoingConnection
+
+``CreateGraphFor`` created an ``AudioFrameInputNode``, hooked ``QuantumStarted`` and called
+``graph->Start()`` - but never created an ``AudioDeviceOutputNode`` and never connected the two.
+An AudioGraph whose input node has no consumer pulls frames at maximum speed and throws them away.
+That is precisely the ~17x-realtime spin this project had been reading for days
+(``und`` ~= ``quanta``, ``required=480`` always, ring永远被抽干).
+
+It also explains every contradictory reading that sent earlier rounds down the wrong path:
+
+| reading | why it misled |
+|---|---|
+| ``pcm`` pushed == consumed, whole 10 s track | samples really were being TAKEN - so "the chain works, only the binding is left" |
+| ``m_volume = 1.0f``, ``m_muted = false``, full volume, silence | the samples went nowhere |
+| a 441 Hz tone that bypassed the decoder was ALSO inaudible | nothing to do with what we feed it; the tone test cleared the decoder but not the graph |
+| quanta "looked real-time" | an artefact of the decoder's push rate throttling the pull, not a device clock |
+
+**Lesson worth keeping**: the ``pcm`` counters only prove samples leave the ring. They do NOT
+prove samples reach a device. The reliable tell is the QUANTUM RATE: a real device clock is
+~100 quanta/s (100 x 10 ms); ~1500/s means no device is attached.
+
+### Fix (0.8.0.2)
+
+``CreateDeviceOutputNodeAsync()`` -> ``m_inputNode->AddOutgoingConnection(m_outputNode)`` ->
+``graph->Start()`` (connection must precede Start). ``Reset()`` now calls
+``RemoveOutgoingConnection`` (a connection outliving its endpoint faults on teardown). A failed
+output node deliberately does NOT set ``m_failed`` (endpoints can be busy - worth retrying) but
+MUST clear ``m_graph``/``m_sampleRate``, or ``EnsureStarted``'s ``sameFormat`` check early-returns
+forever.
+
+Device proof: quantum rate fell from ~1500/s to ~100/s and ``taken=480 underran=0`` hit
+consecutively.
+
+### Three more fixes in the same batch
+
+1. **Endpoint selection no longer requires ``IsDefault``.** Both render endpoints on this Lumia
+   (``Speakers`` / ``Internal Handset Speaker``, both QCAUD WaveRT) report ``IsDefault=0`` -
+   Win10M does not populate it - so the old IsDefault-only pick chose nothing and fell back to the
+   silent implicit binding. Now: IsDefault wins if present, else prefer a name that is NOT the
+   handset (media must not be pinned to the earpiece), else the first enabled one; the pick is
+   bound explicitly to ``PrimaryRenderDevice``.
+2. **Idle-stop window 3 s -> 20 s.** 3 s fired DURING real playback (round 23:13:52: stop posted
+   while ``frames=499/156`` and audio was still being pushed) because the graph drains faster than
+   the decoder fills.
+3. **``Reset()`` clears the idle-stop state**, removing the duplicated
+   ``posting Stop`` / ``executing deferred Stop`` pair.
+
+### Status
+
+**0.8.0.3 is the shipping build** (output-node fix + endpoint selection + wider idle window,
+temporary 441 Hz tone test removed). All three versions are on the 0.8.0.0 baseline per the user's
+instruction, leaving 1.0.0.0 free. Commit ``9f1634d``.
+
+### Still open
+
+- **JIT null-pointer crash** (caught in the 0.8.0.1 round, unrelated to audio): ``pc`` inside
+  ``Harness.exe``, ``jit-context: useJIT=1 baseline=1``, ``r0=0x00000000`` with
+  ``access=0 fault=0``. Needs its own round.
+- Audio quality: long clips, A/V sync, audio after seek, switching between clips, power draw.

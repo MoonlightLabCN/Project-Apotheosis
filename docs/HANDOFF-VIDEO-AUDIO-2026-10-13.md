@@ -1,27 +1,27 @@
 # 交接：`<video>` / `<audio>` 线（media-mf）
 
-**日期**：2026-10-13（**§14 更新于 2026-10-20**）
-**分支**：`media-mf`（§14 撰写时 HEAD = `4bfdf5b`；音频代码在 `6eb00b1`）
+**日期**：2026-10-13（**§15 更新于 2026-10-21：声音已通**）
+**分支**：`media-mf`（§15 撰写时 HEAD = `9f1634d`）
 **上游 WebKit 仓库**：`WebKit/`（gitignored，独立 git repo，分支 `wk-tnew`，全部 port 改动未提交，其中 13 个 `UU` unmerged 条目）
 **真源码在哪**：`WebKit/` 下的改动是**易失的**（不在仓库、未提交）。真正入库的是 `patches/2026-10-09-winuwp-media-mf.patch`（当前 140 KB / 7 文件，反向自检 `git apply --check -R` 通过）。改完 `WebKit/` 必须重新生成补丁再提交，否则工作会丢。
 
-> **2026-10-20 快速指路**：先读 **§14**（音频定位到底 + 本轮仓库工程），再看 §12.7（硬件解码终判）、§13（920/930 适配）。
+> **2026-10-21 快速指路**：**先读 §15**（✅ 声音根因与修法）→ §14（定位过程与三大矛盾现象）→ §12.7（硬件解码终判）→ §13（920/930 适配）。
 
 ---
 
 ## 0. 一句话现状
-
-**画面已闭环（用户确认"视频能看"）；声音仍未通，但已定位到底层，且方向已反转。**
+**DoD ① 闭环：画面 ✅ + 声音 ✅（均为用户真机确认）。** 下一个开放问题与音频无关（JIT 空指针崩溃）。
 
 - **`<video>` 有画面**：三道门（§1）全开 + `supportsAcceleratedRendering()=false`（§11.3）+
-  readyState 修复（§10.2）后，真机确认画面能动、能播到片尾。
-- **`<audio>` 没声音**：0.2.5.38 的活诊断证明**解码器 → 环 → AudioGraph 全通、全音量、实时**
-  （整部 10 秒音频 `pcm=480128/480128`），声音堵在**图的输出绑定**。0.2.5.38 已改成显式绑定
-  `AudioGraphSettings::PrimaryRenderDevice`，**已部署到真机、待用户验证**（§14.4/§14.5）。
-- **"放完闪退"已定位并修**：是我自己在 `QuantumStarted` 回调里拆音频图（§14.1）；
-  0.2.5.38 用 dispatcher 派发真延迟停止才算修干净（§14.2）。
+  readyState 修复（§10.2）。
+- **有声音**：根因是**图里从未创建 `AudioDeviceOutputNode` / 从未 `AddOutgoingConnection`**
+  （悬空输入节点 → 17 倍速空转 → 全部丢帧）。0.8.0.2 接上后真机确认有声，量子节奏从
+  ~1500/秒 回到 ~100/秒。详见 **§15**。出货版 **0.8.0.3**（已摘除临时蜂鸣测试）。
+- **"放完闪退"已修**：是我自己在 `QuantumStarted` 回调里拆音频图（§14.1/§14.2）。
+- **仍开放**：**JIT 空指针崩溃**（§15.5，`useJIT=1`、`r0=0` 解引用，与音频无关）；
+  音频质量项（长片 / A/V 同步 / seek 后音频 / 多段切换 / 功耗）。
 - **硬件解码（DXVA）已终判：此路不通**（§12.7）——设备有能力（FL 11_0 + 10 个解码 profile），
-  但 App Container 内 `MF_SOURCE_READER_D3D_MANAGER` 必失败且无优雅退路。探针已摘除（白搭 8 秒元数据延迟）。
+  但 App Container 内 `MF_SOURCE_READER_D3D_MANAGER` 必失败且无优雅退路。探针已摘除。
 
 ---
 
@@ -204,6 +204,73 @@ aba3ac9  patches: 媒体线的上游改动入库(含本次崩溃修复)
 ## 9. 详细记录
 
 `docs/MEDIA-MF-IMPLEMENTATION.md` —— 按"设备回合 1..5"记录了每一轮的真机读数、被证伪的假设、以及上述三条根因链的完整推导。**下一轮测试结果请追加到那里。**
+
+---
+
+## 15. ✅ 声音通了：漏建 `AudioDeviceOutputNode`（2026-10-21，0.8.0.2 真机确认）
+
+**DoD ① 最后一块拼图落地。用户真机确认"听到声音了"。**
+
+### 15.1 根因：图里从来没有输出节点
+
+`CreateGraphFor` 建了 `AudioFrameInputNode`、挂了 `QuantumStarted`、`graph->Start()` ——
+**但从未创建 `AudioDeviceOutputNode`，也没有 `AddOutgoingConnection` 把输入节点接到输出设备。**
+
+UWP AudioGraph 里，一个**悬空的输入节点没有任何消费者**，图就以最大速度拉帧然后丢弃。
+这正是本项目连续多轮读到的 **~17 倍速空转**（`und ≈ quanta`、`required=480` 恒定、环永远被抽干）。
+
+**这一条同时解释了此前全部矛盾现象**（也是为什么绕了这么久）：
+
+| 现象 | 为什么被误读 |
+|---|---|
+| `pcm` 计数完全正常、`pushed==consumed` | 样本**确实**被取走了 —— 于是误判"链路已通，只差输出绑定" |
+| `m_volume=1.0f` / `m_muted=false` 却全音量无声 | 数据倒进了虚空 |
+| 连**绕开解码器**的 441Hz 蜂鸣也听不见 | 与"喂什么"无关；蜂鸣测试排除了解码器，却没排除图本身 |
+| 量子"看起来实时" | 是被解码器推入速率限制的**假象**，不是设备时钟 |
+
+> **教训**：`pcm` 计数器只证明"数据被从环里取走"，**不证明**数据到达了设备。
+> 判据要落在**量子节奏**上：真实设备时钟 = ~100 量子/秒（100 × 10ms）；17 倍速 = 没接设备。
+
+### 15.2 修法（0.8.0.2）
+
+```cpp
+create_task(self->m_graph->CreateDeviceOutputNodeAsync()).then([self](task<...> outTask) {
+    ...
+    self->m_outputNode = outResult->DeviceOutputNode;
+    self->m_inputNode->AddOutgoingConnection(self->m_outputNode);   // ← 缺的就是这一句
+    self->m_graph->Start();       // 必须在连接之后
+});
+```
+`Reset()` 里补 `RemoveOutgoingConnection`（连接比端点活得久会让拆解时 faults）。
+输出节点创建失败**不置 `m_failed`**（端点可能忙/暂不可用，值得重试），但必须清
+`m_graph`/`m_sampleRate`，否则 `EnsureStarted` 的 `sameFormat` 会永久早退。
+
+**真机判据**：修复后量子节奏从 **~1500/秒 掉到 ~100/秒**（真实时钟），
+`taken=480 underran=0` 连续命中。
+
+### 15.3 同批修掉的三处
+
+1. **端点选择不再依赖 `IsDefault`** —— 此机两个渲染端点（`Speakers` / `Internal Handset
+   Speaker`，均为 QCAUD WaveRT）`IsDefault` **全为 0**（Win10M 不填该属性），旧逻辑要求
+   `IsDefault` 才绑定 → 一个都没选 → 退回静默隐式绑定。改为：`IsDefault` 优先 → **非
+   handset 名字优先**（媒体播放不该钉在听筒上）→ 首个 enabled，并显式绑
+   `PrimaryRenderDevice`。
+2. **空转自停窗口 3s→20s** —— 3s 会**在真实播放中误停**（图排空快于解码器填充，
+   23:13:52 轮实测：`frames=499/156`、仍在推音频时就触发了 stop）。
+3. **`Reset()` 复位停止状态** —— 消除 `posting Stop` / `executing deferred Stop` 的重复执行。
+
+### 15.4 出货状态
+
+- **0.8.0.3 = 出货版**：保留输出节点修复 + 端点选择 + 自停窗口，**摘除临时 441Hz 蜂鸣测试**。
+- 0.8.0.1 / 0.8.0.2 / 0.8.0.3 三个版本都在 **0.8.0.0 基线**上（用户要求），未占用 1.0.0.0。
+- 提交：`9f1634d`（已推送，CI 五项检查）。
+
+### 15.5 仍开放
+
+- **JIT 空指针崩溃**（0.8.0.1 轮抓到，与音频无关）：`pc` 落在 `Harness.exe` 内、
+  `jit-context: useJIT=1 baseline=1`、`r0=0x00000000`/`access=0 fault=0` 空指针解引用。
+  出现时机在页面加载后十余秒，需单独回合定位。
+- 音频真实质量验证（长片、A/V 同步、seek 后音频、多段视频切换、功耗）。
 
 ---
 
