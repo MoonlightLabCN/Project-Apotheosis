@@ -74,3 +74,6 @@ _ref/
 Navigator.i
 dist-14393/
 harness/Assets/orig/
+
+# Apotheosis: MetroSurf fork 的本地克隆(独立 git repo,仅用于对照研究;见 docs/METROSURF-ASSESSMENT.md)
+_metrosurf/
