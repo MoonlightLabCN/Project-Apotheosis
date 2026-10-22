@@ -65,7 +65,12 @@ MetroSurf 自称 *"a powerful browser for Windows Phone and Windows Mobile"*。�
 
 ### 1.3 ★★★ 与当前开放问题直接相关
 
-**`JavaScriptCore` 的整条 ARMv7 JIT 补丁线**（assembler/dfg/jit/bytecode/heap，共 25 文件）——我们刚在 JIT 上抓到空指针崩溃（已定位为 `AudioLog` 的 null 解引用，与 JIT 无因果），但**我们的 JIT 是否真正可用**仍是未验证项。MetroSurf 的这条线是**同代上游、同架构（ARMv7/Thumb2）的现成参考**，对验证/对齐我们的 `WK_WINUWP` JIT 补丁有直接价值。
+**`JavaScriptCore` 的整条 ARMv7 JIT 补丁线**（assembler/dfg/jit/bytecode/heap，共 25 文件）——**我们的 JIT 是每天在用、经用户日常验证的**（`jit-context: useJIT=1 baseline=1` 持续出现在真机日志里，harness 还有 0/1/2 三档冷启动开关）。所以这里不是"我们缺 JIT"，而是**两边都在跑 ARMv7 JIT，可以互相印证**：
+
+- 若某类页面上我们的 JIT 表现异常，可对照它的 `BaselineJITRegisters.h` / `AssemblyHelpers` / `InlineCacheCompiler` 差异；
+- `WTF/wtf/simde/arm/neon.h`（SIMD 的 ARM NEON 适配）是我们**可能缺**的一块，与 JIT/图形都有关系。
+
+> 2026-10-21 订正：早先此处写成"我们的 JIT 是否真正可用仍是未验证项"**是错的**。同类错误也出现在旧文档（`AGENTS.md` §"2026-09-27 订正"、`CLAUDE.md` 的"真机已验证跑通 … → JSC JIT"）——JIT 不是纸面能力，是每天在用的。
 
 特别值得看的：
 - `WTF/wtf/simde/arm/neon.h` —— SIMD 的 ARM NEON 适配（我们可能缺）
@@ -86,7 +91,7 @@ MetroSurf 自称 *"a powerful browser for Windows Phone and Windows Mobile"*。�
 | **Storage 持久化** | ⚠️ 部分（SQLite 适配） | ✅ 完整 129 KB | **它领先** |
 | **CacheStorage / IDB** | ⛔ 无 | ✅ 完整 113 KB + 32 KB | **它领先** |
 | GPU 合成 | ✅ ANGLE/TextureMapper 真机跑通 | 有 texmap 补丁（12 文件） | 各有侧重，可对照 |
-| JIT | ⚠️ 构建启用但未验证可用性 | ✅ 完整 ARMv7 JIT 补丁线（25 文件） | **它有参考价值** |
+| JIT | ✅ **每天在用**（用户日常验证，`useJIT=1`） | ✅ 完整 ARMv7 JIT 补丁线（25 文件） | **两边都在跑，可互相印证** |
 | 内存管理 | ⚠️ 踩过 OOM | ✅ mimalloc + 内存压力 | **它领先** |
 
 ## 3. 吸纳建议（按性价比排序）
