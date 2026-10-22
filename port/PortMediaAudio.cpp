@@ -97,6 +97,19 @@ int mediaAudioChannels()
     return g_audioQueue.channels();
 }
 
+bool mediaDxvaProbeChanged()
+{
+    static int lastState = -1;
+    static const char* lastSite = nullptr;
+    const int state = WebCore::WinUWPMediaDiagnostics::dxvaProbe();
+    const char* site = WebCore::WinUWPMediaDiagnostics::dxvaProbeSite();
+    if (state == -1 || (state == lastState && site == lastSite))
+        return false;
+    lastState = state;
+    lastSite = site;
+    return true;
+}
+
 void appendMediaDiagnostics(char* out, int outBytes)
 {
     if (!out || outBytes <= 0)
@@ -106,17 +119,17 @@ void appendMediaDiagnostics(char* out, int outBytes)
     // subtype values are GUID::Data1 of the negotiated video media types; RGB32 is 0x16,
     // NV12 is 0x3231564E, H264 is 0x34363248. Enough to tell "we got RGB32 out of the
     // Video Processor" from "the transform never engaged" on device.
-    // Apotheosis (media, 2026-10-18/19): dxva reports the MAIN decode path, which is
-    // software: the DXVA experiment is closed (the D3D manager cannot be handed to the MF
-    // decoder on 15254 - see MediaPlayerPrivateWinUWP.cpp). What the device DOES expose
-    // (decoder profile count, feature level, H.264 profile) is in dxvaprof/dxvafl/h264.
+    // Apotheosis: dxva reports the MAIN path; the opt-in protected reader is a separate
+    // experiment. Even probe=1 (GPU frame) does not make ordinary playback hardware.
     const char* dxvaText = "sw";
     std::snprintf(out, static_cast<size_t>(outBytes),
         "media readers=%u frames=%llu/%llu pcm=%llu/%llu/%llu q=%d@%dHz/%dch"
         " native=0x%X out=0x%X dxva=%s err=0x%08lX at=%s"
         " reads=%llu lasthr=0x%08lX flags=0x%X sidx=%d vidx=%d aidx=%d drop=%llu"
         " cap=%d qpush=%llu qcons=%llu qdrop=%llu und=%llu cpush=%llu phase=%d"
-        " dxvaprof=%u dxvafl=0x%04X h264=%d",
+        " dxvaprof=%u dxvafl=0x%04X h264=%d"
+        " probe=%d phr=0x%08lX pat=%s preads=%u psize=%ux%u pbind=0x%X"
+        " mt=%d mt11=0x%08lX mt10=0x%08lX",
         WebCore::WinUWPMediaDiagnostics::startedSourceReaders(),
         WebCore::WinUWPMediaDiagnostics::framesDecoded(),
         WebCore::WinUWPMediaDiagnostics::framesPresented(),
@@ -154,7 +167,17 @@ void appendMediaDiagnostics(char* out, int outBytes)
         WebCore::WinUWPMediaDiagnostics::audioPhase(),
         WebCore::WinUWPMediaDiagnostics::dxvaProfiles(),
         WebCore::WinUWPMediaDiagnostics::dxvaFeatureLevel(),
-        WebCore::WinUWPMediaDiagnostics::dxvaH264Profile() ? 1 : 0);
+        WebCore::WinUWPMediaDiagnostics::dxvaH264Profile() ? 1 : 0,
+        WebCore::WinUWPMediaDiagnostics::dxvaProbe(),
+        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::dxvaProbeHr()),
+        WebCore::WinUWPMediaDiagnostics::dxvaProbeSite(),
+        WebCore::WinUWPMediaDiagnostics::dxvaProbeReads(),
+        WebCore::WinUWPMediaDiagnostics::dxvaProbeWidth(),
+        WebCore::WinUWPMediaDiagnostics::dxvaProbeHeight(),
+        WebCore::WinUWPMediaDiagnostics::dxvaProbeBind(),
+        WebCore::WinUWPMediaDiagnostics::dxvaMultithread(),
+        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::dxvaMultithread11Hr()),
+        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::dxvaMultithread10Hr()));
 }
 
 } // namespace WebCorePort

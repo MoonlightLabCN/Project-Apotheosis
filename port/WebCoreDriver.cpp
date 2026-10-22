@@ -2195,7 +2195,7 @@ static void perfWriteStageTimeline(const PerfRow& r)
     // make visible (a <video> that never loads looks identical to one that was never
     // reachable).
     {
-        char media[256];
+        char media[1024]; // Apotheosis: include probe/capability fields without truncation.
         WebCorePort::appendMediaDiagnostics(media, sizeof media);
         std::fprintf(fp, "%s\n", media);
     }
@@ -8028,6 +8028,17 @@ int WebCoreLiveTick(uint8_t* outRGBA)
         g_perfCur.wakes = static_cast<int>(g_presentWakes.exchange(0, std::memory_order_relaxed));
     for (int i = 0; i < 3; ++i)
         RunLoop::cycle();
+    // Apotheosis: asynchronous probe progress must survive the early navigation
+    // snapshot. Only transitions write; ordinary playback does no extra file I/O.
+    if (WebCorePort::mediaDxvaProbeChanged() && !g_stagePath.empty()) {
+        FILE* fp = nullptr;
+        if (fopen_s(&fp, g_stagePath.c_str(), "ab") == 0 && fp) {
+            char media[1024];
+            WebCorePort::appendMediaDiagnostics(media, sizeof media);
+            std::fprintf(fp, "%s\n", media);
+            std::fclose(fp);
+        }
+    }
     {
         PerfPhase perfRender(&g_perfCur.renderUpdate);   // M4
         g_session->page->isolatedUpdateRendering();   // 推进一帧动画/rAF/IO(可能跑 JS,甚至导航/换帧)

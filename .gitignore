@@ -53,6 +53,25 @@ stage.txt
 gpuprobe.txt
 jitresult.txt
 
+# ==== 根目录 scratch(2026-10-23 清理:166 个根文件 -> 14 个)====
+# 历史教训:一次性调试脚本与构建日志曾被整批提交(d32b155),把仓库根目录淹没。
+# 归档在本地 archive/(已忽略),不入库。
+/_*.ps1
+/_*.txt
+/_*.log
+/build-*.log
+/deploy-*.log
+/harness*.log
+/webcore*.log
+/jit*.log
+/link-*.log
+/configure-*.log
+/*-build.log
+/*-cfg.log
+/*-install.log
+/*-fetch.log
+/Navigator.i
+
 # ==== 字体(几 MB,标准字体可重新获取)====
 *.ttf
 *.ttc
@@ -77,3 +96,10 @@ harness/Assets/orig/
 
 # Apotheosis: MetroSurf fork 的本地克隆(独立 git repo,仅用于对照研究;见 docs/METROSURF-ASSESSMENT.md)
 _metrosurf/
+
+# Reproducible DXVA fixtures (tools/New-MediaDxvaFixtures.ps1).
+port/_mediatest/test-720p.mp4
+port/_mediatest/test-1080p.mp4
+
+# Apotheosis: 根目录历史清理的归档(构建日志/一次性脚本,保留在本地供考古,不入库)
+archive/

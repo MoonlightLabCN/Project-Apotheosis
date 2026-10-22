@@ -224,3 +224,17 @@ pwsh -NoProfile -File E:\Apotheosis\tools\_pull-evidence.ps1
 | "AudioGraph 在此设备不可用"（§11.7） | 错。真实根因是**漏建 `AudioDeviceOutputNode`**；`pcm` 计数正常 ≠ 到达设备 |
 | 0.2.5.33 空转自停在 `QuantumStarted` 回调内拆图 | **绝不在回调内拆图**（`Windows.Media.Audio.dll` 内部崩），必须 dispatcher 派发 |
 | `AudioLog` 里 `ApplicationData::Current->LocalFolder` 无判空 | 生命周期边缘为 null，**SEH 崩（`/EHs-c-` 下 try/catch 兜不住）**，必须显式判空 |
+## 10. 2026-10-23 实施状态（0.8.0.7，等待用户真机回传）
+
+- 已实现 A1 的保护上下文 + 独立 NV12/DXGI 首帧探针；普通媒体不自动跑探针，
+  测试页显式触发，每进程一次。未把 manager 接入主 reader。
+- 任务书 A1 示例需订正：`ID3D11Multithread` 从 **immediate context** QI；
+  另实现 Microsoft MF 指南的 **D3D11 device → ID3D10Multithread** 兼容路径。
+  `SetMultithreadProtected` 返回旧值，以 getter 判断保护实际开启。
+- 新媒体字段和完整测试步骤见 `HANDOFF-VIDEO-AUDIO-2026-10-13.md` §16。
+  `probe=1` 代表 GPU-backed 帧；主路径仍为 `dxva=sw`，不等于主硬解已接通。
+- B1 仅完成 SDK/代码接缝侦察：额外发现 MseStreamSource / MseSourceBuffer 候选。
+  **B2 必须实现 WebKit 的 MediaSource/SourceBuffer 后端；仅改 supportsType 不够。**
+  AdaptiveMediaSource 播放清单与网页 appendBuffer 是不同入口，分别验证。
+- 用户明确设备不在同网，本轮仅产出包，不访问 WDP，不作新的真机可行性结论。
+  A2 和 B 的运行时路线选择等待 A1 证据。

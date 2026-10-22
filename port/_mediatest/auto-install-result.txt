@@ -1,7 +1,10 @@
-===== curl deploy start 2026-10-20 01:00:43 ver=0.2.5.38 =====
-[01:00:43] waiting for device (up to 120 min)...
-[01:01:14] device ONLINE (waited ~0 min)
-[01:01:46] upload attempt 0 : HTTP 202 {"Reason" : "Deploy request accepted and being processed"}
-[01:02:09] installed: EdgeHTMLReborn.Harness_0.2.5.38_arm__x0rqga78m2mgc
-[01:02:10] launch: 200
-[01:02:10] READY - user: open the app, type http://192.168.3.108:8099/values.html in the address bar, wait ~15s, then say done
+===== curl deploy start 2026-10-23 00:20:01 ver=0.8.0.6 =====
+[00:20:01] waiting for device (up to 240 min)...
+[00:22:22]   ...still offline (2 min)
+[00:24:42]   ...still offline (4 min)
+[00:27:03]   ...still offline (6 min)
+[00:28:46] device ONLINE (waited ~8 min)
+[00:29:12] upload attempt 0 : HTTP 202 {"Reason" : "Deploy request accepted and being processed"}
+[00:30:37] installed: EdgeHTMLReborn.Harness_0.8.0.6_arm__x0rqga78m2mgc
+[00:30:38] launch: 200
+[00:30:38] READY - user: open the app, type http://192.168.3.108:8099/values.html in the address bar, wait ~15s, then say done

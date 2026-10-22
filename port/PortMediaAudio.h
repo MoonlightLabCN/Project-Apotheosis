@@ -40,4 +40,8 @@ int mediaAudioChannels();
 // negotiated video subtypes). Always NUL-terminates; degrades to "" if it cannot.
 void appendMediaDiagnostics(char* out, int outBytes);
 
+// Apotheosis: engine-thread-only change detection for the opt-in DXVA probe, so a
+// result arriving after navigation's stage snapshot still reaches stage.txt.
+bool mediaDxvaProbeChanged();
+
 } // namespace WebCorePort
