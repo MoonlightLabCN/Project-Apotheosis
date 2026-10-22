@@ -1,3 +1,462 @@
+diff --git a/Source/WTF/wtf/Assertions.cpp b/Source/WTF/wtf/Assertions.cpp
+index 688bafa332..99521be62b 100644
+--- a/Source/WTF/wtf/Assertions.cpp
++++ b/Source/WTF/wtf/Assertions.cpp
+@@ -135,6 +135,138 @@ void disableForwardingVPrintfStdErrToOSLog()
+ 
+ } // namespace WTF
+ 
++#if defined(WK_WINUWP)
++// Apotheosis: Windows 10 Mobile's WER writes no dump for the terminations this
++// port ends up in (CRASH() is std::abort(), whose UWP CRT tail is __fastfail,
++// and WTFCrash()/WTFBreakpointTrap() is a bkpt trap) — on device a fatal
++// RELEASE_ASSERT is indistinguishable from a silent exit. So WTF offers a
++// process-wide hook that the port driver (port/WebCoreDriver.cpp) installs at
++// startup; it writes the reason plus a captured stack into LocalState\crash.txt
++// before the process goes down. No header change on purpose: the driver
++// declares WTFWinUWPSetCrashHook() itself, so this stays a one-file rebuild.
++// The hook is called at the top of every fatal path below, i.e. *before* the
++// trap executes, so the stack it captures is the crashing stack.
++static void (*g_wkWinUWPCrashHook)(const char* reason) = nullptr;
++static bool g_wkWinUWPCrashHookFired = false;
++static char g_wkWinUWPStagedReason[512] = { 0 };
++
++WTF_EXPORT_PRIVATE void WTFWinUWPSetCrashHook(void (*hook)(const char* reason))
++{
++    g_wkWinUWPCrashHook = hook;
++    g_wkWinUWPCrashHookFired = false;
++    g_wkWinUWPStagedReason[0] = 0;
++}
++
++// Apotheosis: the WTFReport* functions run immediately before the CRASH() that
++// follows them and are the only place that carries file/line/assertion text.
++// They do not fire the hook themselves (that would burn the one-shot on a
++// report that does not crash); they park the text so the crash function below
++// can emit it as part of the single crash.txt entry.
++static void wkWinUWPStageCrashReason(const char* tag, const char* file, int line, const char* function, const char* detail)
++{
++    if (!g_wkWinUWPCrashHook || g_wkWinUWPCrashHookFired)
++        return;
++    snprintf(g_wkWinUWPStagedReason, sizeof(g_wkWinUWPStagedReason), "%s: %s at %s:%d in %s",
++        tag, detail ? detail : "(none)", file ? file : "?", line, function ? function : "?");
++}
++
++// Apotheosis: fires the hook at most once per process (a crash while logging a
++// crash must not recurse).
++static void wkWinUWPFireCrashHook(const char* reason)
++{
++    if (!g_wkWinUWPCrashHook || g_wkWinUWPCrashHookFired)
++        return;
++    g_wkWinUWPCrashHookFired = true;
++    char buffer[768];
++    if (g_wkWinUWPStagedReason[0])
++        snprintf(buffer, sizeof(buffer), "%s | %s", reason ? reason : "CRASH", g_wkWinUWPStagedReason);
++    else
++        snprintf(buffer, sizeof(buffer), "%s", reason ? reason : "CRASH");
++    g_wkWinUWPCrashHook(buffer);
++}
++
++#if ENABLE(CONJECTURE_ASSERT)
++// Apotheosis: fire with a call site the crash function itself knows.
++static void wkWinUWPFireCrashHookAt(const char* tag, const char* file, int line, const char* function, const char* detail)
++{
++    if (!g_wkWinUWPCrashHook || g_wkWinUWPCrashHookFired)
++        return;
++    char buffer[512];
++    snprintf(buffer, sizeof(buffer), "%s: %s at %s:%d in %s",
++        tag, detail ? detail : "(none)", file ? file : "?", line, function ? function : "?");
++    wkWinUWPFireCrashHook(buffer);
++}
++#endif // ENABLE(CONJECTURE_ASSERT)
++
++// Apotheosis: notes that do *not* end the process. They deliberately bypass
++// g_wkWinUWPCrashHookFired (which is the one-shot for fatal paths) and instead carry their own
++// small budget, so a leak that repeats cannot fill LocalState\crash.txt, and so a real crash
++// afterwards still gets its entry.
++static unsigned g_wkWinUWPNoteBudget = 16;
++
++static void wkWinUWPFireNonFatalNote(const char* text)
++{
++    if (!g_wkWinUWPCrashHook || g_wkWinUWPCrashHookFired || !g_wkWinUWPNoteBudget)
++        return;
++    --g_wkWinUWPNoteBudget;
++    g_wkWinUWPCrashHook(text);
++}
++
++// Apotheosis: WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR is about to zero and leak an object that
++// still has CheckedPtrs on it. Upstream says nothing here and aborts much later, in an
++// unrelated CheckedPtr destructor; this names the class while the deleting stack is still live.
++void WTFWinUWPReportCheckedPtrDeletion(const char* className, unsigned checkedPtrCount)
++{
++    char buffer[512];
++    snprintf(buffer, sizeof(buffer), "checked-ptr: %s deleted with %u CheckedPtr(s) outstanding (zeroed and leaked)",
++        className ? className : "?", checkedPtrCount);
++    wkWinUWPFireNonFatalNote(buffer);
++}
++
++// Apotheosis: the delayed half of the same bug - the last CheckedPtr to such an object going
++// away. Survivable here (see CheckedRef.h), so it is a note, not a crash.
++void WTFWinUWPReportDanglingCheckedPtr()
++{
++    wkWinUWPFireNonFatalNote("checked-ptr: released a CheckedPtr to an already-deleted object");
++}
++
++// Apotheosis: reason/misc payload of the CRASH_WITH_INFO()/RELEASE_ASSERT family.
++// Apotheosis: entry for the header-side WTFCrashWithInfo(line, file, function, counter) - a plain
++// RELEASE_ASSERT(x) whose only information is its location.
++void WTFWinUWPReportCrashLocation(int line, const char* file, const char* function)
++{
++    char buffer[512];
++    snprintf(buffer, sizeof(buffer), "WTF RELEASE_ASSERT at %s:%d in %s", file ? file : "?", line, function ? function : "?");
++    wkWinUWPFireCrashHook(buffer);
++}
++
++// Apotheosis: reason/misc payload of the CRASH_WITH_INFO()/RELEASE_ASSERT family. Exported
++// (not a local static) because the seven WTFCrashWithInfoImpl overloads that carry the
++// payload are defined in the port (webcore-driver-stubs.cpp) - WTF.lib never sees the
++// UCPURegister-typed declarations with a matching definition, so the payload used to reach
++// crash.txt only as a bare location. `counter` stays in the signature for the in-library
++// callers; the port passes 0.
++void WTFWinUWPReportCrashWithInfo(int line, const char* file, const char* function, int counter, unsigned count, const uint64_t* values)
++{
++    if (!g_wkWinUWPCrashHook || g_wkWinUWPCrashHookFired)
++        return;
++    char buffer[512];
++    int n = snprintf(buffer, sizeof(buffer), "CRASH_WITH_INFO at %s:%d in %s (counter %d)",
++        file ? file : "?", line, function ? function : "?", counter);
++    if (n < 0)
++        n = 0;
++    for (unsigned i = 0; i < count && static_cast<size_t>(n) + 1 < sizeof(buffer); ++i) {
++        int m = i
++            ? snprintf(buffer + n, sizeof(buffer) - n, " misc%u=0x%llx", i, static_cast<unsigned long long>(values[i]))
++            : snprintf(buffer + n, sizeof(buffer) - n, " reason=0x%llx", static_cast<unsigned long long>(values[i]));
++        if (m < 0)
++            break;
++        n += m;
++    }
++    wkWinUWPFireCrashHook(buffer);
++}
++#endif // defined(WK_WINUWP)
++
+ extern "C" {
+ 
+ #if PLATFORM(COCOA)
+@@ -279,6 +411,10 @@ void WTFReportNotImplementedYet(const char* file, int line, const char* function
+ 
+ void WTFReportAssertionFailure(const char* file, int line, const char* function, const char* assertion)
+ {
++#if defined(WK_WINUWP)
++    // Apotheosis: park the call site for crash.txt; the CRASH() follows in the caller.
++    wkWinUWPStageCrashReason("ASSERTION FAILED", file, line, function, assertion);
++#endif
+     if (assertion)
+         printf_stderr_common("ASSERTION FAILED: %s\n", assertion);
+     else
+@@ -288,6 +424,21 @@ void WTFReportAssertionFailure(const char* file, int line, const char* function,
+ 
+ void WTFReportAssertionFailureWithMessage(const char* file, int line, const char* function, const char* assertion, const char* format, ...)
+ {
++#if defined(WK_WINUWP)
++    // Apotheosis: park assertion + expanded message for crash.txt (CRASH() follows).
++    {
++        char message[256];
++        va_list hookArgs;
++        va_start(hookArgs, format);
++ALLOW_NONLITERAL_FORMAT_BEGIN
++        vsnprintf(message, sizeof(message), format, hookArgs);
++ALLOW_NONLITERAL_FORMAT_END
++        va_end(hookArgs);
++        char detail[384];
++        snprintf(detail, sizeof(detail), "%s (%s)", assertion ? assertion : "(none)", message);
++        wkWinUWPStageCrashReason("ASSERTION FAILED", file, line, function, detail);
++    }
++#endif
+     va_list args;
+     va_start(args, format);
+     vprintf_stderr_with_prefix("ASSERTION FAILED: ", format, args);
+@@ -376,6 +527,9 @@ void WTFPrintBacktrace(std::span<void* const> stack)
+ #if !defined(NDEBUG) || !(OS(DARWIN) || PLATFORM(PLAYSTATION))
+ void WTFCrash()
+ {
++#if defined(WK_WINUWP)
++    wkWinUWPFireCrashHook("WTFCrash");   // Apotheosis: crash.txt (see top of file)
++#endif
+ #if ASAN_ENABLED
+     __builtin_trap();
+ #elif OS(DARWIN) && CPU(ARM64)
+@@ -393,6 +547,9 @@ void WTFCrash()
+ // expects to link to it.
+ void WTFCrash()
+ {
++#if defined(WK_WINUWP)
++    wkWinUWPFireCrashHook("WTFCrash");   // Apotheosis: crash.txt (see top of file)
++#endif
+     CRASH();
+ }
+ #endif // !defined(NDEBUG) || !(OS(DARWIN) || PLATFORM(PLAYSTATION))
+@@ -402,6 +559,10 @@ int wtfConjectureAssertIsEnabled = 0;
+ 
+ void WTFCrashDueToConjectureAssert(const char* file, int line, const char* function, const char* assertion)
+ {
++#if defined(WK_WINUWP)
++    // Apotheosis: crash.txt (see top of file).
++    wkWinUWPFireCrashHookAt("CONJECTURE ASSERTION FAILED", file, line, function, assertion);
++#endif
+     printf_stderr_common("CONJECTURE ASSERTION FAILED: %s\n", assertion);
+     printCallSite(file, line, function);
+     WTFReportBacktrace();
+@@ -411,6 +572,9 @@ void WTFCrashDueToConjectureAssert(const char* file, int line, const char* funct
+ 
+ void WTFCrashWithSecurityImplication()
+ {
++#if defined(WK_WINUWP)
++    wkWinUWPFireCrashHook("WTFCrashWithSecurityImplication");   // Apotheosis: crash.txt
++#endif
+     CRASH();
+ }
+ 
+@@ -430,6 +594,19 @@ bool WTFIsDebuggerAttached()
+ 
+ void WTFReportFatalError(const char* file, int line, const char* function, const char* format, ...)
+ {
++#if defined(WK_WINUWP)
++    // Apotheosis: park the expanded message for crash.txt; FATAL() CRASH()es right after.
++    {
++        char message[256];
++        va_list hookArgs;
++        va_start(hookArgs, format);
++ALLOW_NONLITERAL_FORMAT_BEGIN
++        vsnprintf(message, sizeof(message), format, hookArgs);
++ALLOW_NONLITERAL_FORMAT_END
++        va_end(hookArgs);
++        wkWinUWPStageCrashReason("FATAL ERROR", file, line, function, message);
++    }
++#endif
+     va_list args;
+     va_start(args, format);
+     vprintf_stderr_with_prefix("FATAL ERROR: ", format, args);
+@@ -752,6 +929,18 @@ void WTFCrashWithInfoImpl(int, const char*, const char*, UCPURegister reason)
+     __builtin_unreachable();
+ }
+ 
++#elif defined(WK_WINUWP)
++
++// Apotheosis: nothing here on purpose. Assertions.h:975-981 declares seven
++// WTFCrashWithInfoImpl overloads taking UCPURegister args (32-bit on ARM32); this
++// branch used to define seven lookalikes with an extra leading `int counter` and
++// uint64_t args - signatures that match NO declaration in the tree, so they were
++// dead code that nonetheless shadowed the reporting path and hid the fact that
++// the payload never reached crash.txt. The payload-carrying definitions the link
++// actually resolves live in the port (webcore-driver-stubs.cpp) and report through
++// the exported WTFWinUWPReportCrashWithInfo() above. This file keeps only the
++// location-only helper WTFWinUWPReportCrashLocation().
++
+ #else
+ 
+ void WTFCrashWithInfoImpl(int, const char*, const char*, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister, UCPURegister) { CRASH(); }
+diff --git a/Source/WTF/wtf/CheckedRef.h b/Source/WTF/wtf/CheckedRef.h
+index e725eca176..6f5666cca8 100644
+--- a/Source/WTF/wtf/CheckedRef.h
++++ b/Source/WTF/wtf/CheckedRef.h
+@@ -35,6 +35,13 @@
+ #include <wtf/TypeTraits.h>
+ #include <wtf/UniqueRef.h>
+ 
++#if defined(WK_WINUWP)
++// Apotheosis: non-fatal note for a CheckedPtr released on an object that was already deleted
++// (zeroed and leaked). Defined in wtf/Assertions.cpp; declared here so this header keeps its
++// include set.
++WTF_EXPORT_PRIVATE void WTFWinUWPReportDanglingCheckedPtr();
++#endif
++
+ namespace WTF {
+ 
+ #define USING_CAN_MAKE_CHECKEDPTR(BASE) \
+@@ -382,11 +389,34 @@ public:
+         if constexpr (AtomicLike<StorageType>) {
+             // Combine the acquire load (zombie check) with the release decrement into a
+             // single acq_rel fetch_sub. The returned old value lets us detect a zero count.
+-            if (!m_checkedPtrCount.fetch_sub(1, std::memory_order_acq_rel)) [[unlikely]]
++            if (!m_checkedPtrCount.fetch_sub(1, std::memory_order_acq_rel)) [[unlikely]] {
++#if defined(WK_WINUWP)
++                // Apotheosis: the object was already zeroed and leaked by
++                // WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR, which will report the class and the stack
++                // that deleted it. Report AND crash, do not carry on: this counter check is the
++                // ONLY release-build guard against a CheckedPtr outliving its object (operator->
++                // never consults the count), so the previous "note it and return" policy left
++                // every other live CheckedPtr using a zeroed, leaked object - use of a null
++                // vtable half a frame later, far from the cause - and, on the atomic branch,
++                // decremented a zero counter to 0xFFFFFFFF, disabling the zombie check for that
++                // object for the rest of the process. The abort this replaces was found to be
++                // annoying on a map site; the trade it made was unsound. Close to the cause, the
++                // abort IS the diagnostic; the report keeps the class name and delete stack.
++                WTFWinUWPReportDanglingCheckedPtr();
++                crashDueToCheckedPtrToDeadObject();
++#else
+                 crashDueToCheckedPtrToDeadObject();
++#endif
++            }
+         } else {
+-            if (!m_checkedPtrCount.valueWithoutThreadCheck()) [[unlikely]]
++            if (!m_checkedPtrCount.valueWithoutThreadCheck()) [[unlikely]] {
++#if defined(WK_WINUWP)
++                WTFWinUWPReportDanglingCheckedPtr();
++                crashDueToCheckedPtrToDeadObject();
++#else
+                 crashDueToCheckedPtrToDeadObject();
++#endif
++            }
+             --m_checkedPtrCount;
+         }
+     }
+diff --git a/Source/WTF/wtf/FastMalloc.h b/Source/WTF/wtf/FastMalloc.h
+index 3b444e02ad..f0ab779097 100644
+--- a/Source/WTF/wtf/FastMalloc.h
++++ b/Source/WTF/wtf/FastMalloc.h
+@@ -640,6 +640,19 @@ using __thisIsHereToForceASemicolonAfterThisMacro UNUSED_TYPE_ALIAS = int
+ 
+ #endif // ENABLE(MALLOC_HEAP_BREAKDOWN)
+ 
++#if defined(WK_WINUWP)
++// Apotheosis: an object deleted with CheckedPtrs still on it is zeroed and leaked here, and
++// the only symptom is an abort much later, in whichever CheckedPtr destructor happens to run
++// next (crashDueToCheckedPtrToDeadObject(), CheckedRef.h) - a stack that says nothing about
++// the culprit. Report the class and the outstanding count at the moment of the deletion, when
++// the stack is still the one that caused it. Non-fatal; defined in wtf/Assertions.cpp and
++// declared here so this header keeps its include set.
++WTF_EXPORT_PRIVATE void WTFWinUWPReportCheckedPtrDeletion(const char* className, unsigned checkedPtrCount);
++#define WTF_WINUWP_REPORT_CHECKED_PTR_DELETION(T, count) WTFWinUWPReportCheckedPtrDeletion(#T, count)
++#else
++#define WTF_WINUWP_REPORT_CHECKED_PTR_DELETION(T, count) ((void)0)
++#endif
++
+ // delete(T*, std::destroying_delete_t, size_t) is preferred over delete(void*)
+ // in overload resolution, so we can use it to interpose before calling delete(void*).
+ // Note: WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR must be declared in every subclass.
+@@ -648,7 +661,8 @@ void operator delete(T* object, std::destroying_delete_t, size_t size) { \
+     ASSERT_UNUSED(size, sizeof(T) == size); \
+     object->setDidBeginCheckedPtrDeletion(); \
+     object->T::~T(); \
+-    if (object->checkedPtrCountWithoutThreadCheck()) [[unlikely]] { \
++    if (auto outstandingCheckedPtrCount = object->checkedPtrCountWithoutThreadCheck()) [[unlikely]] { \
++        WTF_WINUWP_REPORT_CHECKED_PTR_DELETION(T, static_cast<unsigned>(outstandingCheckedPtrCount)); \
+         secureZeroBytes(*object); \
+         return; \
+     } \
+diff --git a/Source/WTF/wtf/RedBlackTree.h b/Source/WTF/wtf/RedBlackTree.h
+index 3a122a4d99..f0c4fcf4ef 100644
+--- a/Source/WTF/wtf/RedBlackTree.h
++++ b/Source/WTF/wtf/RedBlackTree.h
+@@ -286,6 +286,25 @@ public:
+         } else if (y->color() == Black)
+             removeFixup(x, xParent);
+ 
++#if defined(WK_WINUWP)
++        // Apotheosis (2026-10-22): clear the unlinked node's own child links.
++        //
++        // NodeBase::m_left / m_right are CheckedPtr (line 157-158), so an unlinked node
++        // still holds checked references to its former children. Upstream clears them only
++        // on the NEXT insert() of that same node ("x->reset()" at the top of insert), which
++        // is fine for nodes that are re-inserted - but a ScheduledTask that is removed and
++        // then destroyed (TimerBase teardown) keeps those references to the grave, and
++        // WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR reports it:
++        //   checked-ptr: ScheduledTask deleted with 1 CheckedPtr(s) outstanding (zeroed and leaked)
++        //   checked-ptr: released a CheckedPtr to an already-deleted object
++        //   signal 22 (SIGABRT)
++        // Real device, 2026-10-22 22:59:05; the release's stack names
++        // WTF::RedBlackTree<...>::insert <- RunLoop::TimerBase::start, and the deletion lands
++        // in a paint. Both branches above leave z->m_left/m_right populated: the y != z path
++        // re-points y AT z's children without releasing z's own handles. Clearing here makes
++        // removal self-contained instead of relying on a later insert() to clean up.
++        z->reset();
++#endif
+         return z;
+     }
+     
+diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
+index 7ac74579c7..e81a0c944c 100644
+--- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp
++++ b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
+@@ -27,7 +27,9 @@
+ #include "config.h"
+ #include <wtf/RunLoop.h>
+ 
++#include <wtf/ApoLoadPhase.h>
+ #include <wtf/DataLog.h>
++#include <wtf/FastMalloc.h>   // Apotheosis: WTFWinUWPReportCheckedPtrDeletion
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/ProcessID.h>
+ #include <wtf/TZoneMallocInlines.h>
+@@ -217,7 +219,15 @@ void RunLoop::runImpl(RunMode runMode)
+         // Dispatch scheduled timers.
+         while (!firedTimers.isEmpty()) {
+             auto task = firedTimers.takeFirst();
+-            task->fired();
++            {
++                // Apotheosis (M4 load): every WebCore timer reaches the run loop through here -
++                // ThreadTimers' shared timer (DOM timers, the parser's yield timer, ScriptRunner)
++                // as well as the driver's own pump. Scopes opened deeper in the call claim their
++                // own time, so what stays in this bucket is timer work nothing else named; see
++                // wtf/ApoLoadPhase.h. No-op unless the driver armed the accounting.
++                APO_LOAD_PHASE(Timer);
++                task->fired();
++            }
+ 
+             Locker locker { m_loopLock };
+             // It is possible the task is already scheduled while executing fired().
+@@ -296,6 +306,38 @@ void RunLoop::unscheduleWithLock(TimerBase::ScheduledTask& task)
+     }
+ }
+ 
++#if defined(WK_WINUWP)
++// Apotheosis: m_schedules holds a CheckedPtr to every node it links (m_root /
++// m_left / m_right), and WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR zeroes a freed
++// ScheduledTask. A task that is destroyed while still linked therefore leaves a
++// dangling CheckedPtr inside the tree: the next insert() (i.e. the next
++// TimerBase::start()) assigns to that link, releasing a CheckedPtr to an
++// already-deleted object. Real-device crash, 0.2.5.x, reproduced with the JIT
++// both off and on:
++//   checked-ptr: ScheduledTask deleted with 1 CheckedPtr(s) outstanding (zeroed and leaked)
++//   checked-ptr: released a CheckedPtr to an already-deleted object
++//   signal 22 (SIGABRT)
++// Stack scan of the release names WTF::RedBlackTree<...>::insert <-
++// WTF::RunLoop::TimerBase::start; the scan of the deletion lands in a paint.
++//
++// unscheduleWithLock() only unlinks when ScheduledTask::isScheduled() says so, and that
++// flag is a bookkeeping copy of tree membership, not the tree itself. Make membership
++// authoritative here: walk the (tiny) schedule tree and unlink the node if it is really
++// still there, whatever the flag claims. Called from ~TimerBase() with m_loopLock held,
++// i.e. after stopWithLock() already ran, so this is a no-op on every healthy path.
++void RunLoop::detachScheduledTaskWithLock(TimerBase::ScheduledTask& task)
++{
++    for (auto* current = m_schedules.first(); current; current = current->successor()) {
++        if (current != &task)
++            continue;
++        m_schedules.remove(&task);
++        task.setScheduled(false);
++        WTFWinUWPReportCheckedPtrDeletion("RunLoop::TimerBase::ScheduledTask(still linked in m_schedules; unlinked by ~TimerBase)", 1);
++        return;
++    }
++}
++#endif // defined(WK_WINUWP)
++
+ // Since RunLoop does not own the registered TimerBase,
+ // TimerBase and its owner should manage these lifetime.
+ RunLoop::TimerBase::TimerBase(Ref<RunLoop>&& runLoop, ASCIILiteral description)
+@@ -316,6 +358,13 @@ RunLoop::TimerBase::~TimerBase()
+         releaseAssertIsCurrent(m_runLoop);
+     Locker locker { m_runLoop->m_loopLock };
+     stopWithLock();
++#if defined(WK_WINUWP)
++    // Apotheosis: safety net - see detachScheduledTaskWithLock(). stopWithLock() only
++    // unlinks when the task's isScheduled() flag is set; if the flag and the tree ever
++    // disagree, the ScheduledTask we are about to release would stay linked in
++    // m_schedules and be freed under the tree's CheckedPtr.
++    m_runLoop->detachScheduledTaskWithLock(m_scheduledTask.get());
++#endif
+ }
+ 
+ void RunLoop::TimerBase::start(Seconds interval, bool repeating)
 diff --git a/Source/WebCore/PAL/pal/PlatformWinUWP.cmake b/Source/WebCore/PAL/pal/PlatformWinUWP.cmake
 new file mode 100644
 index 0000000000..4a13eed0da
