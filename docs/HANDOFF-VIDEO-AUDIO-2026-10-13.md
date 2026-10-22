@@ -671,3 +671,122 @@ GPU 合成中 + 后端声称加速渲染 ⇒ WebKit 直接跳过软件 paint，�
   2. 若自动任务还没跑：`pwsh -File E:\Apotheosis\tools\_deploy-and-round.ps1 -Ver 0.2.5.30`
   3. 读 `media` 行：**`frames>0` = 有画面，`pcm` 的 pushed/consumed>0 = 有声音**；`qpush>0` 而 `cpush=0` = 音频没进设备。同时确认不再出现 `evt-waiting`/`evt-stalled`（§10.2 修复的判据）
   4. 测试服务器必须活着：`tools\Test-MediaServer.ps1 -Port 8099`（PID 11768 从 10/13 起常驻，根目录 `port\_mediatest`）
+## 16. 2026-10-23：0.8.0.7 保护上下文的 DXVA 独立探针（等待真机）
+
+本轮用户在外网，明确要求先产出 appx，由用户部署；没有访问设备。基线为
+`133baf7`（保留 ScheduledTask / RedBlackTree 修复）。并发会话随后把 HEAD 推进到
+`30d1b1c`（版本整理为 0.8.0.6）并切回原分支；本轮探针升为独立的 **0.8.0.7**，
+改动保留在共享工作区，未提交，避免覆盖另一会话正在部署的 0.8.0.6。
+**本节不是新一轮真机结论，§12.7 的“死路”结论继续待重审。**
+
+### 16.1 A1 实现与证据边界
+
+- 能力查询设备和探针设备均启用多线程保护：先从 immediate context 查询
+  `ID3D11Multithread`；不支持或保护未生效时，从 **D3D11 device** 查询
+  `ID3D10Multithread`，后者是 Microsoft MF 指南给出的兼容路线。
+  `SetMultithreadProtected()` 返回旧值，必须以 `GetMultithreadProtected()` 验证新值。
+- 主 reader 保留原 attributes / RGB32 / PCM 路径，仍不设置 D3D manager。
+- 仅视频源 URL 末尾的 `#apotheosis-dxva-probe` 触发一次探针；片段在交给 MF 前移除。
+  主 reader 成功打开且存在视频流后，独立线程创建第二个 reader（manager + NV12，无 VP），
+  最多请求 16 次以跳过 stream tick，检查首个 sample 的所有 buffer 是否提供
+  `IMFDXGIBuffer`，并取得 `ID3D11Texture2D` 描述。
+- 探针不持有 player / DecoderState / UI 指针，不与主播放共用 reader、D3D 设备或错误计数。
+  同步 MF 网络调用本身没有超时保证；探针线程 detach 且进程内最多一次，卡住时可由
+  `probe=-2 pat=probe-open/probe-read` 识别，退出 app 后重新测试。此隔离避免导航等待探针，
+  **不隔离驱动崩溃，也不取消仍在执行的 MF 调用**。
+- `dxva=sw` 继续表示主路径；`probe=1` 仅证明收到 GPU-backed 解码帧。
+  尚未接主硬解、未实现 GPU→CPU 转换、未证明硬件执行或 CPU/功耗收益。
+
+主源属性保持原样；音频唯一变动是诊断缓冲区扩为 1024 字节、采样间隔
+5000→1000 quantum（真实设备约 10 秒），不改 AudioGraph 节点、连接与拆图。
+driver 的 stage 媒体缓冲区也扩为 1024，live tick 在探针阶段/结果变化时追加完整 media 行。
+此前 256 字节的导航快照会截断尾部字段，无法可靠读到 dxvaprof 等信息。
+
+### 16.2 真机测试步骤
+
+测试素材为可复现的 20 秒、30fps H.264 Main + AAC-LC/48kHz/stereo：
+720p level 3.1、1080p level 4.0；生成物忽略入库。
+
+```powershell
+pwsh -NoProfile -File E:\Apotheosis\tools\New-MediaDxvaFixtures.ps1
+pwsh -NoProfile -File E:\Apotheosis\tools\Test-MediaServer.ps1 -Port 8099
+```
+
+设备必须能访问运行测试服务器的电脑（不在同网时，需在设备可达的机器上运行服务器；
+仅安装 appx 不会把素材或网页放进设备）。打开 `http://<服务器IP>:8099/dxva.html`：
+
+1. 先点 **320x176 baseline**，确认有画面、有声、播完不闪退。
+2. 退出并重启 app，重新打开测试页，点 **1080p probe**，亮屏等待至少 20 秒。
+3. 导出 `stage.txt`、`mediaaudio.txt`、`console.txt`；崩溃时附 `crash.txt` / dump。
+   若 stage 的最后一行仍是 running，可导航一次普通媒体页获取新的媒体快照。
+4. 如需另测 720p，必须再次退出重启（每进程仅一次）。720p/1080p software 按钮不触发探针，
+   可用于记录软解表现；本轮的一帧探针不能用来比较整段硬解 CPU。
+
+新增字段：
+
+| 字段 | 意义 |
+|---|---|
+| `probe=-1/-2/0/1/2/3` | 未请求 / 进行中 / 失败 / GPU 帧 / 系统内存帧 / EOF 或 16 次读取无帧 |
+| `phr` / `pat` | 探针独立 HRESULT / 阶段；主 reader 的 `err` 不被污染 |
+| `preads` | 已进入几次探针 ReadSample，不混入主 `reads` |
+| `psize` / `pbind` | GPU 纹理尺寸 / D3D11 BindFlags；系统内存帧时为 0 |
+| `mt=10/11/0` | 实测保护已开启的接口 / 未成功开启 |
+| `mt11` / `mt10` | 两条 QueryInterface 的 HRESULT；未尝试为 E_PENDING |
+
+设备回传后才能决定：有 GPU 帧则设计拷贝/呈现与实际硬解验证；开启保护仍失败则进入 A2
+MediaPlayer 帧服务探针。当前不把任何失败扩展为“15254 不支持”。
+
+### 16.3 B1 静态侦察：需要区分原生自适应播放与 WebKit MSE
+
+本机 SDK 中确认了 `AdaptiveMediaSource`、`MediaPlayer` 帧服务以及额外候选
+`Windows.Media.Core.MseStreamSource` / `MseSourceBuffer.AppendBuffer(IBuffer)`。
+文档列出的引入版本分别为 Adaptive/MseStreamSource 10240、帧服务 15063；
+这只是 SDK/API 合约证据，不代表 Lumia 15254 的运行时探针通过。
+
+原生 DASH/HLS 接收清单 URI；浏览器 MSE 接收网页 `appendBuffer` 送来的字节。
+本仓库 `MediaPlayerPrivate.h` 在 `ENABLE(MEDIA_SOURCE)` 下要求
+`load(const URL&, const LoadOptions&, MediaSourcePrivateClient&)`，
+`MediaSourcePrivate` 要求 `addSourceBuffer`，`SourceBufferPrivate` 要求 `appendInternal`。
+当前 WinUWP 后端没有这些实现。因此 **仅开启编译开关或放开 supportsType 不构成 MSE 后端**。
+MetroSurf 中的通用 MediaSource/SourceBuffer 代码也不能单独证明本端具备解码接缝。
+
+后续候选：在 A 的帧服务路线确认后，用 MseStreamSource 探针检查 SourceOpened、
+AddSourceBuffer、fMP4 init+media append、update/error、VideoFrameAvailable 与帧复制；
+把它作为实现 WebKit 接缝的候选，先验证生命周期和异步语义，不能直接承诺可桥接。
+AdaptiveMediaSource 的清单/请求头/真实 B站源测试仍需单独完成。
+它有接受 WinRT HttpClient 的重载；引擎 curl 的 header/cookie/TLS 配置不会自动作用于这个
+独立下载器，后续必须显式处理，不能以 curl 可带 Referer 推断原生下载成功。
+
+资料（2026-10-23 查阅）：
+
+- [MF D3D11 设备与多线程保护](https://learn.microsoft.com/en-us/windows/win32/medfound/supporting-direct3d-11-video-decoding-in-media-foundation)
+- [ID3D11Multithread：从 immediate context 查询](https://learn.microsoft.com/en-us/windows/win32/api/d3d11_4/nn-d3d11_4-id3d11multithread)
+- [MediaPlayer 帧服务](https://learn.microsoft.com/en-us/uwp/api/windows.media.playback.mediaplayer.isvideoframeserverenabled)
+- [AdaptiveMediaSource.CreateFromUriAsync：含 HttpClient 重载](https://learn.microsoft.com/en-us/uwp/api/windows.media.streaming.adaptive.adaptivemediasource.createfromuriasync)
+- [MseStreamSource](https://learn.microsoft.com/en-us/uwp/api/windows.media.core.msestreamsource)
+- [MseSourceBuffer.AppendBuffer](https://learn.microsoft.com/en-us/uwp/api/windows.media.core.msesourcebuffer.appendbuffer)
+
+### 16.4 本机构建与交付检查
+
+- ARM32 clang-cl：媒体 TU 编译通过（`port/hwdecode-media-compile.log`）。
+- GPU driver：19 个 obj 归档，lld-link `EXIT=0 undefined=0 duplicate=0`
+  （`port/hwdecode-driver-build.log`）；宿主 MSBuild exit code 0
+  （`port/hwdecode-harness-build.log`）。使用构建脚本当前默认的 Fallback XAML 路径。
+- 包：`harness/AppPackages/Harness/Harness_0.8.0.7_ARM_Test/Harness_0.8.0.7_ARM.appx`，
+  56,635,746 bytes；包内 manifest=0.8.0.7/arm，PE Machine=0x01C4，签名条目存在。
+  打包的 Harness.exe 与构建输出逐字节一致，包含 probe-gpu-frame/probe-protect/mt11 等新标记。
+- SHA-256：`eb04bab8fb18d4a9ecb4a65c92064da8bfcb1b55ef7550826223e0bfc86626e5`。
+  同目录 `HWDECODE-VERIFICATION.json` 保存身份/标记核对结果。
+- 同目录 `DXVA-Test-0.8.0.7.zip` 包含所有测试素材、页面、服务器及启动脚本，
+  可在设备能访问的 Windows 电脑上解压运行；`DXVA-README.txt` 为操作说明。
+- 本机通过：JS/PowerShell 语法、两段素材的 codec/尺寸/时长、HTTP 页面及 Range/HEAD、
+  C ABI 两份头逐字节一致、媒体补丁反向检查。WebKit 补丁保留原有 12 文件清单（含
+  ScheduledTask 修复）；原有的上游未合并索引条目未处理。
+- 构建备注：前一轮全链 WebCore+JSC 已通过；再次跑 Ninja 时缓存报
+  `premature end of file` / `stored deps info out of date`，错误地重新安排刚构建的依赖。
+  停止重复构建后，用 `ninja -t compdb -x` 导出的原编译规则编译修改的媒体 TU、
+  原归档规则重新归档全部 WebCore 对象，核对新诊断符号后替换 WebCore.lib，随后走官方
+  driver/harness 脚本。未修改构建开关，未修复或清空 Ninja 缓存；后续构建需留意该缓存问题。
+
+**待回传**：真实 media 行、音频量子节奏和用户有声有画确认。A1 不下成功/失败结论，
+A2/Adaptive/MSE 的运行时验证仍待后续设备回合。

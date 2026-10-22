@@ -1093,10 +1093,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..13eb868167
+index 0000000000..b143dff4fd
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1635 @@
+@@ -0,0 +1,1793 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -1137,12 +1137,15 @@ index 0000000000..13eb868167
 +// ID3D11VideoDevice lives in d3d11.h in the modern SDKs (d3d11video.h was merged in and
 +// no longer ships as its own header - 10.0.22621.0 has no d3d11video.h at all).
 +#include <d3d11.h>
++#include <d3d11_4.h>
++#include <d3d10.h>
 +#include <cstddef>
 +#include <cstring>
 +#include <mutex>
 +#include <wtf/MainThread.h>
 +#include <wtf/MonotonicTime.h>
 +#include <wtf/NeverDestroyed.h>
++#include <wtf/URL.h>
 +#include <wtf/TZoneMallocInlines.h>
 +#include <wtf/text/ASCIILiteral.h>
 +
@@ -1183,6 +1186,16 @@ index 0000000000..13eb868167
 +std::atomic<bool> g_dxvaH264Profile { false };
 +std::atomic<unsigned> g_dxvaFeatureLevel { 0 };
 +std::atomic<int> g_dxvaProbe { -1 };
++// Apotheosis: probe results never overwrite the main reader's error or counters.
++std::atomic<long> g_dxvaProbeHr { 0 };
++std::atomic<const char*> g_dxvaProbeSite { "idle" };
++std::atomic<unsigned> g_dxvaProbeReads { 0 };
++std::atomic<unsigned> g_dxvaProbeWidth { 0 };
++std::atomic<unsigned> g_dxvaProbeHeight { 0 };
++std::atomic<unsigned> g_dxvaProbeBind { 0 };
++std::atomic<int> g_dxvaMultithread { 0 };
++std::atomic<long> g_dxvaMultithread11Hr { E_PENDING };
++std::atomic<long> g_dxvaMultithread10Hr { E_PENDING };
 +std::atomic<WinUWPMediaAudioSink*> g_audioSink { nullptr };
 +
 +// ReadSample instrumentation. On device the reader opened and negotiated types (H264 -> RGB32,
@@ -1272,6 +1285,15 @@ index 0000000000..13eb868167
 +bool WinUWPMediaDiagnostics::dxvaH264Profile() { return g_dxvaH264Profile.load(); }
 +unsigned WinUWPMediaDiagnostics::dxvaFeatureLevel() { return g_dxvaFeatureLevel.load(); }
 +int WinUWPMediaDiagnostics::dxvaProbe() { return g_dxvaProbe.load(); }
++HRESULT WinUWPMediaDiagnostics::dxvaProbeHr() { return g_dxvaProbeHr.load(); }
++const char* WinUWPMediaDiagnostics::dxvaProbeSite() { return g_dxvaProbeSite.load(); }
++unsigned WinUWPMediaDiagnostics::dxvaProbeReads() { return g_dxvaProbeReads.load(); }
++unsigned WinUWPMediaDiagnostics::dxvaProbeWidth() { return g_dxvaProbeWidth.load(); }
++unsigned WinUWPMediaDiagnostics::dxvaProbeHeight() { return g_dxvaProbeHeight.load(); }
++unsigned WinUWPMediaDiagnostics::dxvaProbeBind() { return g_dxvaProbeBind.load(); }
++int WinUWPMediaDiagnostics::dxvaMultithread() { return g_dxvaMultithread.load(); }
++HRESULT WinUWPMediaDiagnostics::dxvaMultithread11Hr() { return g_dxvaMultithread11Hr.load(); }
++HRESULT WinUWPMediaDiagnostics::dxvaMultithread10Hr() { return g_dxvaMultithread10Hr.load(); }
 +
 +void WinUWPMediaDiagnostics::recordDxvaState(int state, unsigned profiles, bool h264Profile, unsigned featureLevel)
 +{
@@ -1979,6 +2001,8 @@ index 0000000000..13eb868167
 +// Decode thread
 +// ===========================================================================
 +
++static void startDxvaProbe(const String&);
++
 +void MediaPlayerPrivateWinUWP::decodeThreadBody()
 +{
 +    if (!ensureMediaFoundationStarted()) {
@@ -1999,12 +2023,22 @@ index 0000000000..13eb868167
 +        url = m_url.isolatedCopy();
 +    }
 +
++    // Apotheosis: only the explicit diagnostic fragment arms a second reader. Strip it
++    // before MF sees the URL; ordinary playback does no additional fetch or decode.
++    URL mediaURL { URL { }, url };
++    bool probeRequested = mediaURL.fragmentIdentifier() == "apotheosis-dxva-probe"_s;
++    if (probeRequested) {
++        mediaURL.removeFragmentIdentifier();
++        url = mediaURL.string();
++    }
 +    if (!openSourceReader(*m_decoder, url)) {
 +        postFailure(MediaPlayer::NetworkState::FormatError, "openSourceReader");
 +        return;
 +    }
 +
 +    notifyMetadataReady();
++    if (probeRequested && m_decoder->hasVideo)
++        startDxvaProbe(url);
 +    decodeLoop(*m_decoder);
 +
 +    // Release the Media Foundation objects on the thread that created them.
@@ -2012,20 +2046,40 @@ index 0000000000..13eb868167
 +}
 +
 +// ===========================================================================
-+// Apotheosis (media, 2026-10-18/19): the DXVA experiment, closed.
-+//
-+// Device rounds answered both sides with a surprise: the Lumia 950's D3D11 device comes
-+// back at FEATURE_LEVEL_11_0 (not 9_3 - that is ANGLE's requirement, not the platform's)
-+// and exposes 10 decoder profiles - yet a reader created WITH
-+// MF_SOURCE_READER_D3D_MANAGER fails, both with and without
-+// MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING (0.2.5.34: E_FAIL at reader creation, losing
-+// the whole video; 0.2.5.35's throwaway probe: failed at ReadSample). There is no
-+// graceful MF_E_UNSUPPORTED_D3D_TYPE fallback on 15254, so the main reader stays on the
-+// software path (reportDxvaCapabilityOnce below still records what the driver exposes,
-+// which is what the media line's dxvaprof/dxvafl/h264 fields show). The probe that
-+// confirmed this is removed: it cost a second full fetch (~8 s of metadata delay) for an
-+// answer that is already in. See docs/HANDOFF-VIDEO-AUDIO-2026-10-13.md section 12.
++// Apotheosis (2026-10-23): reopen the DXVA experiment with context protection.
++// The old E_FAIL is evidence about the unprotected setup, not a platform verdict.
++// ID3D11Multithread is queried on the immediate context. Older runtimes may only
++// expose ID3D10Multithread on the D3D11 device (the MF guide's documented route).
 +// ===========================================================================
++static bool protectVideoDevice(ID3D11Device& device)
++{
++    COMPtr<ID3D11DeviceContext> context;
++    device.GetImmediateContext(&context);
++    COMPtr<ID3D11Multithread> mt11;
++    HRESULT hr = context ? context->QueryInterface(IID_PPV_ARGS(&mt11)) : E_NOINTERFACE;
++    g_dxvaMultithread11Hr.store(hr);
++    if (SUCCEEDED(hr) && mt11) {
++        // Set returns the PREVIOUS setting, not a success code.
++        mt11->SetMultithreadProtected(TRUE);
++        if (mt11->GetMultithreadProtected()) {
++            g_dxvaMultithread.store(11);
++            return true;
++        }
++    }
++    COMPtr<ID3D10Multithread> mt10;
++    hr = device.QueryInterface(IID_PPV_ARGS(&mt10));
++    g_dxvaMultithread10Hr.store(hr);
++    if (SUCCEEDED(hr) && mt10) {
++        mt10->SetMultithreadProtected(TRUE);
++        if (mt10->GetMultithreadProtected()) {
++            g_dxvaMultithread.store(10);
++            return true;
++        }
++    }
++    g_dxvaMultithread.store(0);
++    return false;
++}
++
 +static void reportDxvaCapabilityOnce()
 +{
 +    static std::once_flag once;
@@ -2040,6 +2094,7 @@ index 0000000000..13eb868167
 +        unsigned profileCount = 0;
 +        bool hasH264Profile = false;
 +        if (SUCCEEDED(deviceHr) && d3dDevice) {
++            protectVideoDevice(*d3dDevice);
 +            COMPtr<ID3D11VideoDevice> videoDevice;
 +            if (SUCCEEDED(d3dDevice->QueryInterface(IID_PPV_ARGS(&videoDevice)))) {
 +                profileCount = videoDevice->GetVideoDecoderProfileCount();
@@ -2062,6 +2117,108 @@ index 0000000000..13eb868167
 +            FAILED(deviceHr) || !d3dDevice ? 3 : (profileCount > 0 ? 1 : 2),
 +            profileCount, hasH264Profile, static_cast<unsigned>(featureLevel));
 +    });
++}
++
++static void startDxvaProbe(const String& url)
++{
++    static std::atomic<bool> started { false };
++    if (started.exchange(true))
++        return;
++    g_dxvaProbe.store(-2);
++    // Apotheosis: isolated lifetime, no player/DecoderState/UI captures. A blocked MF
++    // network read must not block normal decoding, navigation or player destruction.
++    // Only one explicitly requested probe is allowed per process, even if MF stalls.
++    Thread::create("WinUWPDxvaProbe"_s, [url = url.isolatedCopy()] {
++        auto step = [](const char* site, HRESULT hr) {
++            g_dxvaProbeSite.store(site);
++            g_dxvaProbeHr.store(hr);
++            if (FAILED(hr))
++                g_dxvaProbe.store(0);
++            return SUCCEEDED(hr);
++        };
++        ScopedThreadComInitialization com;
++        if (!step("probe-com", com.ok() ? S_OK : com.result()))
++            return;
++        // Declared in dependency order so the reader releases before manager/device.
++        COMPtr<ID3D11Device> device;
++        COMPtr<IMFDXGIDeviceManager> manager;
++        COMPtr<IMFAttributes> attributes;
++        COMPtr<IMFSourceReader> reader;
++        if (!step("probe-device", ::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE,
++            nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
++            nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)))
++            return;
++        if (!step("probe-protect", protectVideoDevice(*device) ? S_OK : E_NOINTERFACE))
++            return;
++        UINT token = 0;
++        if (!step("probe-manager", ::MFCreateDXGIDeviceManager(&token, &manager))
++            || !step("probe-reset", manager->ResetDevice(device.get(), token))
++            || !step("probe-attributes", ::MFCreateAttributes(&attributes, 2))
++            || !step("probe-set-manager", attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, manager.get()))
++            || !step("probe-disconnect", attributes->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE)))
++            return;
++        // Deliberately no video processing / RGB conversion: request native NV12.
++        BString urlString(url);
++        g_dxvaProbeSite.store("probe-open");
++        if (!step("probe-open", ::MFCreateSourceReaderFromURL(static_cast<LPCWSTR>(urlString), attributes.get(), &reader))
++            || !step("probe-deselect", reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE))
++            || !step("probe-select", reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE)))
++            return;
++        COMPtr<IMFMediaType> type;
++        if (!step("probe-type", ::MFCreateMediaType(&type))
++            || !step("probe-major", type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))
++            || !step("probe-subtype", type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12))
++            || !step("probe-negotiate", reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type.get())))
++            return;
++        for (unsigned i = 0; i < 16; ++i) {
++            DWORD flags = 0;
++            COMPtr<IMFSample> sample;
++            g_dxvaProbeSite.store("probe-read");
++            g_dxvaProbeReads.fetch_add(1);
++            if (!step("probe-read", reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, nullptr, &sample)))
++                return;
++            if (flags & MF_SOURCE_READERF_ERROR) {
++                step("probe-reader-error", E_FAIL);
++                return;
++            }
++            if (sample) {
++                DWORD count = 0;
++                if (!step("probe-buffers", sample->GetBufferCount(&count)))
++                    return;
++                for (DWORD j = 0; j < count; ++j) {
++                    COMPtr<IMFMediaBuffer> buffer;
++                    if (!step("probe-buffer", sample->GetBufferByIndex(j, &buffer)))
++                        return;
++                    COMPtr<IMFDXGIBuffer> dxgi;
++                    HRESULT qiHr = buffer->QueryInterface(IID_PPV_ARGS(&dxgi));
++                    if (qiHr == E_NOINTERFACE)
++                        continue;
++                    if (!step("probe-dxgi", qiHr))
++                        return;
++                    COMPtr<ID3D11Texture2D> texture;
++                    if (!step("probe-texture", dxgi->GetResource(IID_PPV_ARGS(&texture))))
++                        return;
++                    D3D11_TEXTURE2D_DESC desc = { };
++                    texture->GetDesc(&desc);
++                    g_dxvaProbeWidth.store(desc.Width);
++                    g_dxvaProbeHeight.store(desc.Height);
++                    g_dxvaProbeBind.store(desc.BindFlags);
++                    step("probe-gpu-frame", S_OK);
++                    // GPU storage is evidence, not proof of hardware decoder use or
++                    // a CPU/power improvement. The main path still reports dxva=sw.
++                    g_dxvaProbe.store(1);
++                    return;
++                }
++                step("probe-system-frame", S_OK);
++                g_dxvaProbe.store(2);
++                return;
++            }
++            if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
++                break;
++        }
++        step("probe-no-frame", S_FALSE);
++        g_dxvaProbe.store(3);
++    })->detach();
 +}
 +
 +bool MediaPlayerPrivateWinUWP::openSourceReader(DecoderState& state, const String& url)
@@ -2091,8 +2248,9 @@ index 0000000000..13eb868167
 +    // with E_FAIL: the graceful MF_E_UNSUPPORTED_D3D_TYPE fallback the docs promise did
 +    // not happen on 15254, and the whole reader (and with it the video) was lost
 +    // (readers=0, no metadata, element stuck at HAVE_NOTHING). The throwaway probe
-+    // (0.2.5.35) failed the same way without the VP, closing the experiment - the
-+    // software path stays the main path. What the driver exposes is still recorded
++    // (0.2.5.35) also failed without the VP, but had no multithread protection.
++    // The protected throwaway probe above rechecks that setup; the software path
++    // stays the main path. What the driver exposes is still recorded
 +    // (reportDxvaCapabilityOnce above) into the media line's dxvaprof/dxvafl/h264.
 +    reportDxvaCapabilityOnce();
 +
@@ -2997,10 +3155,10 @@ index 0000000000..c946287804
 +#endif // defined(WK_WINUWP)
 diff --git a/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
 new file mode 100644
-index 0000000000..f339d9bcf0
+index 0000000000..48dd5dacdc
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,127 @@
 +/*
 + * Apotheosis (WK_WINUWP): the WebCore <-> port contract for media.
 + *
@@ -3071,14 +3229,8 @@ index 0000000000..f339d9bcf0
 +    static unsigned nativeVideoSubtype();
 +    static unsigned outputVideoSubtype();
 +    static bool dxvaDisabled();
-+    // Hardware decode (DXVA) state. MF's SourceReader only uses hardware transforms when the
-+    // app provides a D3D device through a DXGI device manager (MF_SOURCE_READER_D3D_MANAGER);
-+    // without one the H.264 decoder runs in software no matter what the DISABLE_DXVA attribute
-+    // says (that attribute can only turn hardware OFF). UWP cannot use the D3D9/DXVA2 device
-+    // manager (desktop only), so this is the D3D11 path. state:
-+    //   0 no manager set (software)        2 manager set, device has no video (software)
-+    //   1 manager set, device has video (hardware decode expected)
-+    //   3 device/manager creation failed (software)
++    // Apotheosis: device CAPABILITY only, independent of the main reader (dxva=sw).
++    // state: 0 unqueried, 1 decoder profiles exposed, 2 no profiles, 3 no device.
 +    // profiles = ID3D11VideoDevice::GetVideoDecoderProfileCount() on our device (0 = the driver
 +    // exposes no hardware video at all); h264Profile = an H.264 VLD profile was among them;
 +    // featureLevel = the D3D_FEATURE_LEVEL the device was created at (9_3 = 0x9300 on phone).
@@ -3090,14 +3242,25 @@ index 0000000000..f339d9bcf0
 +    // The once-per-process DXVA probe (see MediaPlayerPrivateWinUWP.cpp): a throwaway reader
 +    // WITH the D3D manager but WITHOUT the video processor, one frame read back and QI'd for
 +    // IMFDXGIBuffer. Results:
-+    //   1 hardware decode verified (the frame came back as a D3D texture)
++    //   1 GPU-backed decoded frame (hardware execution/performance not yet proven)
 +    //   2 reader created but frames are system memory (no DXVA engagement)
-+    //   0 reader creation with the manager failed (observed on device: E_FAIL)
-+    //  -1 not run / device has no video decode
++    //   0 probe failed (see HRESULT and site), 3 no frame in 16 reads / EOF
++    //  -1 not requested, -2 running (site identifies a potentially blocked MF call)
 +    // The MAIN reader deliberately stays on the software path (no manager) until the
 +    // DXGI-texture -> CPU copy path exists; the probe only answers "is it worth building".
 +    static void recordDxvaProbe(int probe);
 +    static int dxvaProbe();
++    // Apotheosis: separate from main-reader errors. mt=10/11 means protection was
++    // read back as enabled; QI HRESULTs distinguish unavailable interfaces.
++    static HRESULT dxvaProbeHr();
++    static const char* dxvaProbeSite();
++    static unsigned dxvaProbeReads();
++    static unsigned dxvaProbeWidth();
++    static unsigned dxvaProbeHeight();
++    static unsigned dxvaProbeBind();
++    static int dxvaMultithread();
++    static HRESULT dxvaMultithread11Hr();
++    static HRESULT dxvaMultithread10Hr();
 +    // ReadSample instrumentation - see the note beside the counters in the player. These exist to
 +    // tell "the read never returns" apart from "samples arrive but match no configured stream".
 +    static unsigned long long readSampleCalls();

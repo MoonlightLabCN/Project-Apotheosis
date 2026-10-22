@@ -811,3 +811,56 @@ instruction, leaving 1.0.0.0 free. Commit ``9f1634d``.
   ``Harness.exe``, ``jit-context: useJIT=1 baseline=1``, ``r0=0x00000000`` with
   ``access=0 fault=0``. Needs its own round.
 - Audio quality: long clips, A/V sync, audio after seek, switching between clips, power draw.
+## Device round 9 preparation (2026-10-23, 0.8.0.7) — protected DXVA reader, no device result yet
+
+The user is away from the device's network and requested an appx for manual testing.
+No device was contacted. This is a probe delivery, not evidence of hardware decode or
+Bilibili playback. It retains the ScheduledTask/RedBlackTree fix from `133baf7`.
+
+`MediaPlayerPrivateWinUWP.cpp` now protects both diagnostic D3D devices before any DXGI
+manager is installed. It tries `ID3D11Multithread` on the immediate context, then the
+MF guide's `ID3D10Multithread` on the D3D11 device, and reads back the enabled state.
+The setter's BOOL is the previous state, not an HRESULT. See the
+[Microsoft MF guide](https://learn.microsoft.com/en-us/windows/win32/medfound/supporting-direct3d-11-video-decoding-in-media-foundation).
+
+Normal playback keeps its existing software reader and AudioGraph output connection.
+Only a video URL ending in `#apotheosis-dxva-probe` starts a separate, once-per-process
+reader after the main reader has opened. This second reader uses D3D manager + NV12,
+no video processor, and inspects up to the first decoded sample for DXGI-backed
+textures. Its thread captures no player/UI state and is not joined on navigation;
+a blocked synchronous MF call remains visible as running and requires an app restart
+to retry. There is no cancellation/timeout guarantee or driver crash isolation.
+
+The main `dxva=sw` label stays honest. New independent fields are `probe`, `phr`,
+`pat`, `preads`, `psize`, `pbind`, `mt`, `mt11`, `mt10`. A GPU frame (`probe=1`) does not
+prove hardware decoder execution or CPU/power improvement. Probe failures never
+overwrite the main reader's `err`/`at` or frame/read counters. Driver stage buffers
+were increased from 256 to 1024 bytes and probe transitions are appended during live
+ticks. Audio diagnostic snapshots use 1024 bytes every 1000 quanta (~10 s with a real
+output clock), so a short clip can produce evidence before it ends.
+
+Test entry: `port/_mediatest/dxva.html`. Generate reproducible 20 s H.264 Main/AAC-LC
+720p and 1080p clips with `tools/New-MediaDxvaFixtures.ps1`, then serve them with
+`tools/Test-MediaServer.ps1`. The page explicitly separates ordinary playback and
+probe requests. Restart between probe runs, keep the screen on for at least 20 s,
+and export stage/audio/console/crash evidence. The 320x176 baseline must retain picture,
+sound, and safe end-of-playback behavior. Full instructions and field meanings are
+in HANDOFF-VIDEO-AUDIO-2026-10-13.md §16.
+
+B1 reconnaissance found an additional SDK candidate:
+[MseStreamSource](https://learn.microsoft.com/en-us/uwp/api/windows.media.core.msestreamsource)
+and [MseSourceBuffer.AppendBuffer](https://learn.microsoft.com/en-us/uwp/api/windows.media.core.msesourcebuffer.appendbuffer).
+They still require on-device activation, append/event and frame-copy probes. Native
+AdaptiveMediaSource playlist playback alone would not implement WebKit's required
+`load(..., MediaSourcePrivateClient&)`, `addSourceBuffer` and `appendInternal`
+interfaces. `ENABLE_MEDIA_SOURCE` and `supportsType()` therefore remain unchanged.
+The [AdaptiveMediaSource HttpClient overload](https://learn.microsoft.com/en-us/uwp/api/windows.media.streaming.adaptive.adaptivemediasource.createfromuriasync)
+can set native downloader headers; curl's headers/cookies/TLS settings do not
+automatically configure it. Real Bilibili manifests, headers and frames remain untested.
+
+Build/package validation completed: ARM32 media TU compiled; GPU driver linked with
+zero undefined/duplicate symbols; harness MSBuild exited 0. The 56,635,746-byte appx
+was checked for version 0.8.0.7, ARMNT PE machine, packaged/build executable identity,
+signature entry, and new probe markers. `DXVA-Test-0.8.0.7.zip` is beside it, with
+self-contained HTTP fixtures and instructions. See handoff §16.4 for hashes, logs and
+the Ninja cache workaround. Device results are still pending.

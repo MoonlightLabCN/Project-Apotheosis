@@ -428,8 +428,10 @@ void MediaAudio::OnQuantumStarted(AudioFrameInputNode^, FrameInputNodeQuantumSta
                     // asking and the decoder was not pushing - and the media line (a
                     // per-navigation snapshot at load time) was written long before that.
                     // These lines show whether PCM is flowing at all.
-                    if (m_quanta % 5000 == 0) {
-                        char diag[512] = "";
+                    // Apotheosis: ~10 s on a real output clock; a 10-20 s probe clip
+                    // used to finish before the first 5000-quantum (~50 s) snapshot.
+                    if (m_quanta % 1000 == 0) {
+                        char diag[1024] = "";
                         WebCoreMediaDiagnostics(diag, sizeof diag);
                         AudioLog(std::string("media-diag #") + std::to_string(m_quanta) + ": " + diag);
                     }
