@@ -1,0 +1,12 @@
+Source/WebCore/PAL/pal/PlatformWinUWP.cmake
+Source/WebCore/PlatformWinUWP.cmake
+Source/WebCore/platform/graphics/MediaPlayer.cpp
+Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
+Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
+Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
+Source/cmake/OptionsWinUWP.cmake
+Source/WTF/wtf/Assertions.cpp
+Source/WTF/wtf/CheckedRef.h
+Source/WTF/wtf/FastMalloc.h
+Source/WTF/wtf/RedBlackTree.h
+Source/WTF/wtf/generic/RunLoopGeneric.cpp

@@ -65,14 +65,26 @@ jobs:
           }
           Write-Host "all tracked paths ASCII OK"
 
-      - name: 上游补丁结构完整
+      - name: 上游补丁完整性（清单一致 + 结构合法）
         shell: pwsh
         run: |
-          $p = 'patches/2026-10-09-winuwp-media-mf.patch'
-          if (-not (Test-Path $p)) { Write-Host "::error::缺少 $p（WebKit/ 改动的唯一入库方式）"; exit 1 }
-          git apply --numstat $p
-          if ($LASTEXITCODE -ne 0) { Write-Host "::error::补丁不是合法的 git diff：$p"; exit 1 }
-          Write-Host "patch structure OK"
+          # 补丁是 WebKit/ 改动的唯一入库方式（WebKit/ 不在仓库）。本项目已两次因
+          # "补丁清单不全"而面临工作丢失：媒体线 4 个新文件、上一轮 CheckedPtr 修复。
+          # 脚本做三件事：A) 清单一致 B) 结构合法 C) 反向应用（CI 无 WebKit/ 会跳过 C）。
+          pwsh -NoProfile -File tools/Test-PatchIntegrity.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 补丁清单文件必须存在且非空
+        shell: pwsh
+        run: |
+          $e = 'patches/2026-10-09-winuwp-media-mf.expected-files.txt'
+          if (-not (Test-Path $e)) {
+            Write-Host "::error::缺少 $e —— 它是防补丁漏项的基准清单"
+            exit 1
+          }
+          $n = (Get-Content $e | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') }).Count
+          if ($n -eq 0) { Write-Host "::error::$e 为空"; exit 1 }
+          Write-Host "expected-files 清单: $n 项 OK"
 
       - name: 变更的 .ps1 必须通过语法解析
         shell: pwsh
