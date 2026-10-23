@@ -901,6 +901,12 @@ static const int kEngineShortSidePx = 720;
 //   代价是合成与内存开销随像素数平方涨。settings.ini clarity;m_engineScale 在首帧锁定,
 //   所以改了重启才生效。锁定后实际短边 = m_engineScale × 短边 DIP,供页面宽度倍率补偿用。
 static int g_clarityEffective = 0;   // 启动时从设置冻结;运行期改设置不影响本会话
+// Apotheosis (render clarity default, 2026-10-23): this MUST match MainPage::m_clarity's initializer.
+//   It is only overwritten when settings.ini actually carries a `clarity` key, so a fresh install (or
+//   any profile written before this setting existed) takes this value - a hardcoded 0 here would
+//   silently keep such installs at 720p no matter what the member default said. If you change one of
+//   these two defaults, change both. (Kept at 720p: the device is jank-bound, and clarity scales the
+//   cost quadratically - see the note on m_clarity.)
 
 static double ClarityShortSideTarget(double shortSideDip)
 {
@@ -5225,6 +5231,11 @@ void MainPage::StartLiveMode()
     m_liveBusy = false;        // 重置(若上次 RunAsync 抛/后台早退卡住,这里恢复)
     m_liveBusyAge = 0;
     m_liveTotalTicks = 0;
+    // Apotheosis (animation-aware pacing, 2026-10-23): 交互/导航开启新一轮节奏 —— 动画标志也从这里
+    //   重新起算。它只在实时帧里被回填,而滚动/点击帧走别的路径不回填;若不在这里清掉,上一次动画
+    //   留下的 true 会把节奏一直钉在 60Hz(白耗电)。清成 false 只是"这一轮还没看到动画"，
+    //   下一次实时帧就会给出真值;宁可少帧也不要多耗。
+    m_liveAnimating = false;
     // 事件驱动:没有固定帧率。兜底 tick 负责自愈 + 内存采样 + 补没被信号覆盖的变化,
     // 刚有活动时按 200ms(给 setTimeout 动画/在途图片留出 RunLoop::cycle),
     // 画面静下来后 1s,再静下来 5s(见 OnFallbackTick)。
@@ -5281,9 +5292,25 @@ void MainPage::ScheduleWakeComposite()
     // Apotheosis (frame-rate tuning, 0.2.5): 旧的占空比规则让慢帧把间隔翻倍(100ms 合成 → 200ms 一帧
     //   ≈5fps),失控动画规则让任何连续动画 30s 后掉到 1fps。现在:慢帧追平有上限(50ms,≥13fps),
     //   失控动画落在 250ms(4fps)而不是 1fps。
+    //
+    // Apotheosis (animation-aware pacing, 2026-10-23): 上面的规则只知道"上一帧有多贵",不知道
+    //   "还有没有必要出帧"。引擎的 WebCoreGetAnimating() 报的是 applyAnimationsRecursively() 的返回值
+    //   ——图层树里是否还有动画在跑。有动画时:
+    //     · 间隔钉在 16ms(≈60Hz),不被"慢帧追平"规则拉长,动画才是连续的而不是一跳一跳;
+    //     · 不清算 m_liveTotalTicks 的 150 帧失控降速——那是给"没人看的无限动画"兜底的,
+    //       而动画进行中恰恰是用户在看;
+    //     · 兜底 tick 也走快档(见 OnFallbackTick),让 WTF 定时器驱动的动画(setTimeout)同样跟得上。
+    //   没动画时行为与之前完全一致(零回归)。
+    //
+    //   ⚠️ m_liveAnimating 是**缓存值**,由引擎线程读出来后经 RunAsync 回填(DispatchLiveFrame)。
+    //   这里(UI 线程)绝不能直接调 WebCoreGetAnimating() —— 项目铁律:所有 C ABI 调用串行在引擎
+    //   线程上,UI 线程碰引擎就是数据竞争 + 潜在死锁。
+    const bool animating = m_liveAnimating;
     unsigned minGap = 16;
-    if (m_lastPresentDurMs > minGap) minGap = (m_lastPresentDurMs > 50) ? 50 : m_lastPresentDurMs;
-    if (m_liveTotalTicks >= 150) minGap = 250;
+    if (!animating) {
+        if (m_lastPresentDurMs > minGap) minGap = (m_lastPresentDurMs > 50) ? 50 : m_lastPresentDurMs;
+        if (m_liveTotalTicks >= 150) minGap = 250;
+    }
     const ULONGLONG now = GetTickCount64();
     const ULONGLONG since = (now >= m_lastPresentMs) ? (now - m_lastPresentMs) : 0;
     if (since >= minGap) {
@@ -5324,7 +5351,13 @@ void MainPage::OnFallbackTick(Platform::Object^, Platform::Object^)
     // 节奏阶梯。唤醒覆盖不到的东西只有这条路:WTF 定时器(setTimeout 动画)、在途图片/子资源的
     // 完成回调 —— 它们都要靠 WebCoreLiveTick 里的 RunLoop::cycle 才被取走。所以刚有变化时按
     // 200ms(和旧 tick 一样),连续 5 帧没变化降到 1s,再 10 帧没变化降到 5s(近乎全静默)。
-    const long long want = (m_fallbackStaticTicks < 5) ? 2000000LL
+    // Apotheosis (animation-aware pacing, 2026-10-23): 引擎报告图层树里还有动画在跑时,兜底也
+    //   走最快档。WAAPI/CSS 动画由合成器驱动(靠唤醒),但 setTimeout/rAF 驱动的动画只有这条兜底
+    //   路能把 WTF 定时器取走——200ms 意味着这类动画最多 5fps,是"动一下停一下"的主因。
+    //   这里用一个没有固定帧率的折中:有动画时兜底 50ms(20fps 上限),仍远低于 60Hz 的合成路,
+    //   不会把机器打满;没动画时行为完全不变(零回归)。
+    const long long want = m_liveAnimating ? 500000LL
+                         : (m_fallbackStaticTicks < 5) ? 2000000LL
                          : ((m_fallbackStaticTicks < 15) ? 10000000LL : 50000000LL);
     if (m_fallbackTimer && m_fallbackTimer->Interval.Duration != want) {
         Windows::Foundation::TimeSpan iv; iv.Duration = want;
@@ -5346,9 +5379,19 @@ void MainPage::DispatchLiveFrame()
         MainPage^ s0 = self.Get();
         if (!s0 || !s0->m_appForeground) return;   // 已切后台:别在 PLM 冻结风险下跑 JS+绘制(m_liveBusy 由恢复时 StartLiveMode 清)
         auto rgba = AcquireEngineBuffer(present);
-        int rc = -999; unsigned hash = 0; int pending = 0;
+        int rc = -999; unsigned hash = 0; int pending = 0; int animating = 0;
         const ULONGLONG t0 = GetTickCount64();
-        try { rc = WebCoreLiveTick(rgba->data()); if (rc == 0) { hash = WebCoreGetFrameHash(); pending = WebCoreGetPendingResourceCount(); } } catch (...) { rc = -1000; }
+        try {
+            rc = WebCoreLiveTick(rgba->data());
+            if (rc == 0) {
+                hash = WebCoreGetFrameHash();
+                pending = WebCoreGetPendingResourceCount();
+                // Apotheosis (animation-aware pacing, 2026-10-23): read the engine's animation flag
+                // HERE, on the engine thread, next to the other C ABI reads - every ABI entry point is
+                // serialized on this thread, so it must never be called from the UI continuation below.
+                animating = WebCoreGetAnimating();
+            }
+        } catch (...) { rc = -1000; }
         // 0.1.9:实时帧也在跑页面脚本(rAF/定时器),alert()/文件选择可能从这里冒出来。
         DrainUIRequests(disp, self);
         int fw = 0, fh = 0; EngineFrameSize(fw, fh);
@@ -5359,14 +5402,15 @@ void MainPage::DispatchLiveFrame()
         SampleMemoryPressure();
         if (g_perfLogEnabled && (++g_memTickCount % 50) == 0)
             WriteMemLog("mem-tick n=" + std::to_string(g_memTickCount) + " " + MemSnapshot() + EngineMemStats());
-        int rcCopy = rc; unsigned hashCopy = hash; int pendingCopy = pending;
+        int rcCopy = rc; unsigned hashCopy = hash; int pendingCopy = pending; int animatingCopy = animating;
         try {
             disp->RunAsync(CoreDispatcherPriority::Low,
-                ref new DispatchedHandler([self, rgba, fw, fh, rcCopy, hashCopy, pendingCopy, mySeq, present, durMs]() {
+                ref new DispatchedHandler([self, rgba, fw, fh, rcCopy, hashCopy, pendingCopy, animatingCopy, mySeq, present, durMs]() {
                     MainPage^ s = self.Get(); if (!s) return;
                     s->m_liveBusy = false;
                     s->m_lastPresentMs = GetTickCount64();
                     s->m_lastPresentDurMs = durMs;
+                    s->m_liveAnimating = (animatingCopy != 0);   // 动画期固定节奏的依据(见 ScheduleWakeComposite)
                     if (s->m_opSeq != mySeq) return;   // 期间发生了导航/滚动/点击/超时 → 丢弃这帧旧像素(防闪回旧页)
                     if (!s->m_sessionActive || s->m_loading || s->m_interacting || !s->m_appForeground) return;
                     if (rcCopy != 0) {

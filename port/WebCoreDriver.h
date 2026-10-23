@@ -525,6 +525,22 @@ int WebCoreLiveTick(uint8_t* outRGBA);                // advance + repaint one a
 int WebCoreGetPendingResourceCount();                 // pending cached resources in the current document
 unsigned WebCoreGetFrameHash();                       // pixel hash of the last frame (idle detection)
 
+// Apotheosis (frame pacing, 2026-10-23): 1 if the last composite found animations still running in
+// the layer tree (CSS animations/transitions, or JS-driven ones reaching the compositor), 0 if not.
+// This is the engine's own g_gpuAnimating, which applyAnimationsRecursively() returns; it was
+// internal until now.
+//
+// Why the shell needs it: the harness drives frames event-driven with a fallback timer (there is no
+// fixed frame rate), and its pacing rule only knows how EXPENSIVE the last frame was, never whether
+// a frame is still WANTED. While an animation is running the shell can hold a steady ~60 Hz cadence
+// instead of letting the "slow frame" rule stretch the gap; when nothing animates it can drop to the
+// idle cadence immediately instead of waiting out the static-tick ladder. Cheap: it reads a bool.
+//
+// Meaning of the return value: "the last composite had work left", i.e. advisory, not a promise.
+// A page can start animating between two calls, so a 0 must never be treated as "no more frames
+// will ever be needed" - the fallback timer stays the safety net it already is.
+int WebCoreGetAnimating();
+
 // ---- asynchronous engine -> shell UI requests (0.1.9) ----
 // The engine thread must never block on the UI thread, so anything WebCore wants
 // from real UI (today: <input type=file>; window.alert) is queued instead of

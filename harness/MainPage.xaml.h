@@ -591,6 +591,15 @@ namespace Harness {
         //   (0=1.0 / 1=1.25 / 2=1.5 / 3=1.75 / 4=2.0). The factor is the engine device scale
         //   factor: the page lays out at (engine px / factor) CSS px. settings.ini pagewidth
         int  m_pageWidth { 2 };
+        // Apotheosis (render clarity, 2026-10-23): KEPT AT 720p ON PURPOSE.
+        //   I briefly raised this default to 1080p on the reasoning that a 1440x2560 panel wants more
+        //   than a 720p render target. Real-device feedback killed that: the device is already
+        //   janky ("贼卡"), and compositing cost plus memory grow with the SQUARE of the pixel count,
+        //   so 1080p is ~2.25x the 720p working set for a machine that is already the bottleneck.
+        //   Raising clarity is not a free quality win - it is a straight trade against the thing the
+        //   user is actually complaining about. 1080p and native stay one tap away in settings for
+        //   anyone who wants them, and the adaptive work (see docs/UX-RESEARCH-2026-10-23.md) should
+        //   decide the default from measured frame cost, not from the panel's pixel count.
         int  m_clarity { 0 };           // 渲染清晰度 0=720p/1=1080p/2=原生;settings.ini clarity;重启生效
         bool m_showScrollFab { false };// 开发者选项:悬浮翻页按钮(默认关);settings.ini scrollfab
         // Apotheosis (review 2026-09-04 item 4): the suspend deferral in flight, and the timer that
@@ -1009,6 +1018,12 @@ namespace Harness {
         std::atomic<bool> m_appForeground { true };  // 应用在前台(后台暂停);引擎线程也读,故 atomic
         unsigned m_lastFrameHash { 0 };      // 上一帧哈希(判断画面是否变化)
         int m_liveTotalTicks { 0 };          // 连续动画的累计帧数;超阈值降帧率(防永久动画耗电)
+        // Apotheosis (animation-aware pacing, 2026-10-23): the engine's answer to "does the layer
+        //   tree still have animations running" (WebCoreGetAnimating), cached from the last schedule.
+        //   While true the pacing pins to ~60 Hz and the runaway-animation throttle is bypassed, and
+        //   the fallback tick stays on its fast rung so WTF-timer (setTimeout) animations keep up too.
+        //   UI thread only.
+        bool m_liveAnimating { false };
         // Apotheosis (event-driven present): the live loop is driven by engine wake-ups.
         //   m_wakeTimer is the one-shot that enforces the ~16 ms minimum gap between presents,
         //   m_fallbackTimer the safety net. All of these are UI-thread only.

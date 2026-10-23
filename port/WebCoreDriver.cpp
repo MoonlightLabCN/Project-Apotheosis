@@ -8132,6 +8132,16 @@ int WebCoreGetPendingResourceCount()
     return g_lastPendingResources;
 }
 
+// Apotheosis (frame pacing, 2026-10-23): expose the engine's own "animations still running" flag so
+// the shell can hold a steady cadence while something is animating, instead of pacing purely off how
+// expensive the last frame was. See the declaration in WebCoreDriver.h for why this matters.
+// g_gpuAnimating is written by WebCoreComposite (engine thread) and read here on the same thread -
+// every C ABI entry point is serialized on the engine thread, so this needs no lock.
+int WebCoreGetAnimating()
+{
+    return g_gpuAnimating ? 1 : 0;
+}
+
 // 取最近一帧的像素哈希。实时模式下 harness 比较连续帧哈希:不变即画面静止 → 停帧省电(下次交互/滚动/导航再启)。
 unsigned WebCoreGetFrameHash()
 {
