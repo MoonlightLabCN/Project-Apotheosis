@@ -47,6 +47,42 @@ if (-not (Test-Path (Join-Path $EngineBuildDir 'lib\WebCore.lib'))) {
 }
 # ANGLE 头/库/DLL 也从共享根取(worktree 里没有 angle\arm)
 $sharedArg = "/p:ApotheosisSharedRoot=$SharedRoot\"
+# 打包用的 ANGLE DLL 必须先落到**本树内**:MSBuild 18.9 的 zone check(MSB3821)拒绝处理项目
+# 树外的 <None Include>,而主 checkout 里共享根 == 项目树所以同一批 DLL 能过。两个 DLL 只
+# 1.4MB,拷一份比绕开检查老实。头/导入库不参与打包,继续共享。
+$packAngleDir = Join-Path $HarnessDir 'angle-arm'
+$angleSrcDir  = Join-Path $SharedRoot 'angle\arm'
+$packArg = "/p:ApotheosisPackAngleDir=$packAngleDir\"
+if ($SharedRoot -ne $RepoRoot) {
+    New-Item -ItemType Directory -Path $packAngleDir -Force | Out-Null
+    foreach ($dll in 'libEGL.dll', 'libGLESv2.dll') {
+        $src = Join-Path $angleSrcDir $dll
+        if (Test-Path $src) { Copy-Item $src (Join-Path $packAngleDir $dll) -Force }
+        else { Write-Host "[build-harness] 警告:共享根缺 $dll ($src)" -ForegroundColor Yellow }
+    }
+    Write-Host "[build-harness] worktree:ANGLE 打包 DLL 已就位 -> $packAngleDir"
+}
+# 字体同样 gitignored(约 20MB,port\fetch-fonts.ps1 可重下),worktree 里自然没有。
+# 它们必须随 appx 打包(App Container 拿不到设备系统字体),所以从主 checkout 拷进来。
+$fontDir     = Join-Path $HarnessDir 'Assets\fonts'
+$mainFontDir = Join-Path $SharedRoot 'harness\Assets\fonts'
+if ($SharedRoot -ne $RepoRoot -and (Test-Path $mainFontDir)) {
+    New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
+    $copied = 0
+    Get-ChildItem $mainFontDir -File | ForEach-Object {
+        $dst = Join-Path $fontDir $_.Name
+        if (-not (Test-Path $dst)) { Copy-Item $_.FullName $dst -Force; $copied++ }
+    }
+    Write-Host "[build-harness] worktree:字体已就位(新增 $copied 个)-> $fontDir"
+}
+# 签名证书同样 gitignored(*.pfx)。3KB,口令已明文写在 vcxproj 里(不是秘密),拷一份即可。
+$pfxName = 'Harness_TemporaryKey.pfx'
+$pfxDst  = Join-Path $HarnessDir $pfxName
+$pfxSrc  = Join-Path $SharedRoot "harness\$pfxName"
+if ($SharedRoot -ne $RepoRoot -and -not (Test-Path $pfxDst) -and (Test-Path $pfxSrc)) {
+    Copy-Item $pfxSrc $pfxDst -Force
+    Write-Host "[build-harness] worktree:签名证书已就位 -> $pfxDst"
+}
 
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe was not found: $vswhere" }
 
@@ -73,6 +109,7 @@ $commonArgs = @(
     "/p:ApotheosisVcpkgRoot=$VcpkgRoot",
     "/p:ApotheosisIcuRoot=$IcuRoot",
     $sharedArg
+    $packArg
 )
 if ($EngineBuildDir) { $commonArgs += "/p:ApotheosisEngineBuildDir=$EngineBuildDir" }
 if ($DriverDir) { $commonArgs += "/p:ApotheosisDriverDir=$DriverDir" }
@@ -103,7 +140,8 @@ if ($XamlMode -eq 'Official') {
         '/p:ApotheosisUseOfficialXaml=true',
         '/p:ApotheosisXamlCodegen=true',
         '/p:IntDir=Harness\ARM\XamlCodegen\',
-        $sharedArg
+        $sharedArg,
+        $packArg
     )
     # BuildCompile also links, so this pass needs the same engine/driver trees as the v143 pass;
     # otherwise it falls back to <root>\build-clang-gpu and fails with LNK1181 WebCore.lib.
