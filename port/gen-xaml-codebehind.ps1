@@ -3,7 +3,7 @@
 #       事件属性全部剥掉(C++/CX 原始 XAML 解析不了事件名),改为生成代码里手动挂;
 #       无名的事件元素自动补 x:Name,然后 FindName 取回挂事件。
 # 产物:harness\xamlgen\MainPage.g.hpp  (实现 InitializeComponent/Connect 等)
-# 用法:pwsh -File E:\Apotheosis\port\gen-xaml-codebehind.ps1
+# 用法:pwsh -File <repo>\port\gen-xaml-codebehind.ps1   (路径自解析,主目录/worktree 均可)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

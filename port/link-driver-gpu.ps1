@@ -1,8 +1,11 @@
 # link-driver-gpu.ps1 — 同 link-driver-jit.ps1,但针对 build-clang-gpu(TextureMapper+ANGLE+JIT)编+链。
 # 产出 WebCoreDriver-gpu.lib(供 GPU harness 链接)。链接需带预编译 ANGLE 导入库(GPU WebCore.lib 引用 ANGLE::EGL/GLES)。
 $ErrorActionPreference = 'Stop'
-. 'E:\Apotheosis\port\arm32-uwp-env.ps1' *> $null
-$P = 'E:\Apotheosis\port'
+# Apotheosis (worktree support): 路径从 paths.ps1 解析 —— 源码/脚本用当前 worktree,
+# 引擎(.lib)与 ANGLE 从主 checkout 借用(GB 级产物不重复建)。
+. "$PSScriptRoot\paths.ps1"
+. "$PSScriptRoot\arm32-uwp-env.ps1" *> $null
+$P = $PortDir
 
 $srcs = @(
   'WebCoreDriver','PortPlatformStrategies','LoadingFrameLoaderClient','PortNetworkStorageSession','PortChromeClient','PortWebSocket','PortUIBridge','PortSQLiteAppContainer','PortStorage','PortSocketStreamHandle','PortAudioOutput','PortMediaAudio',
@@ -43,8 +46,8 @@ $libs = @(
 $log = "$P\link-driver-gpu.log"
 & $lld /DLL /MACHINE:ARM /OUT:"$P\WebCoreDriver-gpu.dll" `
     $objs `
-    /LIBPATH:"E:\Apotheosis\build-clang-gpu\lib" `
-    /LIBPATH:"E:\Apotheosis\angle\arm" `
+    /LIBPATH:"$EngineBuildDir\lib" `
+    /LIBPATH:"$AngleLibDir" `
     /LIBPATH:"C:\vcpkg\installed\arm-uwp\lib" `
     /LIBPATH:"C:\icu-arm-uwp\lib" `
     $libs `

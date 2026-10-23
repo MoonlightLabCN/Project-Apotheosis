@@ -30,6 +30,24 @@ $proj = Join-Path $root 'harness\Harness.vcxproj'
 $log = Join-Path $root 'harness-build.log'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 
+# Apotheosis (worktree support): in a git worktree $root has no build-clang-gpu (that tree is GB
+# scale and deliberately shared), so point the engine at the MAIN checkout's build while still
+# consuming harness/ and port/ from this worktree. Explicit -EngineBuildDir/-DriverDir still win.
+# DriverDir stays local: link-driver-gpu.ps1 just produced WebCoreDriver-gpu.lib *here*, and that
+# lib is what this worktree's driver source was built into.
+# NOTE: paths.ps1 defines $EngineBuildDir itself, so snapshot the parameters first — dot-sourcing
+# would otherwise clobber an explicit override.
+$engineArg = $EngineBuildDir
+$driverArg = $DriverDir
+. (Join-Path $PSScriptRoot 'paths.ps1')
+if ($engineArg) { $EngineBuildDir = $engineArg }
+if ($driverArg) { $DriverDir = $driverArg }
+if (-not (Test-Path (Join-Path $EngineBuildDir 'lib\WebCore.lib'))) {
+    Write-Host "[build-harness] 警告:引擎库不在 $EngineBuildDir\lib —— 先跑 ninja 或在主 checkout 构建(见 docs/UX-RESEARCH-2026-10-23.md)" -ForegroundColor Yellow
+}
+# ANGLE 头/库/DLL 也从共享根取(worktree 里没有 angle\arm)
+$sharedArg = "/p:ApotheosisSharedRoot=$SharedRoot\"
+
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe was not found: $vswhere" }
 
 $resolverArgs = @{ SdkVersion = $SdkVersion }
@@ -53,7 +71,8 @@ $commonArgs = @(
     "/p:ApotheosisWindowsSdkVersion=$SdkVersion",
     "/p:VCToolsVersion=$VCToolsVersion",
     "/p:ApotheosisVcpkgRoot=$VcpkgRoot",
-    "/p:ApotheosisIcuRoot=$IcuRoot"
+    "/p:ApotheosisIcuRoot=$IcuRoot",
+    $sharedArg
 )
 if ($EngineBuildDir) { $commonArgs += "/p:ApotheosisEngineBuildDir=$EngineBuildDir" }
 if ($DriverDir) { $commonArgs += "/p:ApotheosisDriverDir=$DriverDir" }
@@ -83,7 +102,8 @@ if ($XamlMode -eq 'Official') {
         "/p:ApotheosisWindowsSdkVersion=$XamlSdkVersion",
         '/p:ApotheosisUseOfficialXaml=true',
         '/p:ApotheosisXamlCodegen=true',
-        '/p:IntDir=Harness\ARM\XamlCodegen\'
+        '/p:IntDir=Harness\ARM\XamlCodegen\',
+        $sharedArg
     )
     # BuildCompile also links, so this pass needs the same engine/driver trees as the v143 pass;
     # otherwise it falls back to <root>\build-clang-gpu and fails with LNK1181 WebCore.lib.

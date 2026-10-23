@@ -25,8 +25,10 @@ Remove-Item $jar -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
 Write-Host "=== 探活 ==="
-& curl.exe -sk -c $jar -o NUL --max-time 15 "$base/api/os/info" 2>$null
-if ($LASTEXITCODE -ne 0) { Write-Host "  设备不可达($base)"; exit 1 }
+# 注意:curl -o NUL 在 PowerShell 里会写到一个名为 NUL 的文件而非空设备,
+# 用 -o $null 不可靠,直接用 -sS -w 判 http_code 更稳。
+$code = & curl.exe -sk -c $jar -o "$env:TEMP\wdp-probe.tmp" -w "%{http_code}" --max-time 15 "$base/api/os/info" 2>$null
+if ("$code".Trim() -ne '200') { Write-Host "  设备不可达($base, http=$code)"; exit 1 }
 Write-Host "  在线"
 
 Write-Host "=== 取包名 ==="

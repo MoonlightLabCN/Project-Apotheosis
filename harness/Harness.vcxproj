@@ -23,6 +23,18 @@
     <AppxOSMinVersionReplaceManifestVersion>false</AppxOSMinVersionReplaceManifestVersion>
     <ProjectName>Harness</ProjectName>
     <ApotheosisRoot>$(MSBuildThisFileDirectory)..\</ApotheosisRoot>
+    <!-- Apotheosis (worktree support): ANGLE 的预编译二进制与头是 GB 级/可重下的共享产物,
+         在 git worktree 里没有副本。默认与 ApotheosisRoot 相同(单 checkout 行为不变);
+         worktree 构建时由 build-harness.ps1 传主 checkout 的路径覆盖。 -->
+    <ApotheosisSharedRoot Condition="'$(ApotheosisSharedRoot)' == ''">$(ApotheosisRoot)</ApotheosisSharedRoot>
+    <!-- Apotheosis (worktree support): MSBuild 17.9+ (this machine runs 18.9) refuses to process a
+         <None Include> whose file lives outside the project's own tree unless it is provably local:
+         MSB3821 "Couldn't process file ... due to its being in the Internet or Restricted zone".
+         The ANGLE DLLs legitimately live outside harness\ (they are shared, re-downloadable binaries)
+         and carry no Zone.Identifier, so this is the documented opt-out for a trusted path rather
+         than a way to silence a real problem. Without it the appx packaging step - the only step
+         that copies those DLLs - cannot complete, in a worktree AND in a single checkout. -->
+    <EnableMSBuildFileZoneCheck>false</EnableMSBuildFileZoneCheck>
     <ApotheosisVcpkgRoot Condition="'$(ApotheosisVcpkgRoot)' == ''">C:\vcpkg</ApotheosisVcpkgRoot>
     <ApotheosisIcuRoot Condition="'$(ApotheosisIcuRoot)' == ''">C:\icu-arm-uwp</ApotheosisIcuRoot>
     <!-- Apotheosis (M4): engine tree and driver directory are overridable so an A/B engine
@@ -69,7 +81,7 @@
     <ClCompile>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ApotheosisXamlIncludeDir);$(ApotheosisRoot)angle\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ApotheosisXamlIncludeDir);$(ApotheosisSharedRoot)angle\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions Condition="'$(ApotheosisUseOfficialXaml)' == 'true' Or '$(ApotheosisConsumeOfficialXaml)' == 'true'">APOTHEOSIS_OFFICIAL_XAML;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(ApotheosisXamlCodegen)' == 'true'">APOTHEOSIS_XAML_CODEGEN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
@@ -79,7 +91,7 @@
       <!-- Phase 1b: 链接 build-clang-webcore 的 4 个引擎库 + 驱动/stub 库 + 全部软渲染依赖。
            顺序 WebCore->JSC->PAL->WTF(被依赖者在后);MS link.exe 多遍解析,顺序容错。 -->
       <AdditionalDependencies>libEGL.lib;libGLESv2.lib;WebCoreDriver-gpu.lib;WebCore.lib;JavaScriptCore.lib;PAL.lib;WTF.lib;JavaScriptCore.lib;WTF.lib;libcurl.lib;libssl.lib;libcrypto.lib;cairo.lib;pixman-1.lib;freetype.lib;fontconfig.lib;libexpat.lib;harfbuzz.lib;jpeg.lib;libpng16.lib;libwebp.lib;libwebpdemux.lib;libsharpyuv.lib;libxml2.lib;sqlite3.lib;z.lib;bz2.lib;brotlidec.lib;brotlicommon.lib;icuuc.lib;icuin.lib;icudt.lib;wininet.lib;mfuuid.lib;mfplat.lib;mfreadwrite.lib;d3d11.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ApotheosisRoot)angle\arm;$(ApotheosisDriverDir);$(ApotheosisEngineBuildDir)\lib;$(ApotheosisVcpkgRoot)\installed\arm-uwp\lib;$(ApotheosisIcuRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(ApotheosisSharedRoot)angle\arm;$(ApotheosisDriverDir);$(ApotheosisEngineBuildDir)\lib;$(ApotheosisVcpkgRoot)\installed\arm-uwp\lib;$(ApotheosisIcuRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- 与 lld-link 验证一致:/OPT:REF 死剥未引用代码,只保留渲染路径闭包(146 stub 覆盖之)。 -->
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>false</EnableCOMDATFolding>
@@ -186,8 +198,8 @@
     <None Include="$(ApotheosisVcpkgRoot)\installed\arm-uwp\bin\libssl-3-arm.dll"><DeploymentContent>true</DeploymentContent><Link>libssl-3-arm.dll</Link></None>
     <None Include="$(ApotheosisVcpkgRoot)\installed\arm-uwp\bin\libcrypto-3-arm.dll"><DeploymentContent>true</DeploymentContent><Link>libcrypto-3-arm.dll</Link></None>
     <!-- GPU 路径1:ANGLE(老 ms-master ANGLE.WindowsStore)ARM UWP 运行时,随 appx 打包。 -->
-    <None Include="$(ApotheosisRoot)angle\arm\libEGL.dll"><DeploymentContent>true</DeploymentContent><Link>libEGL.dll</Link></None>
-    <None Include="$(ApotheosisRoot)angle\arm\libGLESv2.dll"><DeploymentContent>true</DeploymentContent><Link>libGLESv2.dll</Link></None>
+    <None Include="$(ApotheosisSharedRoot)angle\arm\libEGL.dll"><DeploymentContent>true</DeploymentContent><Link>libEGL.dll</Link></None>
+    <None Include="$(ApotheosisSharedRoot)angle\arm\libGLESv2.dll"><DeploymentContent>true</DeploymentContent><Link>libGLESv2.dll</Link></None>
     <!-- WebCore 驱动不随 appx 打包:port\link-driver-gpu.ps1 同时产出 .lib(静态归档)和 .dll,
          harness 的 AdditionalDependencies 链的是 .lib —— C ABI 全部静态进 Harness.exe(appx 里
          的 Harness.exe 导入表无 WebCoreDriver-gpu.dll,源码也无 LoadLibrary)。曾经这条 Deployment
