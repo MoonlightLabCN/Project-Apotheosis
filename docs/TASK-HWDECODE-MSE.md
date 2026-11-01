@@ -238,3 +238,33 @@ pwsh -NoProfile -File E:\Apotheosis\tools\_pull-evidence.ps1
   AdaptiveMediaSource 播放清单与网页 appendBuffer 是不同入口，分别验证。
 - 用户明确设备不在同网，本轮仅产出包，不访问 WDP，不作新的真机可行性结论。
   A2 和 B 的运行时路线选择等待 A1 证据。
+
+## 11. 2026-10-23 真机更新：A1 GPU 帧成功，转入 RGB 读回验证
+
+0.8.0.7 在 Lumia 950 / 15254.603 上的独立探针得到：
+`probe=1 phr=0 pat=probe-gpu-frame preads=1 psize=1920x1088 pbind=0x600 mt=11`。
+用户在固定 src 的 dxva1080.html 上确认“有画面、有声音，但是很卡”。
+主路径仍为 dxva=sw；该卡顿不能作为独立 GPU 探针的性能结论。
+
+旧“DXVA 死路”结论已推翻，保护的 manager/NV12 配置可用；没有同构开/关保护 A/B，
+尚不能把原因唯一归于保护。原始真机证据及完整限定见交接 §16.5。
+现在先用 0.8.0.8 的独立 RGB32/advanced-VP 探针验证 CPU 读回，再决定接主路径。
+A2 的 MediaPlayer 替代路线不再优先；MSE 的运行时结论仍未获得。
+
+0.8.0.8 已部署，但 RGB 页面回合沿用了旧 NV12 probe=1（共享 once 门控），
+未得到 RGB 结果。用户已休息，下一轮按交接 §16.7 先确保新进程/首个探针为 RGB。
+
+23:38 更新：设备现为 192.168.3.66，确认已装 0.8.0.8 后完全重启为 PID 2840。
+用户先开 RGB 页面并等待 20 秒，本轮得到
+`probe=4 phr=0 pat=probe-rgb-readable preads=1 psize=1920x1080 pbind=0x28 mt=11`。
+RGB32 首帧 CPU 读回通过；原始证据在
+`crash/hwdecode-20261023-2337-rgb/rgb-result-*`，交接 §16.8 记录完整限定。
+主 reader 仍是 dxva=sw；持续吞吐、整帧颜色、播放改善尚未验证，MSE 状态不变。
+
+## 12. 0.8.0.9：可选主 reader 集成
+
+已将 §11 通过的配置接入显式 `#apotheosis-dxva-play` 主 reader 入口，默认软件路径保留。
+软件重开回退、整帧边界检查及 dframes/vcopy/fb 诊断见交接 §16.9。
+`dxva-play.html` / `dxva-soft.html` 用同一 1080p 素材，需实际点 Play 后比较。
+隔离引擎/驱动目录构建打包通过，未替换另一 agent 的共享基线库；连续播放真机结果待测。
+MSE 运行时工作尚未开展，ENABLE_MEDIA_SOURCE 和 supportsType 未改。

@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Apotheosis DXVA probe</title>
+<h2>DXVA reader probe (0.8.0.7)</h2>
+<p>Restart the app before each probe: only one probe runs per process.
+The visible video and audio always use the existing software path.</p>
+<p><button onclick="loadClip('test.mp4',false)">320x176 baseline</button>
+<button onclick="loadClip('test-720p.mp4',false)">720p software</button>
+<button onclick="loadClip('test-1080p.mp4',false)">1080p software</button></p>
+<p><button onclick="loadClip('test-720p.mp4',true)">720p probe</button>
+<button onclick="loadClip('test-1080p.mp4',true)">1080p probe</button></p>
+<video id="video" controls playsinline style="width:100%;max-width:640px"></video>
+<pre id="status" style="white-space:pre-wrap">Choose a clip. Keep the screen on for at least 20 seconds.
+Then export stage.txt and mediaaudio.txt. probe=1 means a GPU frame,
+not proof that ordinary playback uses hardware decoding.</pre>
+<script>
+var video = document.getElementById('video');
+var mode = 'idle';
+function snap(event) {
+    var text = mode + ' event=' + event + ' rs=' + video.readyState
+        + ' ct=' + video.currentTime.toFixed(2)
+        + ' size=' + video.videoWidth + 'x' + video.videoHeight
+        + ' paused=' + video.paused + ' ended=' + video.ended
+        + ' error=' + (video.error ? video.error.code : '-');
+    document.getElementById('status').textContent = text;
+    console.log('DXVATEST ' + text);
+}
+function loadClip(name, probe) {
+    mode = name + (probe ? ' probe requested' : ' software only');
+    video.src = name + (probe ? '#apotheosis-dxva-probe' : '');
+    video.load();
+    var promise = video.play();
+    if (promise && promise.catch) promise.catch(function (e) { console.log('DXVATEST play ' + e); });
+    snap('load');
+}
+['loadedmetadata','loadeddata','playing','waiting','ended','error','seeked'].forEach(function (e) {
+    video.addEventListener(e, function () { snap(e); });
+});
+setInterval(function () { if (mode !== 'idle') snap('tick'); }, 2000);
+// Explicit automation URLs for LocalState/testurl.txt; the default page still waits
+// for a button press. Each probe URL must be opened in a fresh app process.
+if (location.search === '?run=baseline') loadClip('test.mp4', false);
+else if (location.search === '?run=probe720') loadClip('test-720p.mp4', true);
+else if (location.search === '?run=probe1080') loadClip('test-1080p.mp4', true);
+</script>

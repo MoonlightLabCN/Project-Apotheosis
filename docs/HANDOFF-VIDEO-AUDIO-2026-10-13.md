@@ -518,7 +518,7 @@ media readers=0 ... dxva=hw dxvaprof=10 dxvafl=0xB000 err=0x80004005 at=openSour
    名字判据匹配不上，**WQHD 兜底（1440x2560）救了场**；白名单已按真实 RM 号补齐
    （RM-1104/1105/1106/1116 + RM-1084/1085/1086/1117）。
 
-### 12.7 0.2.5.35 轮（06:39，息屏挂起前的快照）—— DXVA 终判：死路
+### 12.7 0.2.5.35 历史轮（06:39）—— 当时的“死路”结论已被 §16.5 推翻
 
 ```
 media readers=1 frames=0/0 ... dxva=probe-fail ... vidx=2 aidx=0
@@ -790,3 +790,147 @@ AdaptiveMediaSource 的清单/请求头/真实 B站源测试仍需单独完成�
 
 **待回传**：真实 media 行、音频量子节奏和用户有声有画确认。A1 不下成功/失败结论，
 A2/Adaptive/MSE 的运行时验证仍待后续设备回合。
+
+### 16.5 2026-10-23 真机：A1 读出 GPU 帧，旧“死路”结论推翻
+
+用户回到同网后，识别设备 192.168.3.159（MobileEnterprise 15254.603.armfre），
+00:33:07 确认 0.8.0.7 已安装并启动。证据保存在
+`crash/hwdecode-20261023-0.8.0.7/`（本地忽略目录，勿清理）。
+
+默认按钮页第一次没有请求视频（readers=0 / probe=-1），不能视为解码失败。
+增加固定 `<video src>` 的 `dxva1080.html` 后，服务器 00:49:53 收到手机页面请求，
+00:49:54 连续两次获取 test-1080p.mp4（主 reader + 独立探针）。用户明确反馈：
+**“有画面、有声音，但是很卡”**。
+
+`confirmed1080-stage.txt` 的关键行：
+
+```text
+media readers=1 frames=12/2 pcm=22528/0/0 ... dxva=sw err=0x00000000 at=-
+  dxvaprof=10 dxvafl=0xB000 h264=1 probe=1 phr=0x00000000
+  pat=probe-gpu-frame preads=1 psize=1920x1088 pbind=0x600
+  mt=11 mt11=0x00000000 mt10=0x8000000A
+```
+
+结论：保护后的 D3D manager + NV12 reader 在本机 **第一次 ReadSample 就返回 D3D11 纹理**。
+ID3D11Multithread 在这台 15254 设备上可用，保护已读回为开启；无须走 ID3D10 兼容分支。
+旧的“DXVA 此路不通”结论不成立。由于没有同素材、同配置的开/关保护 A/B，
+不能把本轮全部差异单独归因于保护，也不能由 GPU-backed 首帧断言整段功耗收益。
+
+可见视频仍是 dxva=sw（软解+RGB32+现有呈现），卡顿是本轮的用户观察，
+不能用它判定探针硬解吞吐。A2 的 MediaPlayer 替代路线暂不作为首选：下一步先验证
+已通的 D3D manager 路能否输出现有 CPU BGRA 呈现所需的帧。
+
+同轮较早的基线日志 `after-install-mediaaudio.txt` 00:34:02：
+`frames=249/78 pcm=481280/481280/46880 dxva=sw err=0 mt=11 probe=-1`，
+量子 #400→#1000 用时约 6 秒（约 100/s）。这是此前基线进程的读数；后续重启后
+尚未开 reader 的 mt=0/probe=-1 不代表保护失败。
+
+WDP 备注：上传 testurl.txt 可返回 HTTP 500 / Update file access failed，
+但随后 GET 的内容确实变成新值；必须读回核对，不能仅凭 HTTP 状态判断是否修改过。
+本轮在尝试自动导航后已把启动 URL 读回恢复为原 values.html。实际有效测试页由用户在前台打开。
+
+### 16.6 0.8.0.8：RGB32/XVP 读回探针（已部署，RGB 结果待验证）
+
+新增独立片段 `#apotheosis-dxva-rgb-probe`：保护设备 + D3D manager +
+MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING，请求 RGB32，不混用旧的
+ENABLE_VIDEO_PROCESSING 标志。验证首帧能 ConvertToContiguousBuffer/Lock，
+按实际 stride/图像尺寸检查可读范围、读取首尾字节并 Unlock。
+结果 `probe=4 pat=probe-rgb-readable` 才表示本配置的 CPU RGB 缓冲区可读。
+即使通过，也尚未把它交给主播放器。静态测试页为 `dxva-rgb.html`。
+
+参考：[Microsoft 高级视频处理属性](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-source-reader-enable-advanced-video-processing)。
+
+### 16.7 本轮停止点（用户休息，2026-10-23 01:06）
+
+0.8.0.8 ARM32 编译、驱动重链、宿主打包均通过，补丁完整性检查 A/B/C 全通过。
+appx 56,638,027 bytes，SHA-256
+`0f605daa472f547fa33d8b3612ba5abfaceb3260142ab33ba9bef455ae16eaba`；
+包内已核对 probe-rgb-readable/probe-rgb-lock 标记和 ARMNT 架构。
+设备 01:04:54 安装 0.8.0.8，01:04:55 launch 200。
+
+用户确认打开 dxva-rgb.html 并等了 20 秒，随后表示困了先睡。本轮到此结束真机操作。
+原始回合保存在 `crash/hwdecode-20261023-0.8.0.8/rgb-confirmed-*`。
+
+**RGB 读回尚无有效结论**：该回合仍是
+`probe=1 pat=probe-gpu-frame preads=1`，从 readers=1 到 2 都没有变为
+probe-rgb-* 或 probe=4。服务器显示先访问了 NV12 页面，再在 01:05:51 请求 RGB 页面；
+代码的 startDxvaProbe() 用全进程共享 started.exchange(true) 门控，先前的 NV12 探针
+会占用 RGB 探针机会。不能把这条旧 probe=1 当 RGB 成功或失败。
+
+下一轮先确认**完全终止后 PID 已变化**，并确保 RGB 页面是新进程的第一个探针源
+（排查启动/标签恢复是否先加载 dxva1080.html）。若有必要再改为每种探针各一次的门控，
+加明确“因已运行而跳过”的诊断，避免这种回合无效。取得 probe=4 / probe-rgb-readable
+或明确失败 HRESULT 后，才接主硬解路径。0.8.0.8 的主路径仍为 dxva=sw。
+目前保留用户“1080p 有画面、有声音，但很卡”的观察，不作性能改善声明。
+
+### 16.8 2026-10-23 23:38：新进程 RGB32 读回通过
+
+用户要求部署后，发现手机 IP 已变为 192.168.3.66；查询确认已安装 0.8.0.8，
+因此未同版重装。终止并确认无旧 Harness 进程，再启动得到 PID 2840。
+用户在前台打开 dxva-rgb.html 并确认等待 20 秒；服务器 23:38:27 收到页面请求，
+随后两次请求 test-1080p.mp4（主 reader + 独立探针），本轮没有先访问 NV12 页面。
+启动 testurl.txt 已读回恢复原值。原始证据保存在
+`crash/hwdecode-20261023-2337-rgb/rgb-result-*`（本地忽略目录，勿清理）。
+
+`rgb-result-stage.txt` 关键行：
+
+```text
+media readers=1 frames=9/2 pcm=17408/0/0 ... dxva=sw err=0x00000000 at=-
+  probe=4 phr=0x00000000 pat=probe-rgb-readable preads=1
+  psize=1920x1080 pbind=0x28 mt=11 mt11=0x00000000 mt10=0x8000000A
+```
+
+结论：保护的 D3D manager + advanced video processing + RGB32 配置，在这台手机上
+第一次 ReadSample 后成功 ConvertToContiguousBuffer/Lock，范围检查并读取首尾字节，
+然后 Unlock。之前 §16.7 的共享 once 门控问题通过本轮新进程/首个 RGB 探针避开，
+没有修改门控实现。
+
+这是首帧 CPU 可读性证据，尚未验证整帧颜色、连续读回吞吐、硬解持续执行或功耗收益。
+页面信标仍 paused=true；用户本轮只确认打开等待，没有新的播放流畅度/声画确认。
+可见主路径仍 dxva=sw，音频输出链未改，不能声称卡顿已改善。
+后续可将已验证配置以可选路径接入主 reader，保留失败回退，再量连续帧与同步播放。
+
+### 16.9 0.8.0.9：主 reader 可选 D3D/RGB 路径（连续播放待真机）
+
+仅媒体 URL 片段 `#apotheosis-dxva-play` 开启主 reader 的保护设备 + D3D manager +
+advanced VP + RGB32 配置；进入 MF 前去掉片段。沿用 §16.8 已验证的最小 RGB 类型请求，
+不混用 legacy VP 标志。普通 URL 和两个独立探针入口继续使用原软件主 reader。
+无第二个探针 reader；读取 RGB 后交给既有 Cairo/TextureMapper 呈现。
+
+设备、manager 和 reader 保存在 decode-thread 的 DecoderState，释放顺序为
+reader → manager → device。创建/视频或音频协商失败后重开软件配置；主 D3D 路径若
+ReadSample、格式变化或整帧读回失败，也仅回退一次，按媒体时钟复用 seek 丢弃旧 PCM/帧。
+失败的软件 reader 停读等待；现有 AudioGraph 输出节点和连接代码没有改变。
+阻塞的同步 MF 调用仍不能保证取消/超时，自动回退仅覆盖已返回的失败。
+
+新增主路诊断：`dxva=d3d-rgb` 是配置名，**不是硬件执行证明**；`sw-fallback`
+表示已回退。`dframes` 为该 D3D 配置完成 CPU 读回/发布的帧数；
+`vcopy=次数/累计微秒/最大微秒` 覆盖 Convert/Lock/拷贝/Unlock（含首次分配和帧锁等待，
+不含 ReadSample、播放节奏等待、重绘）；`fb/fhr/fat` 单独保留回退次数、HRESULT 和位置。
+这些计数是进程累计；dxva 为最近打开的主 reader，A/B 对比应分轮取差值或用新进程。
+
+静态页面：`http://192.168.3.108:8099/dxva-play.html`（D3D）及 `dxva-soft.html`
+（相同 1080p 素材的软件对照），均需点 Play；每 5 秒信标记录 currentTime/paused，
+以免把 paused 的预加载当连续播放。先核对 dframes 增长、fb=0 和声音/方向/颜色，
+再比较两页的帧进度、音频量子与 CPU。普通小分辨率 values.html 还需回归。
+
+本轮分支检查：主树仍为 `fix/scheduled-task-checkedptr` / bb56a46；
+另一 agent 的 `E:/Apotheosis-ux` / `ux/quality-2026-10` 正在构建 0.9.0.0。
+为避免修改它正在链接的库，本轮媒体 obj、完整 WebCore 归档和 19-obj 驱动归档均放在
+`build-clang-gpu-hwdecode-main/`，JSC/PAL/WTF 复制基线库，构建参数显式传 EngineBuildDir
+和 DriverDir。原 `build-clang-gpu/lib/WebCore.lib` 及 `port/WebCoreDriver-gpu.lib` 未替换。
+沿用原 Ninja 导出的编译/归档规则，避开已知 Ninja 依赖缓存问题。
+
+ARM32 编译、lld 链接（0 undefined/duplicate）、宿主打包通过；新页面 JS 语法及 HTTP
+HEAD 通过；两份公共 C ABI 头保持一致；12 文件媒体补丁 A/B/C 检查通过。
+补丁用临时 GIT_INDEX_FILE 从 WebKit HEAD 生成，未修改原来的 unmerged 索引。
+appx：56,644,996 bytes，SHA-256
+`b2c21496087e72c39977f6fe8821ad4cafc0985e554242b866d1ab8208a5c5a1`。
+包内版本/ARMNT/新路径标记/签名条目及打包 exe 与构建输出一致均已核对，详情在包旁
+`HWDECODE-VERIFICATION.json`。此处记录的是构建结果，设备连续播放结论待追加。
+
+部署更新：用户明确本轮优先视频测试。向 192.168.3.66 非卸载更新，上传 HTTP 202，
+安装列表确认 0.8.0.9，launch HTTP 200；更新前确认无旧进程，启动后 PID 6308。
+证据目录 `crash/hwdecode-20261023-0.8.0.9/`。已请用户前台打开 dxva-play.html、
+点 Play 并亮屏 30 秒；目前尚未收到该页的设备请求/声画反馈，因此不下主路径成功结论。
+after-install 的 mediaaudio 尾部是旧版本继承的日志，不作为 0.8.0.9 播放证据。

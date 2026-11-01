@@ -1093,10 +1093,10 @@ index c8a0744b2c..0d64d33416 100644
  #endif
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
 new file mode 100644
-index 0000000000..b143dff4fd
+index 0000000000..13eb3b77c1
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.cpp
-@@ -0,0 +1,1793 @@
+@@ -0,0 +1,2036 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + * See MediaPlayerPrivateWinUWP.h for why this exists instead of upstream's
@@ -1180,6 +1180,15 @@ index 0000000000..b143dff4fd
 +std::atomic<unsigned> g_nativeVideoSubtype { 0 };
 +std::atomic<unsigned> g_outputVideoSubtype { 0 };
 +std::atomic<bool> g_dxvaDisabled { false };
++// Apotheosis: configuration and CPU-copy evidence are separate from hardware claims.
++std::atomic<const char*> g_mainReaderPath { "sw" };
++std::atomic<unsigned long long> g_d3dRGBFrames { 0 };
++std::atomic<unsigned long long> g_videoCopyFrames { 0 };
++std::atomic<unsigned long long> g_videoCopyMicroseconds { 0 };
++std::atomic<unsigned long long> g_videoCopyMaxMicroseconds { 0 };
++std::atomic<unsigned> g_d3dFallbacks { 0 };
++std::atomic<long> g_d3dFallbackHr { 0 };
++std::atomic<const char*> g_d3dFallbackSite { "-" };
 +// Apotheosis (media, 2026-10-18): DXVA experiment state - see WinUWPMediaBridge.h.
 +std::atomic<int> g_dxvaState { 0 };
 +std::atomic<unsigned> g_dxvaProfiles { 0 };
@@ -1280,6 +1289,14 @@ index 0000000000..b143dff4fd
 +unsigned WinUWPMediaDiagnostics::nativeVideoSubtype() { return g_nativeVideoSubtype.load(); }
 +unsigned WinUWPMediaDiagnostics::outputVideoSubtype() { return g_outputVideoSubtype.load(); }
 +bool WinUWPMediaDiagnostics::dxvaDisabled() { return g_dxvaDisabled.load(); }
++const char* WinUWPMediaDiagnostics::mainReaderPath() { return g_mainReaderPath.load(); }
++unsigned long long WinUWPMediaDiagnostics::d3dRGBFrames() { return g_d3dRGBFrames.load(); }
++unsigned long long WinUWPMediaDiagnostics::videoCopyFrames() { return g_videoCopyFrames.load(); }
++unsigned long long WinUWPMediaDiagnostics::videoCopyMicroseconds() { return g_videoCopyMicroseconds.load(); }
++unsigned long long WinUWPMediaDiagnostics::videoCopyMaxMicroseconds() { return g_videoCopyMaxMicroseconds.load(); }
++unsigned WinUWPMediaDiagnostics::d3dFallbacks() { return g_d3dFallbacks.load(); }
++HRESULT WinUWPMediaDiagnostics::d3dFallbackHr() { return g_d3dFallbackHr.load(); }
++const char* WinUWPMediaDiagnostics::d3dFallbackSite() { return g_d3dFallbackSite.load(); }
 +int WinUWPMediaDiagnostics::dxvaState() { return g_dxvaState.load(); }
 +unsigned WinUWPMediaDiagnostics::dxvaProfiles() { return g_dxvaProfiles.load(); }
 +bool WinUWPMediaDiagnostics::dxvaH264Profile() { return g_dxvaH264Profile.load(); }
@@ -1408,7 +1425,19 @@ index 0000000000..b143dff4fd
 +// Per-stream decode state. Owned by the decode thread; destroyed after it is joined.
 +// ===========================================================================
 +struct MediaPlayerPrivateWinUWP::DecoderState {
++    // Apotheosis: dependencies precede reader so reverse destruction releases it first.
++    COMPtr<ID3D11Device> device;
++    COMPtr<IMFDXGIDeviceManager> manager;
 +    COMPtr<IMFSourceReader> reader;
++    String sourceURL;
++    bool protectedRGB { false };
++
++    void releaseReader()
++    {
++        reader = nullptr;
++        manager = nullptr;
++        device = nullptr;
++    }
 +
 +    bool hasVideo { false };
 +    bool hasAudio { false };
@@ -1942,12 +1971,12 @@ index 0000000000..b143dff4fd
 +    return true;
 +}
 +
-+void MediaPlayerPrivateWinUWP::publishFrame(const uint8_t* pixels, int sourceStride, const IntSize& size)
++bool MediaPlayerPrivateWinUWP::publishFrame(const uint8_t* pixels, int sourceStride, const IntSize& size)
 +{
 +    if (!pixels || sourceStride == 0)
-+        return;
++        return false;
 +    if (!ensureFrameBuffers(size))
-+        return;
++        return false;
 +
 +    Locker locker { m_frameLock };
 +
@@ -1972,6 +2001,7 @@ index 0000000000..b143dff4fd
 +    m_writeBuffer = (m_writeBuffer + 1) % s_frameBufferCount;
 +    m_havePresentableFrame = true;
 +    g_framesDecoded.fetch_add(1);
++    return true;
 +}
 +
 +void MediaPlayerPrivateWinUWP::paint(GraphicsContext& context, const FloatRect& destinationRect)
@@ -2001,7 +2031,7 @@ index 0000000000..b143dff4fd
 +// Decode thread
 +// ===========================================================================
 +
-+static void startDxvaProbe(const String&);
++static void startDxvaProbe(const String&, bool rgbReadback);
 +
 +void MediaPlayerPrivateWinUWP::decodeThreadBody()
 +{
@@ -2026,23 +2056,41 @@ index 0000000000..b143dff4fd
 +    // Apotheosis: only the explicit diagnostic fragment arms a second reader. Strip it
 +    // before MF sees the URL; ordinary playback does no additional fetch or decode.
 +    URL mediaURL { URL { }, url };
-+    bool probeRequested = mediaURL.fragmentIdentifier() == "apotheosis-dxva-probe"_s;
-+    if (probeRequested) {
++    bool rgbReadback = mediaURL.fragmentIdentifier() == "apotheosis-dxva-rgb-probe"_s;
++    bool probeRequested = rgbReadback || mediaURL.fragmentIdentifier() == "apotheosis-dxva-probe"_s;
++    bool protectedRGB = mediaURL.fragmentIdentifier() == "apotheosis-dxva-play"_s;
++    if (probeRequested || protectedRGB) {
 +        mediaURL.removeFragmentIdentifier();
 +        url = mediaURL.string();
 +    }
-+    if (!openSourceReader(*m_decoder, url)) {
++    bool opened = openSourceReader(*m_decoder, url, protectedRGB);
++    if (!opened && protectedRGB) {
++        // Apotheosis: setup/type negotiation must never remove the software option.
++        g_d3dFallbackHr.store(g_lastError.load());
++        g_d3dFallbackSite.store(g_lastErrorSite.load());
++        g_d3dFallbacks.fetch_add(1);
++        m_decoder->releaseReader();
++        m_decoder = makeUniqueWithoutFastMallocCheck<DecoderState>();
++        opened = openSourceReader(*m_decoder, url);
++        if (opened) {
++            g_mainReaderPath.store("sw-fallback");
++            g_lastError.store(S_OK);
++            g_lastErrorSite.store(nullptr);
++        }
++    }
++    if (!opened) {
++        m_decoder->releaseReader();
 +        postFailure(MediaPlayer::NetworkState::FormatError, "openSourceReader");
 +        return;
 +    }
 +
 +    notifyMetadataReady();
 +    if (probeRequested && m_decoder->hasVideo)
-+        startDxvaProbe(url);
++        startDxvaProbe(url, rgbReadback);
 +    decodeLoop(*m_decoder);
 +
 +    // Release the Media Foundation objects on the thread that created them.
-+    m_decoder->reader = nullptr;
++    m_decoder->releaseReader();
 +}
 +
 +// ===========================================================================
@@ -2119,7 +2167,7 @@ index 0000000000..b143dff4fd
 +    });
 +}
 +
-+static void startDxvaProbe(const String& url)
++static void startDxvaProbe(const String& url, bool rgbReadback)
 +{
 +    static std::atomic<bool> started { false };
 +    if (started.exchange(true))
@@ -2128,7 +2176,7 @@ index 0000000000..b143dff4fd
 +    // Apotheosis: isolated lifetime, no player/DecoderState/UI captures. A blocked MF
 +    // network read must not block normal decoding, navigation or player destruction.
 +    // Only one explicitly requested probe is allowed per process, even if MF stalls.
-+    Thread::create("WinUWPDxvaProbe"_s, [url = url.isolatedCopy()] {
++    Thread::create("WinUWPDxvaProbe"_s, [url = url.isolatedCopy(), rgbReadback] {
 +        auto step = [](const char* site, HRESULT hr) {
 +            g_dxvaProbeSite.store(site);
 +            g_dxvaProbeHr.store(hr);
@@ -2153,11 +2201,14 @@ index 0000000000..b143dff4fd
 +        UINT token = 0;
 +        if (!step("probe-manager", ::MFCreateDXGIDeviceManager(&token, &manager))
 +            || !step("probe-reset", manager->ResetDevice(device.get(), token))
-+            || !step("probe-attributes", ::MFCreateAttributes(&attributes, 2))
++            || !step("probe-attributes", ::MFCreateAttributes(&attributes, 3))
 +            || !step("probe-set-manager", attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, manager.get()))
 +            || !step("probe-disconnect", attributes->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE)))
 +            return;
-+        // Deliberately no video processing / RGB conversion: request native NV12.
++        // Apotheosis: RGB readback is a separate opt-in experiment. Advanced XVP can
++        // use the D3D manager; do not combine it with the legacy software VP flag.
++        if (rgbReadback && !step("probe-advanced-vp", attributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE)))
++            return;
 +        BString urlString(url);
 +        g_dxvaProbeSite.store("probe-open");
 +        if (!step("probe-open", ::MFCreateSourceReaderFromURL(static_cast<LPCWSTR>(urlString), attributes.get(), &reader))
@@ -2167,9 +2218,27 @@ index 0000000000..b143dff4fd
 +        COMPtr<IMFMediaType> type;
 +        if (!step("probe-type", ::MFCreateMediaType(&type))
 +            || !step("probe-major", type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))
-+            || !step("probe-subtype", type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12))
++            || !step("probe-subtype", type->SetGUID(MF_MT_SUBTYPE, rgbReadback ? MFVideoFormat_RGB32 : MFVideoFormat_NV12))
 +            || !step("probe-negotiate", reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type.get())))
 +            return;
++        UINT32 rgbWidth = 0;
++        UINT32 rgbHeight = 0;
++        int rgbStride = 0;
++        if (rgbReadback) {
++            COMPtr<IMFMediaType> currentType;
++            if (!step("probe-rgb-current-type", reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType))
++                || !step("probe-rgb-size", MFGetAttributeSize(currentType.get(), MF_MT_FRAME_SIZE, &rgbWidth, &rgbHeight)))
++                return;
++            if (!rgbWidth || !rgbHeight || rgbWidth > 8192 || rgbHeight > 8192) {
++                step("probe-rgb-dimensions", E_INVALIDARG);
++                return;
++            }
++            UINT32 strideAttribute = rgbWidth * 4;
++            currentType->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideAttribute);
++            rgbStride = static_cast<int>(strideAttribute);
++            g_dxvaProbeWidth.store(rgbWidth);
++            g_dxvaProbeHeight.store(rgbHeight);
++        }
 +        for (unsigned i = 0; i < 16; ++i) {
 +            DWORD flags = 0;
 +            COMPtr<IMFSample> sample;
@@ -2206,7 +2275,41 @@ index 0000000000..b143dff4fd
 +                    step("probe-gpu-frame", S_OK);
 +                    // GPU storage is evidence, not proof of hardware decoder use or
 +                    // a CPU/power improvement. The main path still reports dxva=sw.
-+                    g_dxvaProbe.store(1);
++                    if (!rgbReadback) {
++                        g_dxvaProbe.store(1);
++                        return;
++                    }
++                    break;
++                }
++                if (rgbReadback) {
++                    // Exercise the same contiguous-buffer/Lock contract the current
++                    // presenter consumes. No frame is handed to the main player yet.
++                    COMPtr<IMFMediaBuffer> contiguous;
++                    if (!step("probe-rgb-contiguous", sample->ConvertToContiguousBuffer(&contiguous)))
++                        return;
++                    BYTE* pixels = nullptr;
++                    DWORD maximumLength = 0;
++                    DWORD currentLength = 0;
++                    g_dxvaProbeSite.store("probe-rgb-lock");
++                    if (!step("probe-rgb-lock", contiguous->Lock(&pixels, &maximumLength, &currentLength)))
++                        return;
++                    const int64_t absoluteStride = rgbStride < 0 ? -static_cast<int64_t>(rgbStride) : rgbStride;
++                    const uint64_t required = (rgbHeight - 1) * absoluteStride + static_cast<uint64_t>(rgbWidth) * 4;
++                    bool valid = pixels && absoluteStride >= static_cast<int64_t>(rgbWidth) * 4
++                        && required <= currentLength && required <= maximumLength;
++                    if (valid) {
++                        // Read both ends while locked; do not merely trust buffer length.
++                        volatile BYTE first = pixels[0];
++                        volatile BYTE last = pixels[required - 1];
++                        (void)first;
++                        (void)last;
++                    }
++                    HRESULT unlockHr = contiguous->Unlock();
++                    if (!step("probe-rgb-bounds", valid ? S_OK : E_INVALIDARG)
++                        || !step("probe-rgb-unlock", unlockHr))
++                        return;
++                    step("probe-rgb-readable", S_OK);
++                    g_dxvaProbe.store(4);
 +                    return;
 +                }
 +                step("probe-system-frame", S_OK);
@@ -2221,38 +2324,39 @@ index 0000000000..b143dff4fd
 +    })->detach();
 +}
 +
-+bool MediaPlayerPrivateWinUWP::openSourceReader(DecoderState& state, const String& url)
++bool MediaPlayerPrivateWinUWP::openSourceReader(DecoderState& state, const String& url, bool protectedRGB)
 +{
++    // Apotheosis: only #apotheosis-dxva-play selects the on-device RGB-probe recipe.
++    // Keep the legacy software attributes independent; never mix the two VP flags.
++    state.sourceURL = url.isolatedCopy();
++    state.protectedRGB = protectedRGB;
++    reportDxvaCapabilityOnce();
++    auto checked = [](HRESULT hr, const char* site) {
++        if (FAILED(hr))
++            recordError(hr, site);
++        return SUCCEEDED(hr);
++    };
 +    COMPtr<IMFAttributes> attributes;
 +    HRESULT hr = ::MFCreateAttributes(&attributes, 3);
-+    if (FAILED(hr)) {
-+        recordError(hr, "MFCreateAttributes");
++    if (!checked(hr, "MFCreateAttributes"))
 +        return false;
-+    }
-+
-+    // Without this the SourceReader refuses to convert formats and every frame would have
-+    // to be negotiated as NV12 and converted by hand. With it, the reader inserts the
-+    // Video Processor MFT and can hand back RGB32 directly.
-+    attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
-+    // MF_SOURCE_READER_DISABLE_DXVA is deliberately left unset: on Win10M the H.264
-+    // decoder may hand back GPU-backed samples and let the Video Processor convert them.
-+    // App Container DXVA2 availability still has to be confirmed on device; if the
-+    // transform fails there, set MF_SOURCE_READER_DISABLE_DXVA = TRUE here (and nothing
-+    // else) to force the software decoder.
-+    attributes->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE);
++    if (protectedRGB) {
++        if (!checked(::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
++            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
++            nullptr, 0, D3D11_SDK_VERSION, &state.device, nullptr, nullptr), "main-d3d-device")
++            || !checked(protectVideoDevice(*state.device) ? S_OK : E_NOINTERFACE, "main-d3d-protect"))
++            return false;
++        UINT token = 0;
++        if (!checked(::MFCreateDXGIDeviceManager(&token, &state.manager), "main-d3d-manager")
++            || !checked(state.manager->ResetDevice(state.device.get(), token), "main-d3d-reset")
++            || !checked(attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, state.manager.get()), "main-d3d-set-manager")
++            || !checked(attributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE), "main-advanced-vp"))
++            return false;
++    } else if (!checked(attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE), "main-software-vp"))
++        return false;
++    if (!checked(attributes->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE), "main-disconnect"))
++        return false;
 +    state.dxvaDisabled = false;
-+
-+    // Apotheosis (media, 2026-10-18): the main reader deliberately does NOT set
-+    // MF_SOURCE_READER_D3D_MANAGER. On device (0.2.5.34) setting it - together with
-+    // MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING - made MFCreateSourceReaderFromURL fail
-+    // with E_FAIL: the graceful MF_E_UNSUPPORTED_D3D_TYPE fallback the docs promise did
-+    // not happen on 15254, and the whole reader (and with it the video) was lost
-+    // (readers=0, no metadata, element stuck at HAVE_NOTHING). The throwaway probe
-+    // (0.2.5.35) also failed without the VP, but had no multithread protection.
-+    // The protected throwaway probe above rechecks that setup; the software path
-+    // stays the main path. What the driver exposes is still recorded
-+    // (reportDxvaCapabilityOnce above) into the media line's dxvaprof/dxvafl/h264.
-+    reportDxvaCapabilityOnce();
 +
 +    BString urlString(url);
 +    hr = ::MFCreateSourceReaderFromURL(static_cast<LPCWSTR>(urlString), attributes.get(), &state.reader);
@@ -2264,11 +2368,18 @@ index 0000000000..b143dff4fd
 +
 +    // Everything unselected by default; each stream we can actually configure is
 +    // selected below.
-+    state.reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
++    if (!checked(state.reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE), "main-deselect"))
++        return false;
 +
 +    // Media Foundation's stream indices are not the MF_SOURCE_READER_FIRST_* pseudo
 +    // indices: ReadSample(ANY_STREAM) reports the real index, so enumerate the real
 +    // streams first and configure those.
++    // Apotheosis: configure video BEFORE the audio sink, so a D3D negotiation failure
++    // can reopen software without first configuring/resetting the working audio graph.
++    COMPtr<IMFMediaType> firstVideo;
++    COMPtr<IMFMediaType> firstAudio;
++    unsigned videoIndex = 0;
++    unsigned audioIndex = 0;
 +    for (unsigned index = 0; index < 32; ++index) {
 +        COMPtr<IMFMediaType> nativeType;
 +        hr = state.reader->GetNativeMediaType(index, 0, &nativeType);
@@ -2279,11 +2390,26 @@ index 0000000000..b143dff4fd
 +        if (FAILED(nativeType->GetGUID(MF_MT_MAJOR_TYPE, &majorType)))
 +            continue;
 +
-+        if (majorType == MFMediaType_Video && !state.hasVideo)
-+            configureVideoStream(state, index, nativeType.get());
-+        else if (majorType == MFMediaType_Audio && !state.hasAudio)
-+            configureAudioStream(state, index, nativeType.get());
++        if (!protectedRGB) {
++            // Apotheosis: ordinary URLs retain baseline stream enumeration/fallbacks.
++            if (majorType == MFMediaType_Video && !state.hasVideo)
++                configureVideoStream(state, index, nativeType.get());
++            else if (majorType == MFMediaType_Audio && !state.hasAudio)
++                configureAudioStream(state, index, nativeType.get());
++            continue;
++        }
++        if (majorType == MFMediaType_Video && !firstVideo) {
++            firstVideo = nativeType;
++            videoIndex = index;
++        } else if (majorType == MFMediaType_Audio && !firstAudio) {
++            firstAudio = nativeType;
++            audioIndex = index;
++        }
 +    }
++    if (firstVideo && !configureVideoStream(state, videoIndex, firstVideo.get()) && protectedRGB)
++        return false;
++    if (firstAudio && !configureAudioStream(state, audioIndex, firstAudio.get()) && protectedRGB)
++        return false;
 +
 +    if (!state.hasVideo && !state.hasAudio) {
 +        recordError(E_FAIL, "no configurable stream");
@@ -2303,6 +2429,43 @@ index 0000000000..b143dff4fd
 +    m_hasAudio.store(state.hasAudio);
 +    WinUWPMediaDiagnostics::recordStreamIndices(state.hasVideo ? state.videoStreamIndex : 0xffffffffu,
 +        state.hasAudio ? state.audioStreamIndex : 0xffffffffu);
++    g_mainReaderPath.store(protectedRGB && state.hasVideo ? "d3d-rgb" : "sw");
++    return true;
++}
++
++bool MediaPlayerPrivateWinUWP::fallbackToSoftware(DecoderState& state)
++{
++    // Apotheosis: at most one D3D attempt per load; a failed baseline parks the loop.
++    if (!state.protectedRGB)
++        return false;
++    g_d3dFallbackHr.store(g_lastError.load());
++    g_d3dFallbackSite.store(g_lastErrorSite.load());
++    g_d3dFallbacks.fetch_add(1);
++    String url = state.sourceURL.isolatedCopy();
++    MediaTime resumeTime;
++    {
++        Locker locker { m_lock };
++        if (m_stopRequested)
++            return false;
++        resumeTime = clockNowLocked();
++    }
++    state.releaseReader();
++    state = DecoderState { };
++    g_mainReaderPath.store("sw-fallback");
++    if (!openSourceReader(state, url)) {
++        state.failed = true;
++        postFailure(MediaPlayer::NetworkState::DecodeError, "software-reopen");
++        return false;
++    }
++    g_mainReaderPath.store("sw-fallback");
++    // Reuse normal seek handling to discard old PCM/frame data and reset clock anchors.
++    if (!performSeek(state, resumeTime)) {
++        state.failed = true;
++        postFailure(MediaPlayer::NetworkState::DecodeError, "software-resume");
++        return false;
++    }
++    g_lastError.store(S_OK);
++    g_lastErrorSite.store(nullptr);
 +    return true;
 +}
 +
@@ -2310,8 +2473,11 @@ index 0000000000..b143dff4fd
 +{
 +    UINT32 width = 0;
 +    UINT32 height = 0;
-+    if (FAILED(MFGetAttributeSize(nativeType, MF_MT_FRAME_SIZE, &width, &height)) || !width || !height)
++    if (FAILED(MFGetAttributeSize(nativeType, MF_MT_FRAME_SIZE, &width, &height))
++        || !width || !height || width > 8192 || height > 8192) {
++        recordError(E_INVALIDARG, "video-dimensions");
 +        return false;
++    }
 +
 +    GUID nativeSubtype = GUID_NULL;
 +    nativeType->GetGUID(MF_MT_SUBTYPE, &nativeSubtype);
@@ -2325,16 +2491,18 @@ index 0000000000..b143dff4fd
 +
 +    outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
 +    outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-+    outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-+    outputType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-+    MFSetAttributeSize(outputType.get(), MF_MT_FRAME_SIZE, width, height);
-+    // A positive stride asks for top-down rows. Most transformations honour it and it
-+    // saves a row flip per frame; publishFrame() still copes if the reader ignores it.
-+    outputType->SetUINT32(MF_MT_DEFAULT_STRIDE, width * 4);
++    if (!state.protectedRGB) {
++        // Apotheosis: keep baseline negotiation unchanged. D3D uses the minimal
++        // major-type/subtype request verified by the isolated RGB probe on device.
++        outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
++        outputType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
++        MFSetAttributeSize(outputType.get(), MF_MT_FRAME_SIZE, width, height);
++        outputType->SetUINT32(MF_MT_DEFAULT_STRIDE, width * 4);
++    }
 +
 +    UINT32 parNumerator = 1;
 +    UINT32 parDenominator = 1;
-+    if (SUCCEEDED(MFGetAttributeRatio(nativeType, MF_MT_PIXEL_ASPECT_RATIO, &parNumerator, &parDenominator)))
++    if (!state.protectedRGB && SUCCEEDED(MFGetAttributeRatio(nativeType, MF_MT_PIXEL_ASPECT_RATIO, &parNumerator, &parDenominator)))
 +        MFSetAttributeRatio(outputType.get(), MF_MT_PIXEL_ASPECT_RATIO, parNumerator, parDenominator);
 +
 +    hr = state.reader->SetCurrentMediaType(streamIndex, nullptr, outputType.get());
@@ -2343,7 +2511,11 @@ index 0000000000..b143dff4fd
 +        return false;
 +    }
 +
-+    state.reader->SetStreamSelection(streamIndex, TRUE);
++    hr = state.reader->SetStreamSelection(streamIndex, TRUE);
++    if (FAILED(hr)) {
++        recordError(hr, "main-select-video");
++        return false;
++    }
 +    state.hasVideo = true;
 +    state.videoStreamIndex = streamIndex;
 +    state.videoSize = IntSize { static_cast<int>(width), static_cast<int>(height) };
@@ -2352,15 +2524,25 @@ index 0000000000..b143dff4fd
 +    // Read back what the reader actually settled on: the stride may still be negative
 +    // (bottom-up) even though a positive one was requested.
 +    COMPtr<IMFMediaType> currentType;
-+    if (SUCCEEDED(state.reader->GetCurrentMediaType(streamIndex, &currentType))) {
++    hr = state.reader->GetCurrentMediaType(streamIndex, &currentType);
++    if (state.protectedRGB && FAILED(hr)) {
++        recordError(hr, "main-video-current-type");
++        return false;
++    }
++    if (currentType) {
 +        UINT32 strideAttribute = 0;
 +        if (SUCCEEDED(currentType->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideAttribute)))
 +            state.videoStride = static_cast<int>(strideAttribute);
 +
 +        UINT32 currentWidth = 0;
 +        UINT32 currentHeight = 0;
-+        if (SUCCEEDED(MFGetAttributeSize(currentType.get(), MF_MT_FRAME_SIZE, &currentWidth, &currentHeight)) && currentWidth && currentHeight)
++        if (SUCCEEDED(MFGetAttributeSize(currentType.get(), MF_MT_FRAME_SIZE, &currentWidth, &currentHeight))
++            && currentWidth && currentHeight && currentWidth <= 8192 && currentHeight <= 8192)
 +            state.videoSize = IntSize { static_cast<int>(currentWidth), static_cast<int>(currentHeight) };
++        else if (state.protectedRGB) {
++            recordError(E_INVALIDARG, "main-video-current-size");
++            return false;
++        }
 +    }
 +
 +    WinUWPMediaDiagnostics::recordVideoTypes(nativeSubtype.Data1, MFVideoFormat_RGB32.Data1, state.dxvaDisabled);
@@ -2479,11 +2661,11 @@ index 0000000000..b143dff4fd
 +                // and readyState never leaves HAVE_METADATA. Fill a read-ahead first, report it, and
 +                // only then park. See DecoderState::bufferedEnd.
 +                const MediaTime bufferedAhead = state.bufferedEnd - m_currentTime;
-+                if (!state.eos && bufferedAhead < MediaTime(2, 1)) {
++                if (!state.failed && !state.eos && bufferedAhead < MediaTime(2, 1)) {
 +                    prerolled = true;
 +                    preroll = true;      // respectPacing == false: fill as fast as the source allows
 +                } else {
-+                    if (m_readyState.load() < MediaPlayer::ReadyState::HaveFutureData) {
++                    if (!state.failed && m_readyState.load() < MediaPlayer::ReadyState::HaveFutureData) {
 +                        const auto reportedState = state.eos ? MediaPlayer::ReadyState::HaveEnoughData
 +                                                             : MediaPlayer::ReadyState::HaveFutureData;
 +                        ThreadSafeWeakPtr<MediaPlayerPrivateWinUWP> weakThis { *this };
@@ -2608,12 +2790,20 @@ index 0000000000..b143dff4fd
 +    if (FAILED(hr)) {
 +        // MF_E_INVALIDREQUEST after a stop and E_ABORT from a cancelled read are both
 +        // ordinary consequences of tearing down; anything else is worth reporting.
-+        if (hr != MF_E_INVALIDREQUEST && hr != E_ABORT)
++        if (hr != MF_E_INVALIDREQUEST && hr != E_ABORT) {
 +            recordError(hr, "ReadSample");
++            if (state.protectedRGB && fallbackToSoftware(state))
++                return true;
++            state.failed = true;
++            postFailure(MediaPlayer::NetworkState::DecodeError, "ReadSample");
++        }
 +        return false;
 +    }
 +
 +    if (streamFlags & MF_SOURCE_READERF_ERROR) {
++        recordError(E_FAIL, "MF_SOURCE_READERF_ERROR");
++        if (state.protectedRGB && fallbackToSoftware(state))
++            return true;
 +        state.failed = true;
 +        postFailure(MediaPlayer::NetworkState::DecodeError, "MF_SOURCE_READERF_ERROR");
 +        return false;
@@ -2630,9 +2820,38 @@ index 0000000000..b143dff4fd
 +        return true;
 +
 +    if (state.hasVideo && actualStreamIndex == state.videoStreamIndex) {
++        // Apotheosis: a changed output layout must not be copied using stale geometry.
++        if (state.protectedRGB && (streamFlags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
++            COMPtr<IMFMediaType> type;
++            GUID subtype = GUID_NULL;
++            UINT32 width = 0;
++            UINT32 height = 0;
++            bool validType = SUCCEEDED(state.reader->GetCurrentMediaType(actualStreamIndex, &type))
++                && SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &subtype)) && subtype == MFVideoFormat_RGB32
++                && SUCCEEDED(MFGetAttributeSize(type.get(), MF_MT_FRAME_SIZE, &width, &height))
++                && width && height && width <= 8192 && height <= 8192;
++            if (!validType) {
++                recordError(MF_E_INVALIDMEDIATYPE, "main-video-type-changed");
++                if (fallbackToSoftware(state))
++                    return true;
++                state.failed = true;
++                return false;
++            }
++            UINT32 stride = width * 4;
++            type->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride);
++            state.videoStride = static_cast<int>(stride);
++            state.videoSize = IntSize { static_cast<int>(width), static_cast<int>(height) };
++            m_naturalWidth.store(width);
++            m_naturalHeight.store(height);
++        }
 +        if (respectPacing)
 +            waitUntilDue(MediaTime(timestamp, tenMegahertz));
-+        handleVideoSample(state, sample.get(), timestamp);
++        if (!handleVideoSample(state, sample.get(), timestamp) && state.protectedRGB) {
++            if (fallbackToSoftware(state))
++                return true;
++            state.failed = true;
++            return false;
++        }
 +        return true;
 +    }
 +
@@ -2665,30 +2884,54 @@ index 0000000000..b143dff4fd
 +    }
 +}
 +
-+void MediaPlayerPrivateWinUWP::handleVideoSample(DecoderState& state, IMFSample* sample, LONGLONG timestamp)
++bool MediaPlayerPrivateWinUWP::handleVideoSample(DecoderState& state, IMFSample* sample, LONGLONG timestamp)
 +{
 +    (void)timestamp;
++    // Apotheosis: measures Convert/Lock/copy/Unlock only, excluding pacing and repaint.
++    auto copyStart = MonotonicTime::now();
 +
 +    COMPtr<IMFMediaBuffer> buffer;
-+    if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer)
-+        return;
++    HRESULT hr = sample->ConvertToContiguousBuffer(&buffer);
++    if (FAILED(hr) || !buffer) {
++        recordError(FAILED(hr) ? hr : E_POINTER, "video-contiguous");
++        return false;
++    }
 +
 +    BYTE* data = nullptr;
 +    DWORD maximumLength = 0;
 +    DWORD currentLength = 0;
-+    if (FAILED(buffer->Lock(&data, &maximumLength, &currentLength))) {
-+        recordError(E_FAIL, "IMFMediaBuffer::Lock");
-+        return;
++    hr = buffer->Lock(&data, &maximumLength, &currentLength);
++    if (FAILED(hr)) {
++        recordError(hr, "IMFMediaBuffer::Lock");
++        return false;
 +    }
 +
-+    if (currentLength)
-+        publishFrame(data, state.videoStride, state.videoSize);
++    // Apotheosis: GPU readback must meet the same whole-frame bounds as the probe.
++    const int64_t absoluteStride = state.videoStride < 0 ? -static_cast<int64_t>(state.videoStride) : state.videoStride;
++    const uint64_t rowBytes = static_cast<uint64_t>(state.videoSize.width()) * 4;
++    const uint64_t required = state.videoSize.isEmpty() ? 0
++        : (state.videoSize.height() - 1) * absoluteStride + rowBytes;
++    bool valid = data && required && absoluteStride >= static_cast<int64_t>(rowBytes)
++        && required <= currentLength && required <= maximumLength;
++    bool published = valid && publishFrame(data, state.videoStride, state.videoSize);
 +
-+    buffer->Unlock();
++    hr = buffer->Unlock();
++    if (!valid || !published || FAILED(hr)) {
++        recordError(FAILED(hr) ? hr : E_INVALIDARG, !valid ? "video-buffer-bounds" : (!published ? "video-publish" : "video-unlock"));
++        return false;
++    }
++    const auto elapsed = static_cast<unsigned long long>((MonotonicTime::now() - copyStart).seconds() * 1000000);
++    g_videoCopyFrames.fetch_add(1);
++    g_videoCopyMicroseconds.fetch_add(elapsed);
++    auto maximum = g_videoCopyMaxMicroseconds.load();
++    while (elapsed > maximum && !g_videoCopyMaxMicroseconds.compare_exchange_weak(maximum, elapsed)) { }
++    if (state.protectedRGB)
++        g_d3dRGBFrames.fetch_add(1);
 +
 +    // Every frame, so the page keeps being asked to repaint for as long as the video runs
 +    // (the notification itself decides whether this was the first frame).
 +    notifyFrameReady();
++    return true;
 +}
 +
 +void MediaPlayerPrivateWinUWP::handleAudioSample(DecoderState& state, IMFSample* sample, LONGLONG timestamp)
@@ -2892,10 +3135,10 @@ index 0000000000..b143dff4fd
 +#endif // defined(WK_WINUWP) && ENABLE(VIDEO)
 diff --git a/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
 new file mode 100644
-index 0000000000..c946287804
+index 0000000000..a497b12c05
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/MediaPlayerPrivateWinUWP.h
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,259 @@
 +/*
 + * Apotheosis (WK_WINUWP): Windows 10 Mobile / App Container media backend.
 + *
@@ -3061,17 +3304,19 @@ index 0000000000..c946287804
 +
 +    // ---- decode thread ----
 +    void decodeThreadBody();
-+    bool openSourceReader(DecoderState&, const String& url);
++    // Apotheosis: protected RGB is explicitly requested; ordinary URLs keep the baseline.
++    bool openSourceReader(DecoderState&, const String& url, bool protectedRGB = false);
++    bool fallbackToSoftware(DecoderState&);
 +    bool configureVideoStream(DecoderState&, unsigned streamIndex, IMFMediaType*);
 +    bool configureAudioStream(DecoderState&, unsigned streamIndex, IMFMediaType*);
 +    void decodeLoop(DecoderState&);
 +    bool decodeOneSample(DecoderState&, bool respectPacing);
 +    bool performSeek(DecoderState&, MediaTime);
-+    void handleVideoSample(DecoderState&, IMFSample*, LONGLONG timestamp);
++    bool handleVideoSample(DecoderState&, IMFSample*, LONGLONG timestamp);
 +    void handleAudioSample(DecoderState&, IMFSample*, LONGLONG timestamp);
 +    void noteEndOfStream(DecoderState&, unsigned streamIndex);
 +    void waitUntilDue(MediaTime due);
-+    void publishFrame(const uint8_t* pixels, int sourceStride, const IntSize&);
++    bool publishFrame(const uint8_t* pixels, int sourceStride, const IntSize&);
 +    // Publish the state a decode-thread failure ends in, atomically and on the engine thread.
 +    void postFailure(MediaPlayer::NetworkState, const char* site);
 +
@@ -3155,10 +3400,10 @@ index 0000000000..c946287804
 +#endif // defined(WK_WINUWP)
 diff --git a/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
 new file mode 100644
-index 0000000000..48dd5dacdc
+index 0000000000..0976fdfd54
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/win/WinUWPMediaBridge.h
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,139 @@
 +/*
 + * Apotheosis (WK_WINUWP): the WebCore <-> port contract for media.
 + *
@@ -3229,6 +3474,17 @@ index 0000000000..48dd5dacdc
 +    static unsigned nativeVideoSubtype();
 +    static unsigned outputVideoSubtype();
 +    static bool dxvaDisabled();
++    // Apotheosis: most recently opened MAIN reader configuration, not hardware proof.
++    // d3d-rgb = protected manager + advanced VP; sw-fallback = retried baseline.
++    static const char* mainReaderPath();
++    static unsigned long long d3dRGBFrames();
++    // Successful video buffer readback + publish time (all paths), in microseconds.
++    static unsigned long long videoCopyFrames();
++    static unsigned long long videoCopyMicroseconds();
++    static unsigned long long videoCopyMaxMicroseconds();
++    static unsigned d3dFallbacks();
++    static HRESULT d3dFallbackHr();
++    static const char* d3dFallbackSite();
 +    // Apotheosis: device CAPABILITY only, independent of the main reader (dxva=sw).
 +    // state: 0 unqueried, 1 decoder profiles exposed, 2 no profiles, 3 no device.
 +    // profiles = ID3D11VideoDevice::GetVideoDecoderProfileCount() on our device (0 = the driver
@@ -3245,9 +3501,10 @@ index 0000000000..48dd5dacdc
 +    //   1 GPU-backed decoded frame (hardware execution/performance not yet proven)
 +    //   2 reader created but frames are system memory (no DXVA engagement)
 +    //   0 probe failed (see HRESULT and site), 3 no frame in 16 reads / EOF
++    //   4 RGB32 + advanced VP probe: contiguous CPU buffer locked/read/unlocked
 +    //  -1 not requested, -2 running (site identifies a potentially blocked MF call)
-+    // The MAIN reader deliberately stays on the software path (no manager) until the
-+    // DXGI-texture -> CPU copy path exists; the probe only answers "is it worth building".
++    // Apotheosis: ordinary playback stays on software. The separate explicit
++    // #apotheosis-dxva-play path uses the RGB configuration verified by probe=4.
 +    static void recordDxvaProbe(int probe);
 +    static int dxvaProbe();
 +    // Apotheosis: separate from main-reader errors. mt=10/11 means protection was

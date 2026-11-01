@@ -101,12 +101,22 @@ bool mediaDxvaProbeChanged()
 {
     static int lastState = -1;
     static const char* lastSite = nullptr;
+    static const char* lastPath = nullptr;
+    static unsigned lastFallbacks = 0;
+    static bool hadD3DFrame = false;
     const int state = WebCore::WinUWPMediaDiagnostics::dxvaProbe();
     const char* site = WebCore::WinUWPMediaDiagnostics::dxvaProbeSite();
-    if (state == -1 || (state == lastState && site == lastSite))
+    const char* path = WebCore::WinUWPMediaDiagnostics::mainReaderPath();
+    const auto fallbacks = WebCore::WinUWPMediaDiagnostics::d3dFallbacks();
+    const bool hasD3DFrame = WebCore::WinUWPMediaDiagnostics::d3dRGBFrames() > 0;
+    if (state == lastState && site == lastSite && path == lastPath
+        && fallbacks == lastFallbacks && hasD3DFrame == hadD3DFrame)
         return false;
     lastState = state;
     lastSite = site;
+    lastPath = path;
+    lastFallbacks = fallbacks;
+    hadD3DFrame = hasD3DFrame;
     return true;
 }
 
@@ -119,9 +129,9 @@ void appendMediaDiagnostics(char* out, int outBytes)
     // subtype values are GUID::Data1 of the negotiated video media types; RGB32 is 0x16,
     // NV12 is 0x3231564E, H264 is 0x34363248. Enough to tell "we got RGB32 out of the
     // Video Processor" from "the transform never engaged" on device.
-    // Apotheosis: dxva reports the MAIN path; the opt-in protected reader is a separate
-    // experiment. Even probe=1 (GPU frame) does not make ordinary playback hardware.
-    const char* dxvaText = "sw";
+    // Apotheosis: dxva names the MAIN reader configuration. d3d-rgb is the opt-in
+    // protected manager/XVP path, not a claim about hardware execution or throughput.
+    const char* dxvaText = WebCore::WinUWPMediaDiagnostics::mainReaderPath();
     std::snprintf(out, static_cast<size_t>(outBytes),
         "media readers=%u frames=%llu/%llu pcm=%llu/%llu/%llu q=%d@%dHz/%dch"
         " native=0x%X out=0x%X dxva=%s err=0x%08lX at=%s"
@@ -129,7 +139,8 @@ void appendMediaDiagnostics(char* out, int outBytes)
         " cap=%d qpush=%llu qcons=%llu qdrop=%llu und=%llu cpush=%llu phase=%d"
         " dxvaprof=%u dxvafl=0x%04X h264=%d"
         " probe=%d phr=0x%08lX pat=%s preads=%u psize=%ux%u pbind=0x%X"
-        " mt=%d mt11=0x%08lX mt10=0x%08lX",
+        " mt=%d mt11=0x%08lX mt10=0x%08lX"
+        " dframes=%llu vcopy=%llu/%llu/%llu fb=%u fhr=0x%08lX fat=%s",
         WebCore::WinUWPMediaDiagnostics::startedSourceReaders(),
         WebCore::WinUWPMediaDiagnostics::framesDecoded(),
         WebCore::WinUWPMediaDiagnostics::framesPresented(),
@@ -177,7 +188,14 @@ void appendMediaDiagnostics(char* out, int outBytes)
         WebCore::WinUWPMediaDiagnostics::dxvaProbeBind(),
         WebCore::WinUWPMediaDiagnostics::dxvaMultithread(),
         static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::dxvaMultithread11Hr()),
-        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::dxvaMultithread10Hr()));
+        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::dxvaMultithread10Hr()),
+        WebCore::WinUWPMediaDiagnostics::d3dRGBFrames(),
+        WebCore::WinUWPMediaDiagnostics::videoCopyFrames(),
+        WebCore::WinUWPMediaDiagnostics::videoCopyMicroseconds(),
+        WebCore::WinUWPMediaDiagnostics::videoCopyMaxMicroseconds(),
+        WebCore::WinUWPMediaDiagnostics::d3dFallbacks(),
+        static_cast<unsigned long>(WebCore::WinUWPMediaDiagnostics::d3dFallbackHr()),
+        WebCore::WinUWPMediaDiagnostics::d3dFallbackSite() ? WebCore::WinUWPMediaDiagnostics::d3dFallbackSite() : "-");
 }
 
 } // namespace WebCorePort

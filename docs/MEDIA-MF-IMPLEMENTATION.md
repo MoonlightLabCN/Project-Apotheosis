@@ -864,3 +864,51 @@ was checked for version 0.8.0.7, ARMNT PE machine, packaged/build executable ide
 signature entry, and new probe markers. `DXVA-Test-0.8.0.7.zip` is beside it, with
 self-contained HTTP fixtures and instructions. See handoff §16.4 for hashes, logs and
 the Ninja cache workaround. Device results are still pending.
+
+Device update, 2026-10-23: 0.8.0.7 is installed on the Lumia 950 (15254.603).
+A fixed-src `dxva1080.html` triggered the probe; the user reports picture and sound,
+with severe stutter on the still-software main path. The independent NV12 probe
+returned a GPU texture on its FIRST read: `probe=1 phr=0 pat=probe-gpu-frame preads=1
+psize=1920x1088 pbind=0x600 mt=11 mt11=0`. This overturns the earlier DXVA dead-end
+verdict. It does not establish causality without a matched unprotected control or
+prove sustained hardware playback/power savings. Raw evidence is in
+`crash/hwdecode-20261023-0.8.0.7/confirmed1080-*`; see handoff §16.5.
+0.8.0.8 is preparing a separate RGB32/advanced-XVP CPU-readback probe before changing
+the main reader; the fallback and audio graph remain intact.
+
+0.8.0.8 was built and installed at 01:04:54 (launch 200). The user opened the RGB
+probe page and then stopped testing to sleep. The captured `rgb-confirmed-*` evidence
+still contains the earlier NV12 `probe=1`, unchanged while readers rose from 1 to 2.
+The process-wide once gate can consume the probe before the RGB page is loaded.
+RGB readback is therefore UNVERIFIED; it is neither a success nor a conversion failure.
+Next round needs a proven fresh PID with the RGB page as its first probe (or separate
+once gates/skip diagnostics), before any main-reader integration. See handoff §16.7.
+
+Device update, 2026-10-23 23:38: a verified fresh process (PID 2840) on the phone's
+new IP 192.168.3.66 loaded the RGB page as its first probe. The user confirmed opening
+it and waiting 20 s. The first read succeeded with `probe=4 phr=0
+pat=probe-rgb-readable preads=1 psize=1920x1080 pbind=0x28 mt=11`.
+The protected D3D manager + advanced-VP + RGB32 configuration therefore produced a
+CPU-readable first buffer (bounds checked, first/last bytes read, unlocked).
+Raw evidence: `crash/hwdecode-20261023-2337-rgb/rgb-result-*`; see handoff §16.8.
+This supersedes the previous UNVERIFIED status. It does not validate full-frame
+color, sustained decode/readback throughput or power savings. Main playback remains
+`dxva=sw`; page beacons were paused and no new playback-quality claim was obtained.
+
+0.8.0.9 adds an explicit main-reader URL fragment `#apotheosis-dxva-play`: protected
+D3D manager + advanced VP + the minimal RGB32 request verified by the probe. Ordinary
+URLs keep baseline software negotiation. Device/manager/reader live on the decode
+thread; returned setup/negotiation/readback errors reopen software once, with the
+existing seek resetting PCM/frame/clock state. Synchronous MF stalls still have no
+timeout guarantee. AudioGraph output-node/connection code is unchanged.
+`dxva=d3d-rgb` labels configuration, not proven hardware execution; `dframes`,
+`vcopy=count/total-us/max-us` and `fb/fhr/fat` expose readback and fallback evidence.
+Full-frame bounds are checked before publishing. See handoff §16.9 for scope/units.
+
+ARM32 compile, driver link and harness packaging passed. The isolated
+`build-clang-gpu-hwdecode-main/` libraries are selected via existing EngineBuildDir /
+DriverDir build parameters, leaving the shared baseline used by the other UX agent
+untouched. 0.8.0.9 appx: 56,644,996 bytes, SHA-256
+`b2c21496087e72c39977f6fe8821ad4cafc0985e554242b866d1ab8208a5c5a1`.
+Continuous on-device playback, color/orientation, throughput and software regression
+remain pending; compare dxva-play.html and dxva-soft.html after tapping Play.

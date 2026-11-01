@@ -7,8 +7,8 @@ WebKit tree used by Project Apotheosis, against the upstream tag.
 
 - Base: `webkitgtk-2.54.0`
 - Base commit: `cef114f523d3bd389936cbc7ec2b13e5436d63a0` (tag), `5220e80b97` (release commit)
-- Files changed: 167 under `Source/` (17 new files)
-- Diff: 13703 insertions and 108 deletions
+- Files changed: 180 under `Source/` (snapshot refreshed 2026-11-01)
+- Diff: 16449 insertions and 112 deletions
 
 The patch contains the ARM32 Windows 10 Mobile / UWP adaptations used by the
 `gpu-path1` development line. It is intentionally a source diff rather than a
@@ -406,3 +406,15 @@ This is the source artifact requested in
 ## 2026-10-07 ARM32 PutByVal follow-up
 
 The isolated r9/DataIC register-conflict fix and this investigation's diagnostic increments are archived in [patches/README-JIT-2026-10-07.md](patches/README-JIT-2026-10-07.md). This follow-up has not been folded into the complete patch above. JSC compilation passed; repaired-device validation remains pending. See the [root-cause evidence](docs/JIT-ARM32-R9-ROOT-CAUSE-2026-10-07.md).
+
+## 2026-11-01 source preservation
+
+The complete patch was regenerated from the current source files against release
+commit `5220e80b97a253c60ed899361654142ab5021998`. It includes the current
+Media Foundation/D3D RGB playback work, platform changes, and newly added source
+files. Preprocessor scratch output and build products are excluded. A temporary
+Git index was used: the original WebKit index (including its existing unresolved
+index entries) was preserved byte for byte. No conflict markers were found in
+the selected working files, and `git apply --reverse --check` passed against the
+working source tree. This checks patch completeness against the local files; it
+is not a new build or device validation.

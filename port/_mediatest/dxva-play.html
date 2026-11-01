@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>D3D RGB playback</title></head>
+<body style="margin:0;background:#101418;color:white;font:16px sans-serif">
+<p>D3D manager + advanced VP playback. Tap Play, keep screen on for 30 seconds.</p>
+<video id="v" src="test-1080p.mp4#apotheosis-dxva-play" controls playsinline width="320"></video>
+<p><button id="play" style="padding:16px;font-size:20px">Play</button>
+<a href="dxva-soft.html" style="color:#8cf">Software comparison</a></p>
+<pre id="state" style="white-space:pre-wrap"></pre>
+<script>
+var v = document.getElementById('v');
+function snap(tag) {
+  var text = 'mode=d3d~t=' + tag + '~rs=' + v.readyState + '~ns=' + v.networkState
+    + '~ct=' + v.currentTime.toFixed(3) + '~wh=' + v.videoWidth + 'x' + v.videoHeight
+    + '~paused=' + v.paused + '~error=' + (v.error ? v.error.code : '-');
+  document.getElementById('state').textContent = text;
+  var img = new Image(); img.src = 'dxva-play-' + text + '.png';
+}
+document.getElementById('play').onclick = function () {
+  var promise = v.play();
+  if (promise && promise.catch) promise.catch(function () { snap('play-rejected'); });
+};
+['loadstart','loadedmetadata','loadeddata','canplay','playing','error','ended','waiting','pause'].forEach(function (name) {
+  v.addEventListener(name, function () { snap(name); });
+});
+snap('boot');
+setInterval(function () { snap('tick'); }, 5000);
+</script></body></html>
